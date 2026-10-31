@@ -36,6 +36,8 @@ pub struct AlignersModule {
     selected: Option<&'static str>,
     /// Values of the staging limit sliders (placeholder page).
     staging_ui: StagingSettings,
+    /// Study base settings being edited in the inspector.
+    study_ui: inspector::StudyEdit,
 }
 
 impl Default for AlignersModule {
@@ -51,6 +53,7 @@ impl AlignersModule {
         Self {
             selected: None,
             staging_ui: StagingSettings::default(),
+            study_ui: None,
         }
     }
 
@@ -126,9 +129,12 @@ impl Module for AlignersModule {
         self.select_entry(id);
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui, _ctx: &mut ModuleCtx<'_>) {
+    fn inspector(&mut self, ui: &mut egui::Ui, ctx: &mut ModuleCtx<'_>) {
         loader();
         inspector::show(ui, self.selected, &mut self.staging_ui);
+        if inspector::is_study_models(self.selected) {
+            inspector::study_settings(ui, ctx, &mut self.study_ui);
+        }
     }
 
     fn scene(&self, _state: &CaseState) -> Vec<SceneItem> {

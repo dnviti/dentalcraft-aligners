@@ -138,6 +138,63 @@ impl Default for TrimParams {
     }
 }
 
+/// Style of the orthodontic study-model bases (B6,
+/// `docs/plan/B6-STUDY-MODEL-TRIMMING.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudyBaseStyle {
+    /// European: walls at 90° to the base, 10 mm base under the anatomy.
+    #[default]
+    European,
+    /// American Board of Orthodontics: 70 mm pair, 65°/115° heptagon.
+    Abo,
+}
+
+/// Main parameters of the study-model bases; the command
+/// `aligners.output.study-models` starts from them (its other parameters
+/// keep the defaults of the specification).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StudyBaseSettings {
+    /// Style of the base.
+    pub style: StudyBaseStyle,
+    /// ABO: height of the articulated pair, base to base (mm).
+    pub total_height_mm: f64,
+    /// ABO: fraction of each model taken by the art portion.
+    pub art_fraction: f64,
+    /// European: thickness of the base under the anatomy (mm).
+    pub base_thickness_mm: f64,
+    /// Clearance of the base plane under the vault and the deepest sulcus (mm).
+    pub m_base_mm: f64,
+    /// Distance of the back plane behind the most distal anatomy (mm).
+    pub back_margin_mm: f64,
+    /// ABO: angle of the side cuts to the back line (degrees).
+    pub side_angle_deg: f64,
+    /// Interior angle of the heels with the back plane (degrees).
+    pub heel_angle_deg: f64,
+    /// ABO: side cuts outside the deepest sulcus (mm).
+    pub side_clear_mm: f64,
+    /// European: walls outside the vestibule (mm).
+    pub vestibule_clear_mm: f64,
+}
+
+impl Default for StudyBaseSettings {
+    fn default() -> Self {
+        Self {
+            style: StudyBaseStyle::European,
+            total_height_mm: 70.0,
+            art_fraction: 1.0 / 3.0,
+            base_thickness_mm: 10.0,
+            m_base_mm: 3.0,
+            back_margin_mm: 2.0,
+            side_angle_deg: 65.0,
+            heel_angle_deg: 115.0,
+            side_clear_mm: 2.5,
+            vestibule_clear_mm: 3.0,
+        }
+    }
+}
+
 /// General settings of the module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -152,6 +209,8 @@ pub struct Settings {
     pub shell_thickness_mm: f64,
     /// Internal clearance between tooth and shell (mm).
     pub clearance_mm: f64,
+    /// Study-model bases.
+    pub study_base: StudyBaseSettings,
 }
 
 impl Default for Settings {
@@ -162,6 +221,7 @@ impl Default for Settings {
             wear_hours: 22.0,
             shell_thickness_mm: 1.0,
             clearance_mm: 0.0,
+            study_base: StudyBaseSettings::default(),
         }
     }
 }
@@ -184,5 +244,16 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"interval_days": 7}"#).unwrap();
         assert_eq!(s.interval_days, 7);
         assert_eq!(s.staging, StagingSettings::default());
+        assert_eq!(s.study_base, StudyBaseSettings::default());
+    }
+
+    #[test]
+    fn study_base_defaults_follow_the_specification() {
+        let s: StudyBaseSettings = serde_json::from_str(r#"{"style": "abo"}"#).unwrap();
+        assert_eq!(s.style, StudyBaseStyle::Abo);
+        assert_eq!(s.total_height_mm, 70.0);
+        assert_eq!(s.side_angle_deg, 65.0);
+        assert_eq!(s.heel_angle_deg, 115.0);
+        assert_eq!(StudyBaseSettings::default().style, StudyBaseStyle::European);
     }
 }

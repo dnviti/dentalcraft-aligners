@@ -95,6 +95,7 @@ mod setup;
 mod shell;
 mod staging;
 mod stamp;
+pub(crate) mod study_base;
 mod teeth;
 mod trim;
 mod visits;
@@ -120,6 +121,7 @@ pub fn all() -> Vec<CommandSpec> {
         trim::specs,
         stamp::specs,
         export::specs,
+        study_base::specs,
         visits::specs,
         manual::specs,
         auto::specs,
