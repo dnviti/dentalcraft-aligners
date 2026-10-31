@@ -7,7 +7,9 @@
 //! resistance. The frames are stored in `AlignersState::tooth_frames`
 //! (case coordinates; the pose has its origin at the crown reference point
 //! and the centre of resistance is given in the tooth frame); the measures
-//! are returned. The scans are not modified. It is not a menu leaf: the
+//! (widths, contacts, landmarks) are also kept in
+//! `AlignersState::tooth_geometry` for the diagnosis, and returned. The scans
+//! are not modified. It is not a menu leaf: the
 //! reconstruction leaf also builds the closed crowns, which is a later stage.
 
 use dc_case::{CaseState, ModuleState, ScanRole};
@@ -109,10 +111,14 @@ fn run_frames(
 
         data.tooth_frames
             .retain(|f, _| Arch::of(*f) != arch || out.teeth.contains_key(f));
+        data.tooth_geometry
+            .retain(|f, _| Arch::of(*f) != arch || out.teeth.contains_key(f));
         let mut measures = Map::new();
         for (fdi, tooth) in &out.teeth {
             let tooth = tooth.transformed(&to_case);
             data.tooth_frames.insert(*fdi, teeth::tooth_frame(&tooth));
+            data.tooth_geometry
+                .insert(*fdi, dca_algo::diagnosis::tooth_measures(&tooth));
             measures.insert(
                 fdi.to_string(),
                 serde_json::to_value(&tooth).map_err(|e| CommandError::Failed(e.to_string()))?,

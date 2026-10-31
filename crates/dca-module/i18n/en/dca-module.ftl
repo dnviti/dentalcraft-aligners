@@ -251,6 +251,10 @@ aligners-cmd-teeth-frames-doc = Measures every segmented tooth: the local frame 
 ## ---- commands: diagnosis ----
 
 ## ---- commands: setup ----
+aligners-cmd-diagnosis-space-analysis-doc = Runs the whole diagnosis of the segmented arches from the measured teeth and stores it in the case: the space available between the mesial contacts of the first molars (arc length on a fourth-order polynomial fitted to the teeth, AlHarbi 2008) against the space required (sum of the mesio-distal widths), the Little irregularity index, the largest space between crowns, the Bolton ratios and the CAT-CAT complexity score. Returns the report; negative discrepancy means crowding. Needs the segmentation and the teeth frames. Parameters: arch (all, upper or lower).
+aligners-cmd-diagnosis-little-index-doc = Runs the whole diagnosis (see the space analysis) and returns it with the Little irregularity index (Little 1975): the sum of the five displacements, in the occlusal plane, between the anatomical contact points of the six anterior teeth, with its category. Needs the segmentation and the teeth frames. Parameters: arch (all, upper or lower).
+aligners-cmd-diagnosis-bolton-doc = Runs the whole diagnosis (see the space analysis) and returns it with the Bolton ratios (Bolton 1958): lower over upper mesio-distal widths, anterior (canine to canine, norm 77.2 +- 1.65 %) and overall (first molar to first molar, norm 91.3 +- 1.91 %). Needs both arches to be measured. Parameters: arch (all, upper or lower).
+aligners-cmd-diagnosis-complexity-doc = Runs the whole diagnosis (see the space analysis) and returns it with the complexity score: the CAT-CAT model-analysis items that the scan gives (crowding, rotations of premolars and lateral incisors, midline deviation, largest diastema; Long 2020) and the difficulty level of the 2025 consensus (Wang 2025). Needs the segmentation and the teeth frames. Parameters: arch (all, upper or lower).
 
 ## ---- commands: staging ----
 
