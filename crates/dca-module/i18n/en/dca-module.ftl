@@ -202,8 +202,14 @@ aligners-desc-output = Files and views of the result.
 aligners-menu-output-export-stl = Export STL per stage
 aligners-desc-output-export-stl = Export the models and the aligners of each stage as STL files.
 
+aligners-menu-output-print-check = Print check
+aligners-desc-output-print-check = Checks that each model and aligner is ready to print: closed, manifold, no self-intersections, minimum wall, fits the build plate.
+
+aligners-menu-output-manifest = Manifest
+aligners-desc-output-manifest = BLAKE3 hashes and sizes of the files of an export, and their verification.
+
 aligners-menu-output-report = Report
-aligners-desc-output-report = Clinical and technical report of the case.
+aligners-desc-output-report = Clinical and technical report of the case, written with the print files, the patient programmes and the manifest of the export.
 
 aligners-menu-output-viewer = Patient viewer & animation
 aligners-desc-output-viewer = Animation of the treatment aligner by aligner, to show to the patient.
@@ -285,3 +291,6 @@ aligners-cmd-schedule-doc = Builds the change calendar of the aligners under ful
 
 ## ---- commands: visits ----
 aligners-cmd-export-doc = Writes the aligners into a directory: the scan of each arch with the teeth at every stage as binary STL (upper_stage_00.stl is the initial situation; the gingiva is not deformed yet), stages.csv with the movement of every tooth at every stage and the dates of the aligner, and visits.ics with the aligner changes of both arches as an iCalendar file. The case is not modified. Needs the staging. Parameters: dir (required), start_date (YYYY-MM-DD, default today), interval_days, policy (fixed or adaptive), lang (en or it), title.
+aligners-cmd-report-doc = Full export package into a directory, in parallel: the model of each stage and the aligner shells (SUP/INF files in modelli_termoformatura and stampa_resina, passive aligners included), the print check of every mesh (closed, manifold, no self-intersections, minimum wall, fits the build plate), stages.csv, visits.ics, the patient programme and the print manifest of each arch, report.html (diagnosis, set-up, IPR, movements, staging, calendar, files, print check, references; with an occlusal and a frontal render), print_check.json and manifest.json with the BLAKE3 hash of every file. The case is not modified. Needs the staging. Parameters: dir (required), start_date (YYYY-MM-DD, default today), interval_days, policy, lang (en or it: language of the report, the programmes and the calendar), title, workflow (both, thermo or direct), print_check, self_intersections, min_thickness_mm, build_plate_mm, report, embed_renders, threads, generated (YYYY-MM-DD, fixes the date written in the files).
+aligners-cmd-print-check-doc = Checks that the models of some stages are ready to print: closed and manifold surface, consistent orientation, one piece, no self-intersections, no hole through the wall, positive volume, fits the build plate. Writes nothing; the case is not modified. Needs the staging. Parameters: stages (default the first and the last), self_intersections, build_plate_mm.
+aligners-cmd-manifest-doc = Verifies an export folder against its manifest.json (BLAKE3 hash and size of every file, missing and unlisted files), or with verify=false writes a manifest of the files found. Parameters: dir (required), verify.

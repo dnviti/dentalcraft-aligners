@@ -398,6 +398,18 @@ pub(crate) static GROUPS: &[Node] = &[
                 "file-arrow-down",
             ),
             Node::leaf(
+                "aligners.output.print-check",
+                "aligners-menu-output-print-check",
+                "aligners-desc-output-print-check",
+                "check-circle",
+            ),
+            Node::leaf(
+                "aligners.output.manifest",
+                "aligners-menu-output-manifest",
+                "aligners-desc-output-manifest",
+                "list-checks",
+            ),
+            Node::leaf(
                 "aligners.output.report",
                 "aligners-menu-output-report",
                 "aligners-desc-output-report",
