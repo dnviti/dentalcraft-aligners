@@ -208,6 +208,7 @@ fn check(name: &str, k: Option<usize>, params: &Params, thickness_tol: f64) -> f
         teeth: &st.teeth,
         gingiva: &st.gingiva,
         cover: &[],
+        fdis: &[],
     };
     let t = Instant::now();
     let out = shell::run(&input, params, &design, Outputs::ALL).unwrap();
@@ -421,6 +422,7 @@ fn closed_model_matches_openvdb() {
         teeth: &st.teeth,
         gingiva: &st.gingiva,
         cover: &[],
+        fdis: &[],
     };
     let parts = shell::model_parts(&input, shell::BASE_HEIGHT_MM).unwrap();
     let dir = std::env::temp_dir().join(format!("dc_vdb_model_{}", std::process::id()));

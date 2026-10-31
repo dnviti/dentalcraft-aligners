@@ -473,8 +473,14 @@ impl MeshProvider for ShellProvider<'_> {
         let from_arch = dca_algo::frame::rigid_inverse(&to_arch);
         let err = |what: &str, e: &dyn std::fmt::Display| package(what, arch, k, e);
         // the untrimmed shell field, read from the closing field by arithmetic
-        let parts = shell::model_parts(&print.input(&g), self.params.base_height_mm)
-            .map_err(|e| err("model", &e))?;
+        // without the embrasure fills of the model: the trim of a shell over
+        // them left holes through its wall at the margin
+        let input = shell::Input {
+            fdis: &[],
+            ..print.input(&g)
+        };
+        let parts =
+            shell::model_parts(&input, self.params.base_height_mm).map_err(|e| err("model", &e))?;
         let mut closed = shell::closed_grid_for(
             &parts,
             self.params.shell_voxel_mm,
