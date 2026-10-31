@@ -242,6 +242,11 @@ pub struct Input<'a> {
     pub clearance_mm: f64,
     /// Wall thickness of the shell (mm).
     pub thickness_mm: f64,
+    /// Material taken away after the rim is rounded (the occlusal shaping of
+    /// the bite, [`crate::aligner_bite::occlusal::shape_cutter`]): the
+    /// opening of the rim, sized for the full wall, would cut through a
+    /// thinner occlusal wall. `None`: nothing.
+    pub cut: Option<&'a SdfGrid>,
 }
 
 /// The trim line of one tooth, or of the whole arch.
@@ -322,6 +327,7 @@ fn filled(
     rounded: &SdfGrid,
     sharp: &SdfGrid,
     wall: &SdfGrid,
+    cut: Option<&SdfGrid>,
     rho: f64,
 ) -> Result<(TriMesh, usize), TrimError> {
     let mut g = rounded.clone();
@@ -330,6 +336,9 @@ fn filled(
     grown.offset(SHELL_FILL_GROW_MM as f32).map_err(geom)?;
     grown.intersect(wall).map_err(geom)?;
     grown.intersect(&g).map_err(geom)?;
+    if let Some(c) = cut {
+        grown.subtract(c).map_err(geom)?;
+    }
     grown.redistance().map_err(geom)?;
     let mesh = grown.to_mesh().map_err(geom)?;
     Ok(largest_piece(mesh))
@@ -644,11 +653,17 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     // shell again at its print voxel)
     let r = rim_round(wall, params.round_mm)
         .min(((wall - RIM_MIN_WALL_VOXELS * f64::from(input.shell.voxel_size)) / 2.0).max(0.0));
-    let sharp = (r > 0.0).then(|| f.clone());
+    let mut sharp = (r > 0.0).then(|| f.clone());
     if r > 0.0 {
         f.open(r as f32).map_err(geom)?;
     } else {
         f.redistance().map_err(geom)?;
+    }
+    if let Some(c) = input.cut {
+        f.subtract(c).map_err(geom)?;
+        if let Some(s) = &mut sharp {
+            s.subtract(c).map_err(geom)?;
+        }
     }
     let mesh = f.to_mesh().map_err(geom)?;
     if mesh.is_empty() {
@@ -662,7 +677,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     if let Some(sharp) = sharp.filter(|_| genus > 0) {
         // holes the rounded rim opened through a thin web: built again with the fills
         for rho in shell_fills(wall, r) {
-            let (m2, d2) = filled(&f, &sharp, input.shell, rho)?;
+            let (m2, d2) = filled(&f, &sharp, input.shell, input.cut, rho)?;
             let g2 = self::genus(&m2);
             if g2 < genus || (fill.is_some() && g2 == genus) {
                 (mesh, dropped_pieces, genus, fill) = (m2, d2, g2, Some(rho));

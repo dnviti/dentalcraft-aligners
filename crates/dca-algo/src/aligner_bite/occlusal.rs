@@ -27,9 +27,11 @@
 
 use dc_geom::bvh::Bvh;
 use dc_geom::knn::KnnIndex;
+use dc_geom::sdf::{SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
 use dca_model::{BiteClosing, OcclusalMode, OcclusalSettings, Settings, TrimMode, TrimParams};
 use glam::{DMat4, DVec3, Vec3};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use super::{
@@ -783,6 +785,213 @@ pub struct ShapeReport {
     pub measured_thickness_mm: Option<[f64; 2]>,
 }
 
+/// The shaping of [`shape_shell`] changes the aligner of that arch: an
+/// occlusal thickness under the wall, or a grinding of the equilibration.
+pub fn shapes(b: &Bite, is_lower: bool, d: &Design) -> bool {
+    let grind = b
+        .equilibration
+        .as_ref()
+        .map(|e| if is_lower { &e.grind_l } else { &e.grind_u });
+    b.occlusal < d.wall - 1e-6 || grind.is_some_and(|g| g.data.iter().any(|&v| v > 1e-4))
+}
+
+/// The allowed top of the outer surface of an aligner, on the grid of its
+/// occlusal surface (arch coordinates of the bite).
+#[derive(Debug, Clone)]
+pub struct Limit {
+    /// Height of the top at every node; infinite where the aligner is not
+    /// shaped (not over a tooth under it).
+    pub top: Raster<f64>,
+    /// The grid.
+    pub grid: Grid,
+    /// Thinnest occlusal wall allowed (mm), measured from the inner surface.
+    pub min_thickness: f64,
+}
+
+/// The allowed top of [`shape_shell`] from `pin`, points of the inner
+/// (fitting) surface of the shell: the envelope of those points by
+/// ellipsoids of the wall across and the occlusal thickness along `Z`,
+/// minus the grinding (smoothed), never under the minimum thickness; only
+/// over the teeth under the aligner (`covered`).
+pub fn shape_limit(pin: &[DVec3], b: &Bite, is_lower: bool, covered: &[i64], d: &Design) -> Limit {
+    let surf = if is_lower {
+        &b.surfaces.0
+    } else {
+        &b.surfaces.1
+    };
+    let g = &surf.grid;
+    let grind = b
+        .equilibration
+        .as_ref()
+        .map(|e| smooth_grind(if is_lower { &e.grind_l } else { &e.grind_u }));
+    let (wall, occ) = (d.wall, b.occlusal);
+    let tmin = d.occlusal.min_thickness_mm.min(occ);
+    let zo = if occ < wall - 1e-6 {
+        envelope(pin, wall, g, None, Some(occ)).0
+    } else {
+        envelope(pin, wall, g, None, None).0
+    };
+    let zm = envelope(pin, wall, g, None, Some(tmin)).0;
+    let mut h = zo.clone();
+    for k in 0..h.data.len() {
+        let mut v = zo.data[k] - grind.as_ref().map_or(0.0, |g| g.data[k]);
+        if zm.data[k].is_finite() {
+            v = v.max(zm.data[k]);
+        }
+        let on = surf.cov.data[k] && covered.contains(&surf.l.data[k]);
+        h.data[k] = if on && v.is_finite() {
+            v
+        } else {
+            f64::INFINITY
+        };
+    }
+    Limit {
+        top: h,
+        grid: g.clone(),
+        min_thickness: tmin,
+    }
+}
+
+/// The closed solid above the allowed top of `limit` (the material the
+/// shaping removes from a shell): over the cells whose four nodes have a
+/// top, from the top up to `above` mm over the highest of them, side walls
+/// on the boundary. Closed and outward oriented; `None` when no cell is
+/// shaped. Subtracted from the field of the shell, it shapes the aligner
+/// without moving vertices (a closed surface by construction).
+pub fn cut_solid(limit: &Limit, above: f64) -> Option<TriMesh> {
+    // the solid under the mirrored heights, mirrored back
+    let down = limit.top.map(|v| -v);
+    let mut m = height_solid(&down, &limit.grid, above)?;
+    for p in &mut m.positions {
+        p.z = -p.z;
+    }
+    for t in &mut m.tris {
+        t.swap(1, 2);
+    }
+    Some(m)
+}
+
+/// The material above the allowed top is cut this far above it (mm, beyond
+/// the wall).
+const CUT_ABOVE_MM: f64 = 5.0;
+
+/// The shaping of [`shape_shell`] on the distance field of the shell: the
+/// solid to subtract from it, the solid above the allowed top
+/// ([`cut_solid`]) except the material within `clearance` plus the minimum
+/// occlusal thickness of the model (the wall stays at least that thick in
+/// every direction, as [`shape_shell`] pushes its vertices back). No vertex
+/// moves, so the shaped shell is as closed as the field makes it and cannot
+/// fold (moving the outer vertices of a mesh down folded the wall where they
+/// pass their neighbours on the sides).
+///
+/// `closed` is the closed field of the model the shell is the offset of (its
+/// level at `clearance` is the fitting surface; it is used up: shifted), in
+/// the arch coordinates of the shell, and `to_bite` takes them to the arch
+/// coordinates of the bite. The cutter is sampled on the grid of `like` (the
+/// shell field). Nothing is cut over the plan boxes `keep` (bite
+/// coordinates: the ramps, which keep their height). Returns the cutter and
+/// the nodes of the occlusal grid with an allowed top; `None` when nothing
+/// is cut.
+///
+/// # Errors
+/// When a field cannot be sampled or combined.
+#[allow(clippy::too_many_arguments)]
+pub fn shape_cutter(
+    closed: &mut SdfGrid,
+    clearance: f64,
+    b: &Bite,
+    is_lower: bool,
+    covered: &[i64],
+    d: &Design,
+    to_bite: &DMat4,
+    keep: &[(DVec3, DVec3)],
+    like: &SdfGrid,
+) -> Result<Option<(SdfGrid, usize)>, dc_geom::GeomError> {
+    if !shapes(b, is_lower, d) {
+        return Ok(None);
+    }
+    // the fitting surface: the voxels next to the level `clearance` of the
+    // closed field, put on it along the gradient
+    let c = clearance as f32;
+    let half = 0.5 * closed.voxel_size;
+    let mut near: Vec<(Vec3, f32)> = Vec::new();
+    closed.for_each_voxel(|ijk, v| {
+        if (v - c).abs() <= half {
+            near.push((closed.voxel_position(ijk), v - c));
+        }
+    });
+    let pin: Vec<DVec3> = near
+        .par_iter()
+        .map(|&(p, off)| {
+            let g = closed.gradient(p).normalize_or_zero();
+            to_bite.transform_point3((p - off * g).as_dvec3())
+        })
+        .collect();
+    drop(near);
+    let mut limit = shape_limit(&pin, b, is_lower, covered, d);
+    drop(pin);
+    for i in 0..limit.grid.n[0] {
+        for j in 0..limit.grid.n[1] {
+            let [x, y] = limit.grid.node(i, j);
+            if keep
+                .iter()
+                .any(|(lo, hi)| x >= lo.x && x <= hi.x && y >= lo.y && y <= hi.y)
+            {
+                limit.top.data[i * limit.grid.n[1] + j] = f64::INFINITY;
+            }
+        }
+    }
+    let nodes = limit.top.data.iter().filter(|v| v.is_finite()).count();
+    let Some(cut) = cut_solid(&limit, d.wall + CUT_ABOVE_MM) else {
+        return Ok(None);
+    };
+    let from_bite = crate::frame::rigid_inverse(to_bite);
+    let cut = TriMesh::new(
+        cut.positions
+            .iter()
+            .map(|p| from_bite.transform_point3(p.as_dvec3()).as_vec3())
+            .collect(),
+        cut.tris,
+    );
+    let params = SdfParams {
+        voxel_size: like.voxel_size,
+        band: like.band(),
+    };
+    let mut cutter = SdfGrid::from_mesh(&cut, &params)?;
+    drop(cut);
+    closed.shift((clearance + limit.min_thickness) as f32)?;
+    cutter.subtract(closed)?;
+    Ok(Some((cutter, nodes)))
+}
+
+/// [`shape_cutter`] subtracted from `field` (the shell, same coordinates as
+/// `closed`); the nodes shaped (0: the field is as it was).
+///
+/// # Errors
+/// When a field cannot be sampled or combined.
+#[allow(clippy::too_many_arguments)]
+pub fn shape_field(
+    field: &mut SdfGrid,
+    closed: &mut SdfGrid,
+    clearance: f64,
+    b: &Bite,
+    is_lower: bool,
+    covered: &[i64],
+    d: &Design,
+    to_bite: &DMat4,
+    keep: &[(DVec3, DVec3)],
+) -> Result<usize, dc_geom::GeomError> {
+    match shape_cutter(
+        closed, clearance, b, is_lower, covered, d, to_bite, keep, field,
+    )? {
+        Some((cutter, nodes)) => {
+            field.subtract(&cutter)?;
+            Ok(nodes)
+        }
+        None => Ok(0),
+    }
+}
+
 /// The shell of the wall thickness (`shell`, arch coordinates) with the
 /// occlusal thickness and the grinding of its stage: its outer vertices above
 /// the allowed top are lowered onto it (the faces stay: no hole, the inner
@@ -801,28 +1010,13 @@ pub fn shape_shell(
     covered: &[i64],
     d: &Design,
 ) -> (TriMesh, ShapeReport) {
-    let surf = if is_lower {
-        &b.surfaces.0
-    } else {
-        &b.surfaces.1
-    };
-    let g = &surf.grid;
-    let grind = b
-        .equilibration
-        .as_ref()
-        .map(|e| smooth_grind(if is_lower { &e.grind_l } else { &e.grind_u }));
-    let (wall, occ) = (d.wall, b.occlusal);
-    let tmin = d.occlusal.min_thickness_mm.min(occ);
+    let tmin = d.occlusal.min_thickness_mm.min(b.occlusal);
     let mut report = ShapeReport {
         bite: b.report.clone(),
         vertices_lowered: 0,
         measured_thickness_mm: None,
     };
-    if occ >= wall - 1e-6
-        && grind
-            .as_ref()
-            .is_none_or(|g| !g.data.iter().any(|&v| v > 1e-4))
-    {
+    if !shapes(b, is_lower, d) {
         return (shell.clone(), report);
     }
     let vs: Vec<DVec3> = shell.positions.iter().map(|p| p.as_dvec3()).collect();
@@ -849,25 +1043,8 @@ pub fn shape_shell(
         .filter(|(_, i)| **i)
         .map(|(&v, _)| v)
         .collect();
-    let zo = if occ < wall - 1e-6 {
-        envelope(&pin, wall, g, None, Some(occ)).0
-    } else {
-        envelope(&pin, wall, g, None, None).0
-    };
-    let zm = envelope(&pin, wall, g, None, Some(tmin)).0;
-    let mut h = zo.clone();
-    for k in 0..h.data.len() {
-        let mut v = zo.data[k] - grind.as_ref().map_or(0.0, |g| g.data[k]);
-        if zm.data[k].is_finite() {
-            v = v.max(zm.data[k]);
-        }
-        let on = surf.cov.data[k] && covered.contains(&surf.l.data[k]);
-        h.data[k] = if on && v.is_finite() {
-            v
-        } else {
-            f64::INFINITY
-        };
-    }
+    let Limit { top: h, grid, .. } = shape_limit(&pin, b, is_lower, covered, d);
+    let g = &grid;
     let h_big = h.map(|v| if v.is_finite() { v } else { 1e9 });
     let out_idx: Vec<usize> = (0..vs.len())
         .filter(|&i| !inner[i] && n[i].z > UP_NZ)

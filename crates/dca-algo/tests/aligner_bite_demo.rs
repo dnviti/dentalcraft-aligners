@@ -1,7 +1,7 @@
 //! The bite with the aligners worn on the plugin's demo arches in occlusion
 //! (`fixtures/occlusion.json`, upper arch 0.6 mm into the lower one): the
 //! automatic occlusal thickness, the ramps on the surfaces, the shaping of a
-//! shell and the closed envelope solid.
+//! shell (its mesh or its field) and the closed envelope solid.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use dc_geom::sdf::{SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
 use dca_algo::aligner_bite::occlusal::{
-    ArchStage, Bite, Design, bite, contact_points, crown_cells, envelope_solid, model_points,
-    shape_shell,
+    ArchStage, Bite, Design, bite, contact_points, crown_cells, cut_solid, envelope_solid,
+    model_points, shape_field, shape_limit, shape_shell,
 };
 use dca_model::{BiteClosing, OcclusalMode, OcclusalSettings, Settings, TrimParams};
 use glam::{DMat4, DVec3, Vec3};
@@ -366,4 +366,127 @@ fn the_shell_is_lowered_onto_the_occlusal_limit_and_never_touches_the_inner_surf
     assert_eq!(unchanged, shell);
     assert_eq!(rep.vertices_lowered, 0);
     let _ = BTreeMap::<i64, i64>::new();
+}
+
+/// The shaping on the field of the shell: the solid above the occlusal limit
+/// cut away, the wall at least the minimum thickness everywhere, the result
+/// one closed surface that crosses itself nowhere; nothing over a kept box,
+/// nothing at all in the mode of the wall.
+#[test]
+fn the_shell_field_is_cut_at_the_occlusal_limit_without_folding() {
+    let d = demo();
+    let mut o = OcclusalSettings {
+        mode: OcclusalMode::Manual,
+        thickness_mm: 0.6,
+        ..Default::default()
+    };
+    o.closing = BiteClosing::Hinge;
+    let des = design(o);
+    let b = bite(&d.lower, &d.upper, &d.rel, &des, [0, 0]).unwrap();
+    let teeth_all = {
+        let mut pos = Vec::new();
+        let mut tris = Vec::new();
+        for t in &d.lower_teeth {
+            let base = pos.len() as u32;
+            pos.extend_from_slice(&t.positions);
+            tris.extend(t.tris.iter().map(|tr| tr.map(|i| i + base)));
+        }
+        TriMesh::new(pos, tris)
+    };
+    let params = SdfParams {
+        voxel_size: 0.2,
+        band: 2.0,
+    };
+    let model = SdfGrid::from_mesh(&teeth_all, &params).unwrap();
+    let shell_field = model.shell(0.0, 1.0).unwrap();
+    let shell = shell_field.to_mesh().unwrap();
+    let covered = d.lower.covered.clone();
+
+    // the solid above the limit is closed and outward
+    let pin: Vec<DVec3> = shell.positions.iter().map(|p| p.as_dvec3()).collect();
+    let limit = shape_limit(&pin, &b, true, &covered, &des);
+    let cut = cut_solid(&limit, 5.0).expect("a cut");
+    let r = cut.validate();
+    assert!(r.is_watertight() && r.is_manifold(), "{r:?}");
+    let vol: f64 = cut
+        .tris
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|i| cut.positions[i as usize].as_dvec3());
+            a.dot(b.cross(c)) / 6.0
+        })
+        .sum();
+    assert!(vol > 0.0, "{vol}");
+
+    let mut field = shell_field.clone();
+    let mut closed = model.clone();
+    let nodes = shape_field(
+        &mut field,
+        &mut closed,
+        0.0,
+        &b,
+        true,
+        &covered,
+        &des,
+        &DMat4::IDENTITY,
+        &[],
+    )
+    .unwrap();
+    assert!(nodes > 0);
+    let shaped = field.to_mesh().unwrap();
+    let r = shaped.validate();
+    assert!(r.is_watertight() && r.is_manifold(), "{r:?}");
+    assert!(dca_algo::shell::crossing_pairs(&shaped).is_empty());
+    let top = |m: &TriMesh| m.positions.iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    assert!(top(&shaped) < top(&shell) - 0.1, "the top is lowered");
+    // the wall: no vertex of the shaped shell closer to the teeth than the
+    // minimum occlusal thickness, except the fitting surface itself
+    let tmin = des.occlusal.min_thickness_mm.min(b.occlusal) as f32;
+    let thin = shaped
+        .positions
+        .iter()
+        .filter(|p| {
+            let v = model.sample(**p);
+            v > 0.5 * params.voxel_size && v < tmin - params.voxel_size
+        })
+        .count();
+    assert_eq!(thin, 0, "a wall thinner than {tmin} mm");
+    // nothing is cut over a kept box covering the arch
+    let mut kept = shell_field.clone();
+    let big = (DVec3::splat(-1e3), DVec3::splat(1e3));
+    let nodes = shape_field(
+        &mut kept,
+        &mut model.clone(),
+        0.0,
+        &b,
+        true,
+        &covered,
+        &des,
+        &DMat4::IDENTITY,
+        &[big],
+    )
+    .unwrap();
+    assert_eq!(nodes, 0);
+    assert_eq!(kept.to_mesh().unwrap(), shell);
+    // the mode of the wall leaves the field as it is
+    let same = design(OcclusalSettings {
+        mode: OcclusalMode::Same,
+        ..Default::default()
+    });
+    let bs = bite(&d.lower, &d.upper, &d.rel, &same, [0, 0]).unwrap();
+    let mut unchanged = shell_field.clone();
+    let nodes = shape_field(
+        &mut unchanged,
+        &mut model.clone(),
+        0.0,
+        &bs,
+        true,
+        &covered,
+        &same,
+        &DMat4::IDENTITY,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(nodes, 0);
+    assert_eq!(unchanged.to_mesh().unwrap(), shell);
 }

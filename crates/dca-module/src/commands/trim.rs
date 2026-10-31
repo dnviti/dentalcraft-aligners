@@ -262,6 +262,7 @@ fn trim_arch(
         scan_border: &parts.scan_border,
         clearance_mm: clearance,
         thickness_mm: wall,
+        cut: None,
     };
     let done = trim::run(&input, tp).map_err(|e| match e {
         trim::TrimError::Invalid(m) => CommandError::Invalid(format!("{name} arch: {m}")),
