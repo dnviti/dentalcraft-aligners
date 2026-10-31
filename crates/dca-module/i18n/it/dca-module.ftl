@@ -251,6 +251,10 @@ aligners-cmd-teeth-frames-doc = Misura ogni dente segmentato: il sistema di rife
 ## ---- commands: diagnosis ----
 
 ## ---- commands: setup ----
+aligners-cmd-diagnosis-space-analysis-doc = Esegue l'intera diagnosi delle arcate segmentate a partire dai denti misurati e la salva nel caso: lo spazio disponibile tra i contatti mesiali dei primi molari (lunghezza d'arco su un polinomio di quarto grado adattato ai denti, AlHarbi 2008) contro lo spazio richiesto (somma delle larghezze mesio-distali), l'indice di irregolarita di Little, lo spazio maggiore tra le corone, i rapporti di Bolton e il punteggio di complessita CAT-CAT. Restituisce il rapporto; una discrepanza negativa indica affollamento. Richiede la segmentazione e gli assi dei denti. Parametri: arch (all, upper o lower).
+aligners-cmd-diagnosis-little-index-doc = Esegue l'intera diagnosi (vedi analisi dello spazio) e la restituisce con l'indice di irregolarita di Little (Little 1975): la somma dei cinque spostamenti, nel piano occlusale, tra i punti di contatto anatomici dei sei denti anteriori, con la sua categoria. Richiede la segmentazione e gli assi dei denti. Parametri: arch (all, upper o lower).
+aligners-cmd-diagnosis-bolton-doc = Esegue l'intera diagnosi (vedi analisi dello spazio) e la restituisce con i rapporti di Bolton (Bolton 1958): larghezze mesio-distali inferiori su superiori, anteriore (da canino a canino, norma 77,2 +- 1,65 %) e totale (da primo molare a primo molare, norma 91,3 +- 1,91 %). Richiede che entrambe le arcate siano misurate. Parametri: arch (all, upper o lower).
+aligners-cmd-diagnosis-complexity-doc = Esegue l'intera diagnosi (vedi analisi dello spazio) e la restituisce con il punteggio di complessita: le voci CAT-CAT dell'analisi del modello che la scansione fornisce (affollamento, rotazioni di premolari e incisivi laterali, deviazione della linea mediana, diastema maggiore; Long 2020) e il livello di difficolta del consenso 2025 (Wang 2025). Richiede la segmentazione e gli assi dei denti. Parametri: arch (all, upper o lower).
 
 ## ---- commands: staging ----
 
