@@ -125,7 +125,28 @@ pub struct AlignersState {
     pub settings: Settings,
 }
 
-dc_case::impl_module_data!(AlignersState, SCHEMA_VERSION);
+impl dc_case::ModuleData for AlignersState {
+    fn schema_version(&self) -> u32 {
+        SCHEMA_VERSION
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn dc_case::ModuleData> {
+        Box::new(self.clone())
+    }
+    fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+    /// The label blobs are the only blob references in the state (the other
+    /// fields are plain numbers and poses).
+    fn referenced_blobs(&self) -> Vec<BlobRef> {
+        self.labels.values().copied().collect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -184,6 +205,31 @@ mod tests {
         let back: AlignersState = serde_json::from_value(json).unwrap();
         assert_eq!(back, st);
         assert_eq!(st.diagnosis.arches[&ScanRole::Upper].crowding_mm(), 3.5);
+    }
+
+    #[test]
+    fn label_blobs_survive_pruning() {
+        use dc_case::CaseState;
+        use dc_mesh::TriMesh;
+        let mut case = CaseState::default();
+        let labels = case.blobs.insert(TriMesh::new(
+            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y],
+            vec![[0, 1, 2]],
+        ));
+        let garbage = case.blobs.insert(TriMesh::new(
+            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Z],
+            vec![[0, 1, 2]],
+        ));
+        let mut st = AlignersState::default();
+        st.labels.insert(ScanRole::Upper, labels);
+        case.set_module("aligners", ModuleState::new(st));
+        let used = case.referenced_blobs();
+        assert!(used.contains(&labels) && !used.contains(&garbage));
+        // this is what a .dcprj save does
+        let keep = used.iter().copied().collect();
+        case.blobs.retain_only(&keep);
+        assert!(case.blobs.contains(&labels));
+        assert!(!case.blobs.contains(&garbage));
     }
 
     #[test]

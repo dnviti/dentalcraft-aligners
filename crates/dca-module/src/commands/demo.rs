@@ -86,11 +86,7 @@ fn run_demo(
     data.labels.insert(role, labels_ref);
     next.set_module(MODULE_ID, ModuleState::new(data));
     // drop the replaced scan and labels, unless something else still uses them
-    // (the label blobs are listed here: `AlignersState` does not report them)
-    let mut used = next.referenced_blobs();
-    if let Some(d) = next.module_data::<AlignersState>(MODULE_ID) {
-        used.extend(d.labels.values().copied());
-    }
+    let used = next.referenced_blobs();
     let keep = next
         .blobs
         .iter()
