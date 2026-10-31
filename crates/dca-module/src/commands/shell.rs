@@ -208,6 +208,7 @@ impl ArchPrint {
             teeth: &g.teeth,
             gingiva: &g.gum,
             cover: &self.cover,
+            fdis: &g.fdis,
         }
     }
 

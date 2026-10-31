@@ -41,11 +41,16 @@
 //! done in arch coordinates (`+Z` occlusal, [`Input::to_arch`]) so that the
 //! base of the cast is flat on the voxel grid.
 //!
+//! The embrasure under the contact of every two touching neighbouring teeth
+//! is filled ([`embrasure::fills`], `embrasure_fills` of `stage_parts`):
+//! without it the closing joins the crowns at the contact over an open
+//! embrasure, a tunnel through the model.
+//!
 //! Deviations from the plugin (documented, not yet ported): the contact
-//! bridges and embrasure fills of `stage_parts` (`contact_bridges`,
-//! `embrasure_fills`) and `_tuck_below_margin` (the closed tooth drawn under
-//! the gingiva below its margin); the closing still fills every contact
-//! closer than twice [`BLOCKOUT_MM`]. The occlusal shaping and the ramps of
+//! bridges of `stage_parts` (`contact_bridges`, the narrow slots between
+//! teeth that do not touch) and `_tuck_below_margin` (the closed tooth drawn
+//! under the gingiva below its margin); the closing still fills every
+//! contact closer than twice [`BLOCKOUT_MM`]. The occlusal shaping and the ramps of
 //! `aligner_solid` belong to the bite stages, the trim to B5.
 //!
 //! Outputs are generated on demand by [`run`] (nothing is cached in the
@@ -54,6 +59,7 @@
 //! inputs that [`stage_teeth`] places.
 
 pub mod cast;
+pub mod embrasure;
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
@@ -261,6 +267,10 @@ pub struct Input<'a> {
     /// Per face of `gingiva`: under the crowns (the membrane, no prism);
     /// empty when none.
     pub cover: &'a [bool],
+    /// Tooth number of every tooth of `teeth` (same order): the embrasures
+    /// under the contacts of neighbouring teeth are filled
+    /// ([`embrasure::fills`]); empty: no fill.
+    pub fdis: &'a [Fdi],
 }
 
 /// What [`run`] measured.
@@ -397,6 +407,22 @@ pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, Shell
     append(&mut pv.iter().map(|p| p.as_vec3()), &pt);
     for (pts, mesh) in teeth.iter().zip(input.teeth) {
         append(&mut pts.iter().map(|p| p.as_vec3()), &mesh.tris);
+    }
+    if input.fdis.len() == input.teeth.len() {
+        let placed: Vec<embrasure::Tooth<'_>> = input
+            .fdis
+            .iter()
+            .zip(&teeth)
+            .zip(input.teeth)
+            .map(|((&fdi, points), mesh)| embrasure::Tooth {
+                fdi,
+                points,
+                tris: &mesh.tris,
+            })
+            .collect();
+        for (v, t) in embrasure::fills(&placed, &vg) {
+            append(&mut v.iter().map(|p| p.as_vec3()), &t);
+        }
     }
     Ok(TriMesh::new(positions, tris))
 }
