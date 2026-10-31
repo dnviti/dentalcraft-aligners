@@ -40,14 +40,24 @@
 //!   margin it falls back to Scalloped, as the plugin does, and
 //!   [`Output::fallback`] says so.
 //!
-//! Not ported yet (documented deviations): the bars of the equator border over a space between two caps, the fills
-//! and slots that close a hole the rounded rim opens (`shell_fills`,
-//! `_plug_holes`, `_window_cuts`: the genus of the result is reported
-//! instead) and the checks of the panel (labial cover, removal). The rim
-//! radius is limited so that the opening leaves at least
-//! [`RIM_MIN_WALL_VOXELS`] voxels of wall (the plugin rebuilds a shell with
-//! a hole at its print voxel instead). The shell
-//! is the caller's: the plugin blocks out 0.8 mm for the smooth border
+//! Rim: the shell is opened by the rim radius (the rounded rim of
+//! `_sdf_group`); when that opens a hole through a thin web of the wall the
+//! shell is built again with the fills of `shell_fills` (a closing of the
+//! rounded shell inside the sharp cut grown in the wall), kept when they
+//! leave fewer holes.
+//!
+//! Not ported yet (documented deviations): the bars of the equator border
+//! over a space between two caps, the fill that also grows the outer side
+//! (`fill_out`), the plugs and slots of the holes still left
+//! (`_plug_holes`, `_window_cuts`: the genus of the result is reported
+//! instead), the ridge of the gingiva between the grid nodes and the
+//! distance from the visible crown in the equator field, and the checks of
+//! the panel (labial cover, removal). The crowns are thinned for the
+//! insertion paths on cells of the arch coordinates (the plugin: of the
+//! tooth frame). The rim radius is limited so that the opening leaves at
+//! least [`RIM_MIN_WALL_VOXELS`] voxels of wall (the plugin rebuilds a
+//! shell with a hole at its print voxel instead). The shell is the
+//! caller's: the plugin blocks out 0.8 mm for the smooth border
 //! (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the covered crowns; here
 //! the reach is measured from [`Input::crowns`].
 
@@ -82,6 +92,16 @@ pub const RIM_ROUND_WALL: f64 = 0.3;
 /// ... at most this (`aligner.BLOCKOUT_MM`: the fitting surface, blocked out
 /// as much, is not touched).
 pub const RIM_ROUND_MAX_MM: f64 = 0.3;
+/// A shell whose rounded rim leaves a hole through the wall is built again
+/// with this fill radius ...
+pub const SHELL_FILL_MM: f64 = 0.5;
+/// ... the sharp cut first grown by this inside the wall ...
+pub const SHELL_FILL_GROW_MM: f64 = 0.15;
+/// ... and, if a hole is still left, with this radius ...
+pub const SHELL_FILL_WIDE_MM: f64 = 0.75;
+/// ... only where the wall is less than this thicker than the parts the
+/// rounding takes.
+pub const SHELL_FILL_MARGIN_MM: f64 = 0.4;
 /// The rounded rim never erodes the wall below this many voxels.
 pub const RIM_MIN_WALL_VOXELS: f64 = 1.5;
 /// STRAIGHT, SCALLOPED: grid of the trim surface (mm, `trim_cutter`).
@@ -255,6 +275,9 @@ pub struct Output {
     /// Radius of the rounded rim used (mm; at most half the wall less
     /// [`RIM_MIN_WALL_VOXELS`] voxels).
     pub round_mm: f64,
+    /// The fill radius the shell was built again with to close the holes
+    /// the rounded rim opened (`None`: not needed or not better).
+    pub fill_mm: Option<f64>,
     /// Pieces of the trimmed shell dropped (only the largest is kept).
     pub dropped_pieces: usize,
     /// Holes through the wall left (genus of the surface; 0 expected).
@@ -278,6 +301,38 @@ impl Output {
         (1.0 - tx) * ((1.0 - ty) * at(i, j) + ty * at(i, j + 1))
             + tx * ((1.0 - ty) * at(i + 1, j) + ty * at(i + 1, j + 1))
     }
+}
+
+/// The fill radii tried in turn on a trimmed shell whose rounded rim
+/// opened a hole through its wall (`aligner.shell_fills`): none when the
+/// wall keeps [`SHELL_FILL_MARGIN_MM`] beyond the parts the rounding takes.
+pub fn shell_fills(wall: f64, r: f64) -> Vec<f64> {
+    if r <= 0.0 || ((wall - 2.0 * r) * 1e6).round() / 1e6 >= SHELL_FILL_MARGIN_MM {
+        return Vec::new();
+    }
+    vec![SHELL_FILL_MM, SHELL_FILL_WIDE_MM]
+}
+
+/// The rounded shell `rounded` with its holes and necks closed again
+/// (`_sdf_group`, `shell['fill']`): a closing of it by `rho` intersected
+/// with the sharp cut grown by [`SHELL_FILL_GROW_MM`] inside the wall of the
+/// untrimmed shell, never into the fitting surface. The mesh and the pieces
+/// dropped.
+fn filled(
+    rounded: &SdfGrid,
+    sharp: &SdfGrid,
+    wall: &SdfGrid,
+    rho: f64,
+) -> Result<(TriMesh, usize), TrimError> {
+    let mut g = rounded.clone();
+    g.close(rho as f32).map_err(geom)?;
+    let mut grown = sharp.clone();
+    grown.offset(SHELL_FILL_GROW_MM as f32).map_err(geom)?;
+    grown.intersect(wall).map_err(geom)?;
+    grown.intersect(&g).map_err(geom)?;
+    grown.redistance().map_err(geom)?;
+    let mesh = grown.to_mesh().map_err(geom)?;
+    Ok(largest_piece(mesh))
 }
 
 /// Radius of the rounded rim for the wall (`aligner.rim_round`).
@@ -589,6 +644,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     // shell again at its print voxel)
     let r = rim_round(wall, params.round_mm)
         .min(((wall - RIM_MIN_WALL_VOXELS * f64::from(input.shell.voxel_size)) / 2.0).max(0.0));
+    let sharp = (r > 0.0).then(|| f.clone());
     if r > 0.0 {
         f.open(r as f32).map_err(geom)?;
     } else {
@@ -600,8 +656,22 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
             "nothing of the shell is left above the trim line".into(),
         ));
     }
-    let (mesh, dropped_pieces) = largest_piece(mesh);
-    let genus = genus(&mesh);
+    let (mut mesh, mut dropped_pieces) = largest_piece(mesh);
+    let mut genus = genus(&mesh);
+    let mut fill = None;
+    if let Some(sharp) = sharp.filter(|_| genus > 0) {
+        // holes the rounded rim opened through a thin web: built again with the fills
+        for rho in shell_fills(wall, r) {
+            let (m2, d2) = filled(&f, &sharp, input.shell, rho)?;
+            let g2 = self::genus(&m2);
+            if g2 < genus || (fill.is_some() && g2 == genus) {
+                (mesh, dropped_pieces, genus, fill) = (m2, d2, g2, Some(rho));
+            }
+            if genus == 0 {
+                break;
+            }
+        }
+    }
     Ok(Output {
         mode,
         fallback,
@@ -610,6 +680,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         surface: (grid, z),
         warp,
         round_mm: r,
+        fill_mm: fill,
         dropped_pieces,
         genus,
     })

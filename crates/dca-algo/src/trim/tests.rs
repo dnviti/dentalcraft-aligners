@@ -170,10 +170,11 @@ fn straight_line_on_the_demo_arch() {
     let t0 = std::time::Instant::now();
     let out = run(&a.input(), &p).unwrap();
     eprintln!(
-        "straight: {} tris, genus {}, dropped {}, {:.1?}",
+        "straight: {} tris, genus {}, dropped {}, fill {:?}, {:.1?}",
         out.mesh.face_count(),
         out.genus,
         out.dropped_pieces,
+        out.fill_mm,
         t0.elapsed()
     );
     check_solid(&out);
@@ -399,4 +400,18 @@ fn smooth_border_on_the_demo_arch() {
     check_solid(&out);
     let m = line::margin_points(&a.teeth, MarginMode::Scalloped, p.extension_mm);
     assert_eq!(out.lines.len(), m.len());
+}
+
+#[test]
+fn fills_only_for_a_thin_wall() {
+    // the 0.5 mm wall rounded by 0.15: 0.2 mm left, the fills are tried
+    assert_eq!(
+        shell_fills(0.5, 0.15),
+        vec![SHELL_FILL_MM, SHELL_FILL_WIDE_MM]
+    );
+    // the 1.0 mm wall rounded by 0.3: 0.4 mm left, no fill
+    assert!(shell_fills(1.0, 0.3).is_empty());
+    assert!(shell_fills(0.5, 0.0).is_empty());
+    assert_eq!(rim_round(0.6, None), 0.18);
+    assert_eq!(rim_round(1.5, None), 0.3);
 }
