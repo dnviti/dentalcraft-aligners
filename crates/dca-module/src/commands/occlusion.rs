@@ -1,8 +1,353 @@
 //! Commands of the `occlusion` stage (`dca_algo::occlusion`).
+//!
+//! * `aligners.occlusion.virtual-bite` puts the upper arch in occlusion on
+//!   the lower one when no bite scan is available (estimated occlusion:
+//!   midlines, overjet and Class I, maximum intercuspation without
+//!   interpenetration). The upper scan, its labels, seeds and tooth frames
+//!   move rigidly in the case; the lower arch stays in place.
+//! * `aligners.occlusion.contact-map` measures the occlusal contacts of the
+//!   relation in the case: the signed distance of every crown vertex to the
+//!   antagonist crowns, the teeth in contact and the deepest
+//!   interpenetration. The case is not modified (the app colours the map).
+//!
+//! Both need the two arches segmented (labels) with their seeds.
 
-use dc_module_api::CommandSpec;
+use dc_case::{BlobRef, CaseState, ModuleState, Pose, ScanRole};
+use dc_command::{CommandError, JobCtx};
+use dc_mesh::TriMesh;
+use dc_module_api::{CommandOutput, CommandSpec};
+use dca_algo::anatomy::Arch;
+use dca_algo::occlusion::{self, ArchModel};
+use dca_model::{AlignersState, MODULE_ID};
+use glam::{DMat3, DMat4, DQuat};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
-    Vec::new()
+    vec![
+        stage_command! {
+            id: "aligners.occlusion.virtual-bite",
+            label: "aligners-menu-occlusion-virtual-bite",
+            doc: "aligners-cmd-occlusion-virtual-bite-doc",
+            params: occlusion::Params,
+            run: run_virtual_bite,
+        },
+        stage_command! {
+            id: "aligners.occlusion.contact-map",
+            label: "aligners-menu-occlusion-contact-map",
+            doc: "aligners-cmd-occlusion-contact-map-doc",
+            params: ContactMapParams,
+            run: run_contact_map,
+        },
+    ]
+}
+
+/// Parameters of the contact map (none yet).
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContactMapParams {}
+
+/// The Aligners data of the case (new data when there is none).
+pub(crate) fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandError> {
+    match state.module(MODULE_ID) {
+        None => Ok(AlignersState::default()),
+        Some(m) => m
+            .downcast_ref::<AlignersState>()
+            .cloned()
+            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned())),
+    }
+}
+
+fn arch_name(arch: Arch) -> &'static str {
+    if arch.is_upper() { "upper" } else { "lower" }
+}
+
+/// The labelled scan of an arch as an [`ArchModel`].
+pub(crate) fn arch_model(
+    state: &CaseState,
+    data: &AlignersState,
+    arch: Arch,
+) -> Result<ArchModel, CommandError> {
+    let role = arch.role();
+    let (Some(scan), Some(labels_ref)) = (state.case.scan(role), data.labels.get(&role)) else {
+        return Err(CommandError::Invalid(format!(
+            "the {} arch has no segmented scan: both arches must be segmented",
+            arch_name(arch)
+        )));
+    };
+    let mesh = state.blobs.require(&scan.mesh)?;
+    let labelled = state.blobs.require(labels_ref)?;
+    let labels = labelled
+        .vertex_labels
+        .as_ref()
+        .filter(|l| l.len() == mesh.vertex_count())
+        .ok_or_else(|| {
+            CommandError::Invalid(format!(
+                "the {} labels do not match the scan",
+                arch_name(arch)
+            ))
+        })?;
+    let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+    ArchModel::new(arch, &vertices, &mesh.tris, labels, &data.seeds)
+        .map_err(|e| CommandError::Invalid(format!("{} arch: {e}", arch_name(arch))))
+}
+
+/// `mesh` moved rigidly by `delta` (normals turned with it).
+pub(crate) fn moved_mesh(mesh: &TriMesh, delta: &DMat4) -> TriMesh {
+    let mut out = mesh.clone();
+    out.positions = occlusion::transform_positions(&mesh.positions, delta);
+    let r = DMat3::from_mat4(*delta);
+    if let Some(n) = &mut out.normals {
+        for v in n.iter_mut() {
+            *v = (r * v.as_dvec3()).normalize_or_zero().as_vec3();
+        }
+    }
+    out
+}
+
+/// Pose of a rigid 4x4 matrix.
+pub(crate) fn pose_of(m: &DMat4) -> Pose {
+    let r = DMat3::from_mat4(*m);
+    Pose::new(m.w_axis.truncate(), DQuat::from_mat3(&r).normalize())
+}
+
+/// Moves the scans with role `role`, in order, by `deltas` (one move per
+/// scan; scans beyond the moves stay) in `next`; returns the replaced blobs.
+fn move_scans(next: &mut CaseState, role: ScanRole, deltas: &[DMat4]) -> Vec<BlobRef> {
+    let mut stale = Vec::new();
+    let mut k = 0;
+    for i in 0..next.case.scans.len() {
+        if next.case.scans[i].role != role || k >= deltas.len() {
+            continue;
+        }
+        let old = next.case.scans[i].mesh;
+        if let Some(mesh) = next.blobs.get(&old).cloned() {
+            let r = next.blobs.insert(moved_mesh(&mesh, &deltas[k]));
+            next.case.scans[i].mesh = r;
+            stale.push(old);
+        }
+        k += 1;
+    }
+    stale
+}
+
+/// Moves the scan of `arch` with its labels, seeds and tooth frames by the
+/// case-coordinate rigid move `delta`, and moves the scans of the bite
+/// (role `Bite`, in order) by `bite_deltas`. Unused blobs are dropped.
+pub(crate) fn move_arch(
+    state: &CaseState,
+    mut data: AlignersState,
+    arch: Arch,
+    delta: &DMat4,
+    bite_deltas: &[DMat4],
+) -> CaseState {
+    let mut next = state.clone();
+    let mut stale = move_scans(&mut next, arch.role(), std::slice::from_ref(delta));
+    stale.extend(move_scans(&mut next, ScanRole::Bite, bite_deltas));
+    if let Some(old) = data.labels.get(&arch.role()).copied()
+        && let Some(mesh) = next.blobs.get(&old).cloned()
+    {
+        let r = next.blobs.insert(moved_mesh(&mesh, delta));
+        data.labels.insert(arch.role(), r);
+        stale.push(old);
+    }
+    for s in data.seeds.iter_mut().filter(|s| Arch::of(s.fdi) == arch) {
+        s.position = delta.transform_point3(s.position);
+    }
+    let pose = pose_of(delta);
+    for (_, f) in data
+        .tooth_frames
+        .iter_mut()
+        .filter(|(f, _)| Arch::of(**f) == arch)
+    {
+        f.pose = pose.compose(&f.pose);
+    }
+    next.set_module(MODULE_ID, ModuleState::new(data));
+    let used = next.referenced_blobs();
+    let keep = next
+        .blobs
+        .iter()
+        .map(|(r, _)| *r)
+        .filter(|r| used.contains(r) || !stale.contains(r))
+        .collect();
+    next.blobs.retain_only(&keep);
+    next
+}
+
+/// Rigid move as JSON: translation (mm) and rotation (degrees).
+pub(crate) fn move_json(m: &DMat4) -> Value {
+    let pose = pose_of(m);
+    json!({
+        "translation_mm": [m.w_axis.x, m.w_axis.y, m.w_axis.z],
+        "rotation_deg": dca_algo::frame::rotation_degrees(&pose),
+    })
+}
+
+fn run_virtual_bite(
+    state: &CaseState,
+    params: occlusion::Params,
+    ctx: &JobCtx,
+) -> Result<CommandOutput, CommandError> {
+    ctx.check_cancelled()?;
+    let data = aligners_data(state)?;
+    let lower = arch_model(state, &data, Arch::Lower)?;
+    let upper = arch_model(state, &data, Arch::Upper)?;
+    ctx.check_cancelled()?;
+    let was_in_occlusion = occlusion::in_occlusion(&lower.to_case, &upper.to_case);
+    let vb = occlusion::align(&lower, &upper, &params)
+        .map_err(|e| CommandError::Failed(e.to_string()))?;
+    ctx.check_cancelled()?;
+    let next = move_arch(state, data, Arch::Upper, &vb.delta, &[]);
+    let mut out = serde_json::to_value(&vb).map_err(|e| CommandError::Failed(e.to_string()))?;
+    out["source"] = json!("virtual");
+    out["was_in_occlusion"] = json!(was_in_occlusion);
+    out["upper_move"] = move_json(&vb.delta);
+    Ok((next, out))
+}
+
+fn run_contact_map(
+    state: &CaseState,
+    _params: ContactMapParams,
+    ctx: &JobCtx,
+) -> Result<CommandOutput, CommandError> {
+    ctx.check_cancelled()?;
+    let data = aligners_data(state)?;
+    let lower = arch_model(state, &data, Arch::Lower)?;
+    let upper = arch_model(state, &data, Arch::Upper)?;
+    ctx.check_cancelled()?;
+    let map =
+        occlusion::contact_map(&lower, &upper).map_err(|e| CommandError::Failed(e.to_string()))?;
+    let mut out = serde_json::to_value(&map).map_err(|e| CommandError::Failed(e.to_string()))?;
+    out["in_occlusion"] = json!(occlusion::in_occlusion(&lower.to_case, &upper.to_case));
+    out["contact_mm"] = json!(occlusion::CONTACT_MM);
+    Ok((state.clone(), out))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use dc_case::ScanRole;
+
+    pub(crate) fn exec(id: &str, state: &CaseState, params: Value) -> CommandOutput {
+        try_exec(id, state, params).unwrap()
+    }
+
+    pub(crate) fn try_exec(
+        id: &str,
+        state: &CaseState,
+        params: Value,
+    ) -> Result<CommandOutput, CommandError> {
+        crate::commands::find(id)
+            .unwrap_or_else(|| panic!("{id} is not registered"))
+            .execute(state, &params, &JobCtx::detached())
+    }
+
+    /// Lower demo arch (seed 7) and upper demo arch (seed 11), not related.
+    pub(crate) fn two_demo_arches() -> CaseState {
+        let s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({ "arch": "lower" }),
+        )
+        .0;
+        exec("aligners.demo", &s, json!({ "arch": "upper", "seed": 11 })).0
+    }
+
+    #[test]
+    fn the_commands_are_menu_leaves_and_documented() {
+        for id in [
+            "aligners.occlusion.virtual-bite",
+            "aligners.occlusion.contact-map",
+        ] {
+            let spec = crate::commands::find(id).unwrap();
+            assert_eq!(spec.schema()["type"], "object");
+            assert!(crate::tree::find(id).is_some(), "{id}");
+        }
+    }
+
+    #[test]
+    fn both_arches_are_needed() {
+        let lower = exec("aligners.demo", &CaseState::default(), Value::Null).0;
+        for id in [
+            "aligners.occlusion.virtual-bite",
+            "aligners.occlusion.contact-map",
+        ] {
+            let err = try_exec(id, &lower, Value::Null).unwrap_err();
+            assert!(
+                matches!(&err, CommandError::Invalid(m) if m.contains("upper")),
+                "{err}"
+            );
+        }
+        assert!(matches!(
+            try_exec(
+                "aligners.occlusion.virtual-bite",
+                &lower,
+                json!({ "nope": 1 })
+            ),
+            Err(CommandError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn the_virtual_bite_moves_the_upper_arch_into_occlusion() {
+        let state = two_demo_arches();
+        let (next, out) = exec("aligners.occlusion.virtual-bite", &state, Value::Null);
+        assert_eq!(out["source"], "virtual");
+        assert_eq!(out["was_in_occlusion"], false);
+        assert!(out["contacts"].as_u64().unwrap() > 50, "{out}");
+        // the lower scan is untouched, the upper scan, labels and seeds moved together
+        let data0 = state.module_data::<AlignersState>(MODULE_ID).unwrap();
+        let data1 = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert_eq!(
+            state.case.scan(ScanRole::Lower).unwrap().mesh,
+            next.case.scan(ScanRole::Lower).unwrap().mesh
+        );
+        assert_eq!(
+            data0.labels[&ScanRole::Lower],
+            data1.labels[&ScanRole::Lower]
+        );
+        let up = next
+            .mesh(&next.case.scan(ScanRole::Upper).unwrap().mesh)
+            .unwrap();
+        let up_labels = next.mesh(&data1.labels[&ScanRole::Upper]).unwrap();
+        assert_eq!(up.positions, up_labels.positions);
+        assert_ne!(
+            up.positions,
+            state
+                .mesh(&state.case.scan(ScanRole::Upper).unwrap().mesh)
+                .unwrap()
+                .positions
+        );
+        // no stale blob left: two scans and two label meshes
+        assert_eq!(next.blobs.len(), 4);
+        let lower = arch_model(&next, data1, Arch::Lower).unwrap();
+        let upper = arch_model(&next, data1, Arch::Upper).unwrap();
+        assert!(occlusion::in_occlusion(&lower.to_case, &upper.to_case));
+        // the contact map of the new relation sees contacts and no deep interpenetration
+        let (same, map) = exec("aligners.occlusion.contact-map", &next, Value::Null);
+        // the contact map does not modify the case
+        assert_eq!(same.case, next.case);
+        assert_eq!(same.blobs.len(), next.blobs.len());
+        assert_eq!(map["in_occlusion"], true);
+        assert!(map["penetration_mm"].as_f64().unwrap() < 0.1, "{map}");
+        assert!(
+            !map["lower"]["teeth_in_contact"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !map["upper"]["teeth_in_contact"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        // a second virtual bite starts from the occlusion and stays close to it
+        let (_, out2) = exec("aligners.occlusion.virtual-bite", &next, Value::Null);
+        assert_eq!(out2["was_in_occlusion"], true);
+        let d = &out2["upper_move"];
+        assert!(d["rotation_deg"].as_f64().unwrap() < 0.5, "{out2}");
+    }
 }
