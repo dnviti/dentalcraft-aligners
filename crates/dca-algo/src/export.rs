@@ -1,11 +1,8 @@
-//! Export: STL files per stage, the table of stages and the change calendar.
+//! Export: STL files per stage, the table of stages and the change calendar
+//! (part 1, [`run`]), and the full package with the print check, the
+//! manifest, the report and the patient programmes ([`package::run`]).
 //!
-//! This is the first slice of the export (port plan B3.4); the print check
-//! (closed solid, minimum wall), the shells, the manifest and the report
-//! (`ortho_aligner/case_export.py`, `export_parallel.py`, `printcheck.py`,
-//! `report.py`) come with WP32.
-//!
-//! What it writes into the target directory:
+//! Part 1 (port plan B3.4) writes into the target directory:
 //!
 //! * `<arch>_stage_<NN>.stl` (`upper_stage_00.stl`, ...): the scan of the arch
 //!   with the teeth at stage `NN` (0 is the initial situation), binary STL
@@ -20,6 +17,19 @@
 //! The deformed scan moves the vertices labelled with a tooth by the rigid
 //! transform of that tooth at the stage ([`staging::world_delta`]); the
 //! gingiva vertices stay where they are.
+//!
+//! The full package (port plan B4, `ortho_aligner/case_export.py`,
+//! `export_parallel.py`, `printcheck.py`, `report.py`) lives in the
+//! submodules and takes its meshes from a [`provider::MeshProvider`]:
+//!
+//! * [`printcheck`]: watertight, manifold, self-intersections, wall, volume,
+//!   build plate;
+//! * [`package`]: the parallel export (`rayon` instead of the plugin's
+//!   background processes) with the plugin's file names;
+//! * [`manifest`]: files with BLAKE3 hashes and sizes, and their
+//!   verification;
+//! * [`report`], [`patient`]: the HTML pages, in English and Italian
+//!   ([`text`]).
 //!
 //! TODO(gingiva.rs): the gingiva should follow the teeth (the deformation of
 //! `ortho_aligner/gingiva.py`); [`deform_gingiva`] is the hook where it plugs
@@ -45,6 +55,28 @@ use serde::{Deserialize, Serialize};
 use crate::anatomy::{self, Arch};
 use crate::schedule::{self, Calendar, IcsOptions, Lang, Policy};
 use crate::staging;
+
+pub mod html;
+pub mod manifest;
+pub mod package;
+pub mod patient;
+pub mod printcheck;
+pub mod provider;
+pub mod report;
+pub mod text;
+
+/// Which print files the full export makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Workflow {
+    /// Models for thermoforming and aligners to print directly.
+    #[default]
+    Both,
+    /// Models for thermoforming only.
+    Thermo,
+    /// Aligners to print directly only.
+    Direct,
+}
 
 /// Parameters of the export.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -128,6 +160,9 @@ pub enum ExportError {
     /// A mesh could not be written.
     #[error("{0}")]
     Mesh(String),
+    /// The full export failed for another reason (thread pool, JSON, date).
+    #[error("{0}")]
+    Package(String),
     /// A file could not be written.
     #[error("{path}: {message}")]
     Io {
@@ -304,21 +339,23 @@ pub fn stages_csv(input: &Input<'_>, calendars: &BTreeMap<Arch, Calendar>) -> St
     out
 }
 
-/// Exports the stages: STL files, `stages.csv` and `visits.ics`.
-pub fn run(input: &Input<'_>, params: &Params) -> Result<Report, ExportError> {
-    if params.dir.trim().is_empty() {
-        return Err(ExportError::NoDir);
-    }
-    let dir = PathBuf::from(&params.dir);
-    for s in &input.arches {
-        if s.labels.len() != s.mesh.vertex_count() {
-            return Err(ExportError::Labels {
-                arch: arch_name(s.arch),
-                labels: s.labels.len(),
-                vertices: s.mesh.vertex_count(),
-            });
-        }
-    }
+/// The series of each arch and their calendars.
+struct Plan {
+    /// Active aligners of each arch with any.
+    active: BTreeMap<Arch, u32>,
+    /// Aligners of the longest series.
+    total: u32,
+    /// The calendar of each arch, passive aligners included.
+    calendars: BTreeMap<Arch, Calendar>,
+}
+
+/// Counts the aligners of every arch and builds their calendars from one
+/// start date (today when none is given).
+fn plan_calendars(
+    input: &Input<'_>,
+    params: &Params,
+    attachments: &BTreeMap<Arch, Vec<String>>,
+) -> Result<Plan, ExportError> {
     // the series of each arch and the total including the passive aligners
     let active: BTreeMap<Arch, u32> = input
         .arches
@@ -352,10 +389,47 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Report, ExportError> {
         if !active.contains_key(&s.arch) {
             continue;
         }
-        let mut cal_in = schedule::input_from_stages(s.arch, input.stages, Vec::new());
+        let mut cal_in = schedule::input_from_stages(
+            s.arch,
+            input.stages,
+            attachments.get(&s.arch).cloned().unwrap_or_default(),
+        );
         cal_in.n_total = Some(total);
         calendars.insert(s.arch, schedule::run(&cal_in, &cal_params)?);
     }
+    Ok(Plan {
+        active,
+        total,
+        calendars,
+    })
+}
+
+/// The target directory is given and the labels belong to the scans.
+fn check_input(input: &Input<'_>, dir: &str) -> Result<(), ExportError> {
+    if dir.trim().is_empty() {
+        return Err(ExportError::NoDir);
+    }
+    for s in &input.arches {
+        if s.labels.len() != s.mesh.vertex_count() {
+            return Err(ExportError::Labels {
+                arch: arch_name(s.arch),
+                labels: s.labels.len(),
+                vertices: s.mesh.vertex_count(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Exports the stages: STL files, `stages.csv` and `visits.ics`.
+pub fn run(input: &Input<'_>, params: &Params) -> Result<Report, ExportError> {
+    check_input(input, &params.dir)?;
+    let dir = PathBuf::from(&params.dir);
+    let Plan {
+        active,
+        total,
+        calendars,
+    } = plan_calendars(input, params, &BTreeMap::new())?;
 
     std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
     // the models: (arch index, stage)
