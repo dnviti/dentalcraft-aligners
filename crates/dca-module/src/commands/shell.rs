@@ -179,6 +179,38 @@ impl ArchPrint {
             .collect()
     }
 
+    /// Case to arch coordinates (`+Z` occlusal, the base of the cast flat).
+    pub(crate) fn to_arch(&self) -> glam::DMat4 {
+        self.to_arch
+    }
+
+    /// The closed teeth and the gingiva of aligner `k` (case coordinates).
+    pub(crate) fn stage(&self, stages: &[Stage], k: u32) -> StageGeometry {
+        let deltas = self.deltas(stages, k);
+        let teeth = shell::stage_teeth(&self.crowns, &deltas);
+        let moved = gingiva::deform(&self.gum.vertices, &self.prep, &deltas);
+        let gum = TriMesh::new(
+            moved.iter().map(|p| p.as_vec3()).collect(),
+            self.gum.tris.clone(),
+        );
+        StageGeometry {
+            fdis: self.crowns.keys().copied().collect(),
+            teeth,
+            gum,
+            deltas,
+        }
+    }
+
+    /// The input of [`shell::run`] for the geometry of a stage.
+    pub(crate) fn input<'a>(&'a self, g: &'a StageGeometry) -> shell::Input<'a> {
+        shell::Input {
+            to_arch: self.to_arch,
+            teeth: &g.teeth,
+            gingiva: &g.gum,
+            cover: &self.cover,
+        }
+    }
+
     /// The solids of aligner `k` (case coordinates).
     pub(crate) fn build(
         &self,
@@ -188,23 +220,29 @@ impl ArchPrint {
         design: &Design,
         outputs: Outputs,
     ) -> Result<StageSolids, CommandError> {
-        let deltas = self.deltas(stages, k);
-        let teeth = shell::stage_teeth(&self.crowns, &deltas);
-        let moved = gingiva::deform(&self.gum.vertices, &self.prep, &deltas);
-        let gum = TriMesh::new(
-            moved.iter().map(|p| p.as_vec3()).collect(),
-            self.gum.tris.clone(),
-        );
-        let input = shell::Input {
-            to_arch: self.to_arch,
-            teeth: &teeth,
-            gingiva: &gum,
-            cover: &self.cover,
-        };
-        shell::run(&input, params, design, outputs).map_err(|e| match e {
-            shell::ShellError::Invalid(m) => CommandError::Invalid(m),
-            other => failed(other),
-        })
+        let g = self.stage(stages, k);
+        shell::run(&self.input(&g), params, design, outputs).map_err(shell_error)
+    }
+}
+
+/// The closed teeth and the gingiva of one stage of an arch (case
+/// coordinates).
+pub(crate) struct StageGeometry {
+    /// The teeth, in FDI order.
+    pub fdis: Vec<Fdi>,
+    /// The closed teeth at the stage pose, in the order of `fdis`.
+    pub teeth: Vec<TriMesh>,
+    /// The gingiva moved with the teeth.
+    pub gum: TriMesh,
+    /// The rigid transform of every moved tooth (case coordinates).
+    pub deltas: BTreeMap<Fdi, glam::DMat4>,
+}
+
+/// A shell error as a command error.
+pub(crate) fn shell_error(e: shell::ShellError) -> CommandError {
+    match e {
+        shell::ShellError::Invalid(m) => CommandError::Invalid(m),
+        other => failed(other),
     }
 }
 
