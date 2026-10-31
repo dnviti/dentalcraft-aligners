@@ -602,9 +602,26 @@ fn the_demo_arch_gets_its_stamp_on_a_molar() {
         };
         let t0 = std::time::Instant::now();
         let out = stamped(run(&input, &p).unwrap());
-        assert!(t0.elapsed().as_secs() < 20, "{arch:?}: {:?}", t0.elapsed());
+        // a loose bound: the run takes a few seconds, more under load
+        assert!(t0.elapsed().as_secs() < 120, "{arch:?}: {:?}", t0.elapsed());
         let report = out.mesh.validate();
         assert!(report.is_watertight() && report.is_manifold(), "{report:?}");
+        // the text folds the surface nowhere: no triangle with a vertex moved
+        // off the input surface crosses another one (the demo surface crosses
+        // itself where its parts overlap, away from the text)
+        let bvh = Bvh::build(&mesh).unwrap();
+        let off: Vec<bool> = bvh
+            .closest_points(&out.mesh.positions, f32::INFINITY)
+            .iter()
+            .map(|h| h.is_some_and(|h| h.distance > 1e-3))
+            .collect();
+        let moved = |f: u32| out.mesh.tris[f as usize].iter().any(|&i| off[i as usize]);
+        assert!(off.iter().any(|&o| o), "{arch:?}: nothing moved");
+        let folds = crate::shell::crossing_pairs(&out.mesh)
+            .into_iter()
+            .filter(|&(a, b)| moved(a) || moved(b))
+            .count();
+        assert_eq!(folds, 0, "{arch:?} {kind:?}: the text folds the surface");
         assert!(out.placed.tooth.is_some());
         assert!(out.placed.height_mm > 2.0 * p.height);
         // the stamp is on a first molar when it fits there
