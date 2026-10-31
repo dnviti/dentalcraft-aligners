@@ -133,7 +133,8 @@ fn move_scans(next: &mut CaseState, role: ScanRole, deltas: &[DMat4]) -> Vec<Blo
     stale
 }
 
-/// Moves the scan of `arch` with its labels, seeds and tooth frames by the
+/// Moves the scan of `arch` with its labels, seeds, tooth frames and
+/// measures, closed crowns, gingiva and setup arch line by the
 /// case-coordinate rigid move `delta`, and moves the scans of the bite
 /// (role `Bite`, in order) by `bite_deltas`. Unused blobs are dropped.
 pub(crate) fn move_arch(
@@ -153,8 +154,50 @@ pub(crate) fn move_arch(
         data.labels.insert(arch.role(), r);
         stale.push(old);
     }
+    // the closed crowns and the gingiva are case-coordinate blobs too
+    let blobs: Vec<BlobRef> = data
+        .crowns
+        .iter()
+        .filter(|(f, _)| Arch::of(**f) == arch)
+        .map(|(_, r)| *r)
+        .chain(data.gingiva.get(&arch.role()).copied())
+        .collect();
+    for old in blobs {
+        if let Some(mesh) = next.blobs.get(&old).cloned() {
+            let r = next.blobs.insert(moved_mesh(&mesh, delta));
+            for v in data.crowns.values_mut().chain(data.gingiva.values_mut()) {
+                if *v == old {
+                    *v = r;
+                }
+            }
+            stale.push(old);
+        }
+    }
     for s in data.seeds.iter_mut().filter(|s| Arch::of(s.fdi) == arch) {
         s.position = delta.transform_point3(s.position);
+    }
+    if let Some(line) = data.setup.lines.get_mut(&arch.role()) {
+        for p in line {
+            *p = delta.transform_point3(*p);
+        }
+    }
+    for (_, m) in data
+        .tooth_geometry
+        .iter_mut()
+        .filter(|(f, _)| Arch::of(**f) == arch)
+    {
+        for p in [
+            &mut m.centroid,
+            &mut m.reference,
+            &mut m.tip,
+            &mut m.cej,
+            &mut m.crest,
+            &mut m.apex,
+            &mut m.contact_m,
+            &mut m.contact_d,
+        ] {
+            *p = delta.transform_point3(*p);
+        }
     }
     let pose = pose_of(delta);
     for (_, f) in data
@@ -349,5 +392,64 @@ pub(crate) mod tests {
         assert_eq!(out2["was_in_occlusion"], true);
         let d = &out2["upper_move"];
         assert!(d["rotation_deg"].as_f64().unwrap() < 0.5, "{out2}");
+    }
+
+    #[test]
+    fn the_crowns_gingiva_measures_and_arch_line_move_with_the_upper_arch() {
+        let mut state = two_demo_arches();
+        for id in [
+            "aligners.preparation.reconstruction.automatic",
+            "aligners.preparation.gingiva",
+            "aligners.planning.setup.automatic",
+        ] {
+            state = exec(id, &state, Value::Null).0;
+        }
+        let (next, _) = exec("aligners.occlusion.virtual-bite", &state, Value::Null);
+        let d0 = state.module_data::<AlignersState>(MODULE_ID).unwrap();
+        let d1 = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        // the rigid move of the upper arch, from its scan
+        let scan = |s: &CaseState| {
+            s.mesh(&s.case.scan(ScanRole::Upper).unwrap().mesh)
+                .unwrap()
+                .positions
+                .clone()
+        };
+        let (a, b) = (scan(&state), scan(&next));
+        let f11 = dc_case::Fdi::new(11).unwrap();
+        let f31 = dc_case::Fdi::new(31).unwrap();
+        // the frame of 11 moved like the scan: so must its crown, measures and the gingiva
+        let delta =
+            d1.tooth_frames[&f11].pose.to_mat4() * d0.tooth_frames[&f11].pose.to_mat4().inverse();
+        let close = |p: glam::DVec3, q: glam::DVec3| (p - q).length() < 1e-3;
+        assert!(close(
+            delta.transform_point3(a[0].as_dvec3()),
+            b[0].as_dvec3()
+        ));
+        let c0 = state.mesh(&d0.crowns[&f11]).unwrap();
+        let c1 = next.mesh(&d1.crowns[&f11]).unwrap();
+        assert!(close(
+            delta.transform_point3(c0.positions[0].as_dvec3()),
+            c1.positions[0].as_dvec3()
+        ));
+        let g0 = state.mesh(&d0.gingiva[&ScanRole::Upper]).unwrap();
+        let g1 = next.mesh(&d1.gingiva[&ScanRole::Upper]).unwrap();
+        assert_eq!(g0.vertex_labels, g1.vertex_labels);
+        assert!(close(
+            delta.transform_point3(g0.positions[7].as_dvec3()),
+            g1.positions[7].as_dvec3()
+        ));
+        let (m0, m1) = (&d0.tooth_geometry[&f11], &d1.tooth_geometry[&f11]);
+        assert!(close(delta.transform_point3(m0.tip), m1.tip));
+        let (l0, l1) = (
+            &d0.setup.lines[&ScanRole::Upper],
+            &d1.setup.lines[&ScanRole::Upper],
+        );
+        assert!(close(delta.transform_point3(l0[0]), l1[0]));
+        // the lower arch stays
+        assert_eq!(d0.crowns[&f31], d1.crowns[&f31]);
+        assert_eq!(d0.gingiva[&ScanRole::Lower], d1.gingiva[&ScanRole::Lower]);
+        // no stale blob left
+        let used = next.referenced_blobs();
+        assert!(next.blobs.iter().all(|(r, _)| used.contains(r)));
     }
 }
