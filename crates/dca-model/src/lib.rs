@@ -10,11 +10,15 @@
 //! Units are millimetres and degrees unless a field name says otherwise;
 //! poses are [`dc_case::Pose`] (millimetres, radians in the quaternion).
 
+mod bite;
 mod migrate;
 mod settings;
 mod state;
 mod visit;
 
+pub use bite::{
+    AlignerBite, BiteClosing, OcclusalMode, OcclusalSettings, Ramp, RampKind, RampSettings,
+};
 pub use migrate::{ModelError, migrate};
 pub use settings::{PerioStage, Settings, StagingPattern, StagingSettings, TrimMode, TrimParams};
 pub use state::{
