@@ -11,6 +11,7 @@
 mod codec;
 pub mod commands;
 mod inspector;
+mod manual;
 pub mod tree;
 mod tree_data;
 
