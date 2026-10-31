@@ -216,3 +216,47 @@ aligners-desc-tools-manual-tools = Manual fallbacks: every automatic step can be
 
 aligners-menu-tools-history = History
 aligners-desc-tools-history = Steps done, to do and to redo; go back to an earlier step and undo going back.
+
+## Commands: label and documentation of every registered command (CommandSpec), one
+## section per stage; append the keys of a stage under its own header only.
+## Keys: aligners-cmd-<stage>-<name> (label) and aligners-cmd-<stage>-<name>-doc (what it does
+## and what the parameters mean). A command that is also a menu leaf may use its
+## aligners-menu-<path> key as label.
+
+## ---- commands: frame ----
+
+## ---- commands: demo ----
+
+## ---- commands: autoseed ----
+
+## ---- commands: segmentation ----
+
+## ---- commands: teeth ----
+
+## ---- commands: reconstruct ----
+
+## ---- commands: gingiva ----
+
+## ---- commands: diagnosis ----
+
+## ---- commands: setup ----
+
+## ---- commands: staging ----
+
+## ---- commands: schedule ----
+
+## ---- commands: occlusion ----
+
+## ---- commands: bite ----
+
+## ---- commands: ramps ----
+
+## ---- commands: shell ----
+
+## ---- commands: trim ----
+
+## ---- commands: stamp ----
+
+## ---- commands: export ----
+
+## ---- commands: visits ----

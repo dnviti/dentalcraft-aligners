@@ -17,6 +17,9 @@
 //!
 //! Groups and sub-menus follow the same scheme (`aligners.preparation`,
 //! `aligners-menu-preparation`) but are not commands.
+//!
+//! Status: a leaf is `Ready` if and only if a command with its id is
+//! registered in [`crate::commands`]; otherwise it is a placeholder (`Stub`).
 
 use dc_module_api::{CommandDesc, MenuItem, MenuStatus, MenuTree};
 
@@ -34,8 +37,6 @@ pub struct Node {
     pub desc_key: &'static str,
     /// Phosphor icon name (kebab case, e.g. `upload-simple`).
     pub icon: &'static str,
-    /// Status of a leaf (a group's status is derived, see [`Node::status`]).
-    leaf_status: MenuStatus,
     /// Keyboard shortcut of a leaf, egui notation (`A`, `Ctrl+Shift+S`).
     pub shortcut: Option<&'static str>,
     /// Children; empty for a leaf.
@@ -43,7 +44,8 @@ pub struct Node {
 }
 
 impl Node {
-    /// A placeholder command.
+    /// A command; it is a placeholder until its id is registered in
+    /// [`crate::commands`].
     pub(crate) const fn leaf(
         id: &'static str,
         label_key: &'static str,
@@ -55,7 +57,6 @@ impl Node {
             label_key,
             desc_key,
             icon,
-            leaf_status: MenuStatus::Stub,
             shortcut: None,
             children: &[],
         }
@@ -80,7 +81,6 @@ impl Node {
             label_key,
             desc_key,
             icon,
-            leaf_status: MenuStatus::Ready,
             shortcut: None,
             children,
         }
@@ -91,11 +91,16 @@ impl Node {
         self.children.is_empty()
     }
 
-    /// A leaf's own status; a group is `Ready` as soon as one of its
-    /// descendants is, `Stub` while all of them are placeholders.
+    /// A leaf is `Ready` when its command is registered, `Stub` otherwise;
+    /// a group is `Ready` as soon as one of its descendants is, `Stub` while
+    /// all of them are placeholders.
     pub fn status(&self) -> MenuStatus {
         if self.is_leaf() {
-            self.leaf_status
+            if crate::commands::is_registered(self.id) {
+                MenuStatus::Ready
+            } else {
+                MenuStatus::Stub
+            }
         } else if self
             .children
             .iter()

@@ -216,3 +216,47 @@ aligners-desc-tools-manual-tools = Alternative manuali: ogni fase automatica pu�
 
 aligners-menu-tools-history = Cronologia
 aligners-desc-tools-history = Fasi fatte, da fare e da rifare; torna a una fase precedente e annulla il ritorno indietro.
+
+## Comandi: etichetta e documentazione di ogni comando registrato (CommandSpec), una
+## sezione per fase; aggiungere le chiavi di una fase solo sotto la sua intestazione.
+## Chiavi: aligners-cmd-<fase>-<nome> (etichetta) e aligners-cmd-<fase>-<nome>-doc (cosa fa
+## e cosa significano i parametri). Un comando che è anche una voce del menu può usare la
+## sua chiave aligners-menu-<percorso> come etichetta.
+
+## ---- commands: frame ----
+
+## ---- commands: demo ----
+
+## ---- commands: autoseed ----
+
+## ---- commands: segmentation ----
+
+## ---- commands: teeth ----
+
+## ---- commands: reconstruct ----
+
+## ---- commands: gingiva ----
+
+## ---- commands: diagnosis ----
+
+## ---- commands: setup ----
+
+## ---- commands: staging ----
+
+## ---- commands: schedule ----
+
+## ---- commands: occlusion ----
+
+## ---- commands: bite ----
+
+## ---- commands: ramps ----
+
+## ---- commands: shell ----
+
+## ---- commands: trim ----
+
+## ---- commands: stamp ----
+
+## ---- commands: export ----
+
+## ---- commands: visits ----

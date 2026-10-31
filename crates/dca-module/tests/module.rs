@@ -53,8 +53,10 @@ fn ids_are_unique_and_follow_the_naming_scheme() {
     }
 }
 
+// The Ready / Stub status of leaves and groups follows the command registry:
+// see tests/commands.rs.
 #[test]
-fn every_leaf_is_a_unique_stub_command() {
+fn every_leaf_is_a_unique_command() {
     let module = AlignersModule::new();
     let leaves = tree::leaves();
     assert!(leaves.len() >= 40, "only {} leaves", leaves.len());
@@ -66,7 +68,6 @@ fn every_leaf_is_a_unique_stub_command() {
     assert_eq!(command_ids, leaves.iter().map(|n| n.id).collect::<Vec<_>>());
     for c in module.commands() {
         assert!(c.id.starts_with("aligners."));
-        assert_eq!(c.status, MenuStatus::Stub, "{}", c.id);
         assert!(c.tooltip_key.is_some());
     }
     for (_, item) in module
@@ -79,7 +80,6 @@ fn every_leaf_is_a_unique_stub_command() {
             Some(item.id),
             "menu id is the command id"
         );
-        assert_eq!(item.status, MenuStatus::Stub);
     }
 }
 
@@ -108,7 +108,6 @@ fn no_empty_groups_and_the_spec_groups_exist() {
     }
     for g in groups {
         assert!(!g.children.is_empty(), "empty group {}", g.id);
-        assert!(g.status() == MenuStatus::Stub);
     }
     // the menu is multi-level
     assert!(module_depth() >= 2);
@@ -207,16 +206,22 @@ fn labels_resolve_in_english_and_italian() {
         }
     }
 
-    // the inspector shows the translated "not available" notice
-    let texts = render_inspector_texts(Some("aligners.planning.ipr"));
+    // the inspector shows the translated "not available" notice on a
+    // placeholder entry
+    let Some(stub) = first_stub_leaf() else {
+        dc_i18n::set_language(Lang::En).unwrap();
+        return; // every command is implemented
+    };
+    let label = dc_i18n::tr(tree::find(stub).unwrap().label_key);
+    let texts = render_inspector_texts(Some(stub));
     assert!(
         texts.iter().any(|t| t == "Non ancora disponibile"),
         "{texts:?}"
     );
-    assert!(texts.iter().any(|t| t == "Stripping (IPR)"), "{texts:?}");
+    assert!(texts.contains(&label), "{texts:?}");
 
     dc_i18n::set_language(Lang::En).unwrap();
-    let texts = render_inspector_texts(Some("aligners.planning.ipr"));
+    let texts = render_inspector_texts(Some(stub));
     assert!(texts.iter().any(|t| t == "Not yet available"), "{texts:?}");
 }
 
@@ -244,9 +249,11 @@ fn invoking_a_stub_selects_it_and_shows_the_toast() {
     let mut ctx = ModuleCtx::new(&state, &jobs);
     let mut m = AlignersModule::new();
     assert_eq!(m.selected(), None);
-    m.invoke("aligners.planning.staging.automatic", &mut ctx)
-        .unwrap();
-    assert_eq!(m.selected(), Some("aligners.planning.staging.automatic"));
+    let Some(stub) = first_stub_leaf() else {
+        return; // every command is implemented
+    };
+    m.invoke(stub, &mut ctx).unwrap();
+    assert_eq!(m.selected(), Some(stub));
     // groups are not commands; unknown ids are errors
     assert!(m.invoke("aligners.planning", &mut ctx).is_err());
     assert!(m.invoke("aligners.nope", &mut ctx).is_err());
@@ -258,6 +265,14 @@ fn invoking_a_stub_selects_it_and_shows_the_toast() {
         toasts,
         vec![Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY)]
     );
+}
+
+/// A leaf whose command is not registered yet, if any.
+fn first_stub_leaf() -> Option<&'static str> {
+    tree::leaves()
+        .into_iter()
+        .find(|n| n.status() == MenuStatus::Stub)
+        .map(|n| n.id)
 }
 
 #[test]
