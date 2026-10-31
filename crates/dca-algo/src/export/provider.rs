@@ -18,7 +18,7 @@
 
 use dc_mesh::TriMesh;
 
-use super::{ExportError, Input, deform_scan, stage_deltas};
+use super::{ExportError, Input, deform_series, stage_deltas};
 use crate::anatomy::Arch;
 
 /// Source of the printable meshes of every stage, in the coordinates of the
@@ -55,7 +55,7 @@ impl MeshProvider for ScanProvider<'_> {
             return Ok(None);
         };
         let deltas = stage_deltas(s, self.input.stages, stage);
-        Ok(Some(deform_scan(s.mesh, s.labels, &deltas)))
+        Ok(Some(deform_series(s, &deltas)))
     }
 
     fn aligner(&self, _arch: Arch, _stage: u32) -> Result<Option<TriMesh>, ExportError> {

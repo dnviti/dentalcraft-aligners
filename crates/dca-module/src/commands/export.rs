@@ -16,8 +16,9 @@
 //! * `aligners.output.manifest` verifies a folder against its
 //!   `manifest.json`, or writes a manifest for a folder that has none.
 //!
-//! The case is not modified. The gingiva stays where it is in the models
-//! until the gingiva deformation lands.
+//! The case is not modified. In the models the gingiva follows the teeth
+//! when the arch has a stored gingiva (`aligners.preparation.gingiva`,
+//! [`dca_algo::export::GumDeform`]); otherwise it stays where it is.
 //!
 //! # Wiring the shells
 //!
@@ -37,7 +38,7 @@ use dca_algo::export::package::{self, CaseInfo, FullParams};
 use dca_algo::export::printcheck::{self, CheckOptions};
 use dca_algo::export::provider::{MeshProvider, ScanProvider};
 use dca_algo::export::report::Renders;
-use dca_algo::export::{self, ArchSeries};
+use dca_algo::export::{self, ArchSeries, GumDeform};
 use dca_algo::schedule;
 use dca_algo::teeth;
 use dca_model::AlignersState;
@@ -86,6 +87,7 @@ struct ArchData {
     scan: LabelledScan,
     rest: BTreeMap<Fdi, Pose>,
     md: BTreeMap<Fdi, i8>,
+    gum: Option<GumDeform>,
 }
 
 /// The arches that have aligners and a segmented scan; an error when there
@@ -117,11 +119,23 @@ fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, Com
                 .iter()
                 .map(|&f| (f, md_sign(data, &seq, &rest, f)))
                 .collect();
+            let gum = match data.gingiva.get(&arch.role()) {
+                Some(r) => Some(
+                    GumDeform::new(
+                        state.blobs.require(r)?,
+                        scan.mesh.vertex_count(),
+                        &dca_algo::gingiva::Params::default(),
+                    )
+                    .map_err(|e| CommandError::Invalid(format!("the stored gingiva: {e}")))?,
+                ),
+                None => None,
+            };
             out.push(ArchData {
                 arch,
                 scan,
                 rest,
                 md,
+                gum,
             });
         }
     }
@@ -143,6 +157,7 @@ fn input<'a>(arches: &'a [ArchData], data: &'a AlignersState) -> export::Input<'
                 labels: &a.scan.labels,
                 rest: &a.rest,
                 md_sign: &a.md,
+                gingiva: a.gum.as_ref(),
             })
             .collect(),
         stages: &data.stages,
@@ -648,6 +663,59 @@ mod tests {
                 .unwrap()
                 .contains("separate pieces")
         );
+    }
+
+    #[test]
+    fn the_gingiva_follows_the_teeth_in_the_models_when_it_is_stored() {
+        let s = super::super::reconstruct::golden_state("demo_lower_mild");
+        let mut s = s;
+        for id in [
+            "aligners.teeth.frames",
+            "aligners.planning.setup.automatic",
+            "aligners.planning.staging.automatic",
+        ] {
+            s = exec(id, &s, Value::Null).unwrap().0;
+        }
+        let (with_gum, _) = exec("aligners.preparation.gingiva", &s, Value::Null).unwrap();
+        let models = |state: &CaseState| {
+            let data = aligners_data(state).unwrap();
+            let arches = prepare(state, &data).unwrap();
+            let input = input(&arches, &data);
+            let provider = mesh_provider(&input);
+            let n = schedule::active_stages(Arch::Lower, &data.stages);
+            assert!(n > 0);
+            let first = provider.model(Arch::Lower, 0).unwrap().unwrap();
+            let last = provider.model(Arch::Lower, n).unwrap().unwrap();
+            (arches[0].scan.labels.clone(), first, last)
+        };
+        let moved_gum = |labels: &[u16], a: &dc_mesh::TriMesh, b: &dc_mesh::TriMesh| {
+            labels
+                .iter()
+                .zip(a.positions.iter().zip(&b.positions))
+                .filter(|(l, (p, q))| **l == 0 && (**p - **q).length() > 1e-4)
+                .count()
+        };
+        // without a stored gingiva the gum stays where it is
+        let (labels, first, last) = models(&s);
+        let scan = s.mesh(&s.case.scan(ScanRole::Lower).unwrap().mesh).unwrap();
+        assert_eq!(first.positions, scan.positions);
+        assert_eq!(moved_gum(&labels, &first, &last), 0);
+        // with it, the gum near the moved teeth follows them, the base stays
+        let (labels, first, last) = models(&with_gum);
+        let scan = with_gum
+            .mesh(&with_gum.case.scan(ScanRole::Lower).unwrap().mesh)
+            .unwrap();
+        assert_eq!(first.positions, scan.positions, "stage 0 is the scan");
+        let moved = moved_gum(&labels, &first, &last);
+        let gum = labels.iter().filter(|&&l| l == 0).count();
+        assert!(moved > 100 && moved < gum, "{moved} of {gum}");
+        let max = labels
+            .iter()
+            .zip(first.positions.iter().zip(&last.positions))
+            .filter(|(l, _)| **l == 0)
+            .map(|(_, (p, q))| (*p - *q).length())
+            .fold(0.0f32, f32::max);
+        assert!(max < 5.0, "{max}");
     }
 
     #[test]

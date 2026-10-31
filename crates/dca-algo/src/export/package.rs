@@ -730,6 +730,7 @@ mod tests {
                         labels: &self.up.1,
                         rest: &self.rest_up,
                         md_sign: &self.md,
+                        gingiva: None,
                     },
                     ArchSeries {
                         arch: Arch::Lower,
@@ -737,6 +738,7 @@ mod tests {
                         labels: &self.lo.1,
                         rest: &self.rest_lo,
                         md_sign: &self.md,
+                        gingiva: None,
                     },
                 ],
                 stages: &self.stages,

@@ -16,7 +16,9 @@
 //!
 //! The deformed scan moves the vertices labelled with a tooth by the rigid
 //! transform of that tooth at the stage ([`staging::world_delta`]); the
-//! gingiva vertices stay where they are.
+//! gingiva vertices follow the teeth with the harmonic weights of the stored
+//! gingiva ([`GumDeform`], `AlignersState::gingiva`), or stay where they are
+//! when the arch has none.
 //!
 //! The full package (port plan B4, `ortho_aligner/case_export.py`,
 //! `export_parallel.py`, `printcheck.py`, `report.py`) lives in the
@@ -31,10 +33,6 @@
 //! * [`report`], [`patient`]: the HTML pages, in English and Italian
 //!   ([`text`]).
 //!
-//! TODO(gingiva.rs): the gingiva should follow the teeth (the deformation of
-//! `ortho_aligner/gingiva.py`); [`deform_gingiva`] is the hook where it plugs
-//! in.
-//!
 //! The files are written atomically (a `.tmp` file renamed over the final
 //! name), so a cancelled or failed export never leaves a partial file under
 //! a final name.
@@ -47,12 +45,13 @@ use dc_case::{Fdi, Pose};
 use dc_mesh::TriMesh;
 use dc_mesh::io::{self, MeshFormat};
 use dca_model::Stage;
-use glam::{DMat4, Vec3};
+use glam::{DMat4, DVec3, Vec3};
 use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::anatomy::{self, Arch};
+use crate::gingiva::{self, GingivaError};
 use crate::schedule::{self, Calendar, IcsOptions, Lang, Policy};
 use crate::staging;
 
@@ -124,6 +123,61 @@ pub struct ArchSeries<'a> {
     pub rest: &'a BTreeMap<Fdi, Pose>,
     /// `+1` when the x axis of the tooth frame points mesially.
     pub md_sign: &'a BTreeMap<Fdi, i8>,
+    /// The gingiva of the arch with its blend weights; `None`: the gingiva
+    /// of the scan does not move.
+    pub gingiva: Option<&'a GumDeform>,
+}
+
+/// The stored gingiva of an arch ready to follow the teeth
+/// ([`gingiva::gum_weights`], [`gingiva::deform`]).
+///
+/// The first vertices of a gingiva mesh are the scan vertices, in the same
+/// order (the membrane ones moved under the crowns); the vertices of the
+/// margin cut follow. A gingiva vertex of the scan moves by the displacement
+/// of its gingiva vertex.
+#[derive(Debug, Clone)]
+pub struct GumDeform {
+    rest: Vec<DVec3>,
+    prep: gingiva::DeformPrep,
+}
+
+impl GumDeform {
+    /// The deformation of the gingiva mesh `gum` (`AlignersState::gingiva`,
+    /// case coordinates) of a scan with `scan_vertices` vertices.
+    pub fn new(
+        gum: &TriMesh,
+        scan_vertices: usize,
+        params: &gingiva::Params,
+    ) -> Result<Self, GingivaError> {
+        let g = gingiva::GumSurface::from_mesh(gum)?;
+        if g.vertices.len() < scan_vertices {
+            return Err(GingivaError::Invalid(format!(
+                "the gingiva has {} vertices, the scan {scan_vertices}: it belongs to another scan",
+                g.vertices.len()
+            )));
+        }
+        let mut fdis: Vec<Fdi> = g
+            .tooth
+            .iter()
+            .filter_map(|&t| u8::try_from(t).ok().and_then(|x| Fdi::new(x).ok()))
+            .collect();
+        fdis.sort_unstable();
+        fdis.dedup();
+        let w = gingiva::gum_weights(&g, &fdis, params);
+        Ok(Self {
+            prep: gingiva::deform_prep(&w),
+            rest: g.vertices,
+        })
+    }
+
+    /// Displacement of every gingiva vertex for the tooth motions `deltas`.
+    fn displacements(&self, deltas: &BTreeMap<Fdi, DMat4>) -> Vec<DVec3> {
+        gingiva::deform(&self.rest, &self.prep, deltas)
+            .into_iter()
+            .zip(&self.rest)
+            .map(|(m, r)| m - r)
+            .collect()
+    }
 }
 
 /// Input of the export.
@@ -236,14 +290,38 @@ pub fn stage_deltas(series: &ArchSeries<'_>, stages: &[Stage], k: u32) -> BTreeM
         .collect()
 }
 
-/// Where the gingiva follows the teeth. The vertices labelled `0` stay where
-/// they are until `gingiva.rs` lands; `positions` already carry the teeth.
-fn deform_gingiva(_positions: &mut [Vec3], _labels: &[u16], _deltas: &BTreeMap<Fdi, DMat4>) {
-    // TODO(gingiva.rs): deform the gingiva with the movement of the teeth.
+/// The gingiva follows the teeth: every vertex labelled `0` moves by the
+/// displacement of its vertex in `gum`; `positions` already carry the teeth.
+fn deform_gingiva(
+    positions: &mut [Vec3],
+    labels: &[u16],
+    gum: &GumDeform,
+    deltas: &BTreeMap<Fdi, DMat4>,
+) {
+    if deltas.values().all(|d| *d == DMat4::IDENTITY) {
+        return;
+    }
+    let disp = gum.displacements(deltas);
+    for ((p, &l), d) in positions.iter_mut().zip(labels).zip(&disp) {
+        if l == 0 && *d != DVec3::ZERO {
+            *p = (p.as_dvec3() + *d).as_vec3();
+        }
+    }
+}
+
+/// The model of a series at a stage: [`deform_scan`] with the gingiva of the
+/// series following the teeth when it has one.
+pub fn deform_series(series: &ArchSeries<'_>, deltas: &BTreeMap<Fdi, DMat4>) -> TriMesh {
+    let mut out = deform_scan(series.mesh, series.labels, deltas);
+    if let Some(gum) = series.gingiva {
+        deform_gingiva(&mut out.positions, series.labels, gum, deltas);
+    }
+    out
 }
 
 /// The scan with every labelled tooth moved by its transform in `deltas`
-/// (case coordinates); the other vertices are not moved by the teeth.
+/// (case coordinates); the other vertices are not moved by the teeth
+/// ([`deform_series`] moves the gingiva too).
 pub fn deform_scan(mesh: &TriMesh, labels: &[u16], deltas: &BTreeMap<Fdi, DMat4>) -> TriMesh {
     let mut out = TriMesh::new(mesh.positions.clone(), mesh.tris.clone());
     let by_label: BTreeMap<u16, &DMat4> = deltas
@@ -255,7 +333,6 @@ pub fn deform_scan(mesh: &TriMesh, labels: &[u16], deltas: &BTreeMap<Fdi, DMat4>
             *p = d.transform_point3(p.as_dvec3()).as_vec3();
         }
     }
-    deform_gingiva(&mut out.positions, labels, deltas);
     out
 }
 
@@ -446,7 +523,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Report, ExportError> {
         .map(|&(i, k)| -> Result<FileRecord, ExportError> {
             let s = &input.arches[i];
             let deltas = stage_deltas(s, input.stages, k);
-            let mesh = deform_scan(s.mesh, s.labels, &deltas);
+            let mesh = deform_series(s, &deltas);
             let bytes = stl_bytes(&mesh)?;
             let name = stl_name(s.arch, k, width);
             write_atomic(&dir.join(&name), &bytes)?;
@@ -603,6 +680,7 @@ mod tests {
             labels,
             rest,
             md_sign: md,
+            gingiva: None,
         }
     }
 
