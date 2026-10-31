@@ -26,6 +26,7 @@ pub mod export;
 pub mod frame;
 pub mod gingiva;
 pub mod occlusion;
+pub mod manual;
 pub mod ramps;
 pub mod reconstruct;
 pub mod schedule;

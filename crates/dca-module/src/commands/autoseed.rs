@@ -137,9 +137,14 @@ fn run_numbering(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    // the teeth marked missing by hand (the manual tools) stay missing
+    let mut missing = params.missing.clone();
+    missing.extend(aligners_data(state)?.missing.iter().map(|f| f.get()));
+    missing.sort_unstable();
+    missing.dedup();
     let algo = autoseed::Params {
         third_molars: params.third_molars,
-        missing: params.missing.clone(),
+        missing,
         ends: params.ends,
     };
     // reject bad parameters before any work

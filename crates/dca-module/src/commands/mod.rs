@@ -85,6 +85,7 @@ mod export;
 mod frame;
 mod gingiva;
 mod occlusion;
+mod manual;
 mod ramps;
 mod reconstruct;
 mod schedule;
@@ -120,6 +121,8 @@ pub fn all() -> Vec<CommandSpec> {
         export::specs,
         visits::specs,
     ]
+        manual::specs,
+        auto::specs,
     .iter()
     .flat_map(|specs| specs())
     .collect()

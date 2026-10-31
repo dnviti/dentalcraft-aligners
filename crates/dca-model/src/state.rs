@@ -164,6 +164,13 @@ impl Stage {
 pub struct AlignersState {
     /// Seed points of the teeth.
     pub seeds: Vec<Seed>,
+    /// Teeth marked as missing by hand (agenesis, extraction): they have no
+    /// seed, labels, frame, solid or movement, and stay out of the later
+    /// stages until they are marked present again.
+    pub missing: BTreeSet<Fdi>,
+    /// Teeth whose labels were corrected by hand after the teeth were built:
+    /// their solid has to be rebuilt.
+    pub dirty: BTreeSet<Fdi>,
     /// Per-vertex tooth labels of each scan (a mesh blob whose vertex
     /// attribute holds the label), keyed by arch.
     pub labels: BTreeMap<ScanRole, BlobRef>,
