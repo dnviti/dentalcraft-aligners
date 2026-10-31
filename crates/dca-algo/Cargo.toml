@@ -12,8 +12,15 @@ publish.workspace = true
 [dependencies]
 dca-model.workspace = true
 dc-case.workspace = true
+dc-geom.workspace = true
 dc-mesh.workspace = true
 glam.workspace = true
+nalgebra.workspace = true
+rayon.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

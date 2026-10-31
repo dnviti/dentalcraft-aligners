@@ -1,20 +1,23 @@
 //! The Aligners module for DentalCraft (id `aligners`, shown as
 //! "Aligners" / "Allineatori").
 //!
-//! [`AlignersModule`] implements [`dc_module_api::Module`]. For now the whole
-//! menu ([`tree`]) is there, every entry a placeholder: invoking it selects
-//! the entry in the inspector and shows the "not available yet" toast. The
-//! algorithms behind the entries live in `dca-algo`, the data in `dca-model`.
+//! [`AlignersModule`] implements [`dc_module_api::Module`]. The whole menu
+//! ([`tree`]) is there; an entry is implemented when its command is in the
+//! registry ([`commands`]), otherwise it is a placeholder: invoking it
+//! selects the entry in the inspector and shows the "not available yet"
+//! toast. The algorithms behind the entries live in `dca-algo`, the data in
+//! `dca-model`.
 
 mod codec;
+pub mod commands;
 mod inspector;
 pub mod tree;
 mod tree_data;
 
 use dc_case::{CaseState, ModuleState};
 use dc_module_api::{
-    CommandDesc, MenuStatus, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError, ModuleRegistry,
-    NOT_AVAILABLE_KEY, Toast, ToastLevel,
+    CommandDesc, CommandSpec, MenuStatus, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError,
+    ModuleRegistry, NOT_AVAILABLE_KEY, Toast, ToastLevel,
 };
 use dc_scene::SceneItem;
 use dca_model::{AlignersState, StagingSettings};
@@ -94,6 +97,10 @@ impl Module for AlignersModule {
         tree::command_descs()
     }
 
+    fn command_specs(&self) -> Vec<CommandSpec> {
+        commands::all()
+    }
+
     fn invoke(&mut self, command_id: &str, ctx: &mut ModuleCtx<'_>) -> Result<(), ModuleError> {
         let node = tree::find(command_id)
             .filter(|n| n.is_leaf())
@@ -104,8 +111,13 @@ impl Module for AlignersModule {
                 ctx.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 Ok(())
             }
-            // no command is implemented yet
-            MenuStatus::Ready => Err(ModuleError::UnknownCommand(command_id.to_owned())),
+            // a Ready leaf is a registered command: run it with its defaults
+            MenuStatus::Ready => {
+                let spec = commands::find(node.id)
+                    .ok_or_else(|| ModuleError::UnknownCommand(command_id.to_owned()))?;
+                ctx.queue(Box::new(spec.command(serde_json::Value::Null)));
+                Ok(())
+            }
         }
     }
 
