@@ -610,11 +610,14 @@ pub fn reduce_to(mesh: &TriMesh, tol: f64, to_out: Option<&DMat4>) -> Result<Tri
         .clamp(1, REDUCE_MAX_SLABS);
     // the reduction may fold a triangle through another one at a sharp crease
     // (the full resolution never crosses itself): the faces of the full
-    // resolution around every crossing are held and the reduction is done again
+    // resolution around every crossing are held and the slabs that hold them
+    // are reduced again
+    let slabs = Slabs::new(mesh, n);
     let mut held = vec![false; mesh.tris.len()];
+    let mut parts: Vec<Option<TriMesh>> = vec![None; slabs.count()];
     let mut bvh = None;
     for _ in 0..REDUCE_FIX_ROUNDS {
-        let out = reduce_slabs(mesh, tol, n, &held)?;
+        let out = slabs.reduce(mesh, tol, &held, &mut parts)?;
         if !out.validate().is_watertight() {
             break;
         }
@@ -635,12 +638,19 @@ pub fn reduce_to(mesh: &TriMesh, tol: f64, to_out: Option<&DMat4>) -> Result<Tri
             let lo = t[0].min(t[1]).min(t[2]) - r;
             let hi = t[0].max(t[1]).max(t[2]) + r;
             for g in bvh.overlap_aabb(lo, hi) {
-                held[g as usize] = true;
+                if !held[g as usize] {
+                    held[g as usize] = true;
+                    parts[slabs.slab[g as usize]] = None;
+                }
             }
         }
     }
     Ok(mesh.clone())
 }
+
+/// Sine of the angle under which a segment counts as lying in the plane of a
+/// triangle ([`crossing_pairs`]).
+const COPLANAR_SIN: f64 = 1e-4;
 
 /// Pairs `(i, j)`, `i < j`, of triangles of `mesh` that share no vertex and
 /// cross each other (an edge of one meets the other), sorted.
@@ -692,12 +702,16 @@ pub fn crossing_pairs(mesh: &TriMesh) -> Vec<(u32, u32)> {
     pairs
 }
 
+/// The segment `p q` meets the triangle `t`. A segment within
+/// [`COPLANAR_SIN`] of the plane of the triangle counts as in it and is not
+/// tested (coplanar triangles that overlap are left out, as in the plugin's
+/// check; rounding tilts a wall of coplanar triangles by about that much).
 fn segment_crosses_triangle(p: DVec3, q: DVec3, t: &[DVec3; 3]) -> bool {
     let d = q - p;
     let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
     let pv = d.cross(e2);
     let det = e1.dot(pv);
-    if det.abs() <= 1e-18 {
+    if det.abs() <= COPLANAR_SIN * d.length() * e1.cross(e2).length() {
         return false;
     }
     let inv = 1.0 / det;
@@ -709,147 +723,222 @@ fn segment_crosses_triangle(p: DVec3, q: DVec3, t: &[DVec3; 3]) -> bool {
     u >= 0.0 && w >= 0.0 && u + w <= 1.0 && (0.0..=1.0).contains(&h)
 }
 
-/// The exact reduction within `tol` in `n` slabs along the longest side of
-/// the box, at the same time: each slab is decimated with a ring of the
-/// faces of its neighbours under another label and its own faces on the
-/// seam under labels of their own, so the vertices there neither move nor
-/// disappear, and the slabs are welded back on them.
+/// The exact reduction within `tol` in `n` slabs (see [`Slabs`]), every
+/// slab reduced afresh.
+#[cfg(test)]
 fn reduce_slabs(mesh: &TriMesh, tol: f64, n: usize, held: &[bool]) -> Result<TriMesh, ShellError> {
-    if n <= 1 && !held.contains(&true) {
+    let slabs = Slabs::new(mesh, n);
+    let mut parts = vec![None; slabs.count()];
+    slabs.reduce(mesh, tol, held, &mut parts)
+}
+
+/// The exact reduction within `tol` in slabs along the longest side of the
+/// box at the same time (each about [`REDUCE_SLAB_TRIS`] triangles): each slab is decimated with a ring of the faces of its neighbours under
+/// another label and its own faces on the seam (and the held ones) under
+/// labels of their own, so the vertices there neither move nor disappear,
+/// and the slabs are welded back on them.
+struct Slabs {
+    /// Slab of every face.
+    slab: Vec<usize>,
+    /// Faces of every slab, in face order.
+    faces: Vec<Vec<u32>>,
+    /// Faces around every vertex (CSR).
+    vstart: Vec<u32>,
+    vfaces: Vec<u32>,
+    /// The vertex is used by the faces of more than one slab.
+    seam: Vec<bool>,
+}
+
+impl Slabs {
+    fn new(mesh: &TriMesh, n: usize) -> Self {
+        let nf = mesh.tris.len();
+        let count = n.max(1);
+        // slabs of the same number of faces along the longest side of the box
+        let size = mesh.aabb().map_or(Vec3::X, |b| b.size());
+        let axis = if size.x >= size.y && size.x >= size.z {
+            0
+        } else if size.y >= size.z {
+            1
+        } else {
+            2
+        };
+        let key =
+            |t: &[u32; 3]| -> f32 { t.iter().map(|&i| mesh.positions[i as usize][axis]).sum() };
+        let mut order: Vec<usize> = (0..nf).collect();
+        order.sort_by(|&a, &b| {
+            key(&mesh.tris[a])
+                .total_cmp(&key(&mesh.tris[b]))
+                .then(a.cmp(&b))
+        });
+        let mut slab = vec![0usize; nf];
+        for (rank, &f) in order.iter().enumerate() {
+            slab[f] = rank * count / nf.max(1);
+        }
+        let mut faces = vec![Vec::new(); count];
+        for (f, &k) in slab.iter().enumerate() {
+            faces[k].push(f as u32);
+        }
+        let nv = mesh.positions.len();
+        let mut vstart = vec![0u32; nv + 1];
+        for t in &mesh.tris {
+            for &i in t {
+                vstart[i as usize + 1] += 1;
+            }
+        }
+        for v in 0..nv {
+            vstart[v + 1] += vstart[v];
+        }
+        let mut fill = vstart.clone();
+        let mut vfaces = vec![0u32; vstart[nv] as usize];
+        for (f, t) in mesh.tris.iter().enumerate() {
+            for &i in t {
+                vfaces[fill[i as usize] as usize] = f as u32;
+                fill[i as usize] += 1;
+            }
+        }
+        let seam = (0..nv)
+            .map(|v| {
+                let fs = &vfaces[vstart[v] as usize..vstart[v + 1] as usize];
+                fs.iter().any(|&f| slab[f as usize] != slab[fs[0] as usize])
+            })
+            .collect();
+        Self {
+            slab,
+            faces,
+            vstart,
+            vfaces,
+            seam,
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.faces.len()
+    }
+
+    /// Reduces the slabs without a result in `parts` and welds them all.
+    fn reduce(
+        &self,
+        mesh: &TriMesh,
+        tol: f64,
+        held: &[bool],
+        parts: &mut [Option<TriMesh>],
+    ) -> Result<TriMesh, ShellError> {
+        let todo: Vec<usize> = (0..self.count()).filter(|&s| parts[s].is_none()).collect();
+        let done: Vec<(usize, Result<TriMesh, ShellError>)> = todo
+            .into_par_iter()
+            .map(|s| (s, self.reduce_one(mesh, tol, held, s)))
+            .collect();
+        for (s, r) in done {
+            parts[s] = Some(r?);
+        }
+        // weld the slabs on their seams (the same positions, bit for bit)
+        let mut index = std::collections::HashMap::new();
+        let mut positions = Vec::new();
+        let mut tris = Vec::new();
+        for part in parts.iter().flatten() {
+            let map: Vec<u32> = part
+                .positions
+                .iter()
+                .map(|p| {
+                    *index
+                        .entry(p.to_array().map(f32::to_bits))
+                        .or_insert_with(|| {
+                            positions.push(*p);
+                            (positions.len() - 1) as u32
+                        })
+                })
+                .collect();
+            tris.extend(part.tris.iter().map(|t| t.map(|i| map[i as usize])));
+        }
+        // vertices of dropped ring faces are not referenced: compact
+        let mut used = vec![u32::MAX; positions.len()];
+        let mut compact = Vec::new();
+        for t in &mut tris {
+            for i in t.iter_mut() {
+                if used[*i as usize] == u32::MAX {
+                    used[*i as usize] = compact.len() as u32;
+                    compact.push(positions[*i as usize]);
+                }
+                *i = used[*i as usize];
+            }
+        }
+        Ok(TriMesh::new(compact, tris))
+    }
+
+    /// Slab `s` decimated with its ring (the faces of the other slabs around
+    /// its vertices), the ring dropped again.
+    fn reduce_one(
+        &self,
+        mesh: &TriMesh,
+        tol: f64,
+        held: &[bool],
+        s: usize,
+    ) -> Result<TriMesh, ShellError> {
+        const OWN: u16 = 1;
+        const RING: u16 = 2;
+        const BAND0: u16 = 2;
+        let own = &self.faces[s];
+        let mut ring: Vec<u32> = own
+            .iter()
+            .flat_map(|&f| mesh.tris[f as usize])
+            .filter(|&v| self.seam[v as usize])
+            .flat_map(|v| {
+                self.vfaces[self.vstart[v as usize] as usize..self.vstart[v as usize + 1] as usize]
+                    .iter()
+                    .copied()
+            })
+            .filter(|&f| self.slab[f as usize] != s)
+            .collect();
+        ring.sort_unstable();
+        ring.dedup();
+        let mut local = std::collections::HashMap::new();
+        let mut positions = Vec::new();
+        let mut tris = Vec::new();
+        let mut labels = Vec::new();
+        let mut band = 0u16;
+        // faces in face order, as the decimation's ties depend on it
+        let mut all: Vec<u32> = own.iter().chain(&ring).copied().collect();
+        all.sort_unstable();
+        for f in all {
+            let t = mesh.tris[f as usize];
+            tris.push(t.map(|i| {
+                *local.entry(i).or_insert_with(|| {
+                    positions.push(mesh.positions[i as usize]);
+                    (positions.len() - 1) as u32
+                })
+            }));
+            // own faces on the seam (and the held ones): each its own label, so
+            // that every vertex of the band is held and no collapse makes a new
+            // edge between two seam vertices (the neighbour slab could make the
+            // same one)
+            let label = if self.slab[f as usize] != s {
+                RING
+            } else if held[f as usize] || t.iter().any(|&i| self.seam[i as usize]) {
+                band = band % (u16::MAX - BAND0) + 1;
+                BAND0 + band
+            } else {
+                OWN
+            };
+            labels.push(label);
+        }
+        let mut sub = TriMesh::new(positions, tris);
+        sub.face_labels = Some(labels);
         let params = DecimateParams {
-            preserve_labels: false,
+            preserve_labels: true,
             max_valence: REDUCE_MAX_VALENCE,
             ..DecimateParams::to_tolerance(tol)
         };
-        let plain = TriMesh::new(mesh.positions.clone(), mesh.tris.clone());
-        return Ok(qem::decimate(&plain, &params).map_err(geom)?.mesh);
-    }
-    const OWN: u16 = 1;
-    const RING: u16 = 2;
-    const BAND0: u16 = 2;
-    let size = mesh.aabb().map_or(Vec3::X, |b| b.size());
-    let axis = if size.x >= size.y && size.x >= size.z {
-        0
-    } else if size.y >= size.z {
-        1
-    } else {
-        2
-    };
-    let key = |t: &[u32; 3]| -> f32 { t.iter().map(|&i| mesh.positions[i as usize][axis]).sum() };
-    let mut order: Vec<usize> = (0..mesh.tris.len()).collect();
-    order.sort_by(|&a, &b| {
-        key(&mesh.tris[a])
-            .total_cmp(&key(&mesh.tris[b]))
-            .then(a.cmp(&b))
-    });
-    let n = n.max(1);
-    let mut slab = vec![0usize; mesh.tris.len()];
-    for (rank, &f) in order.iter().enumerate() {
-        slab[f] = rank * n / order.len();
-    }
-    // seam vertices: used by the faces of more than one slab
-    const NONE: usize = usize::MAX;
-    const MANY: usize = usize::MAX - 1;
-    let mut owner = vec![NONE; mesh.positions.len()];
-    for (t, &k) in mesh.tris.iter().zip(&slab) {
-        for &i in t {
-            let o = &mut owner[i as usize];
-            *o = if *o == NONE || *o == k { k } else { MANY };
-        }
-    }
-    let parts: Vec<Result<TriMesh, ShellError>> = (0..n)
-        .into_par_iter()
-        .map(|s| {
-            let mut used = vec![false; mesh.positions.len()];
-            for (t, _) in mesh.tris.iter().zip(&slab).filter(|(_, k)| **k == s) {
-                for &i in t {
-                    used[i as usize] = true;
-                }
-            }
-            let mut local = vec![u32::MAX; mesh.positions.len()];
-            let mut positions = Vec::new();
-            let mut tris = Vec::new();
-            let mut labels = Vec::new();
-            let mut band = 0u16;
-            for (f, (t, &k)) in mesh.tris.iter().zip(&slab).enumerate() {
-                let own = k == s;
-                if !own && !t.iter().any(|&i| used[i as usize]) {
-                    continue;
-                }
-                tris.push(t.map(|i| {
-                    let l = &mut local[i as usize];
-                    if *l == u32::MAX {
-                        *l = positions.len() as u32;
-                        positions.push(mesh.positions[i as usize]);
-                    }
-                    *l
-                }));
-                // own faces on the seam (and the held ones): each its own label, so
-                // that every vertex of the band is held and no collapse makes a new
-                // edge between two seam vertices (the neighbour slab could make the
-                // same one)
-                let label = if !own {
-                    RING
-                } else if held[f] || t.iter().any(|&i| owner[i as usize] == MANY) {
-                    band = band % (u16::MAX - BAND0) + 1;
-                    BAND0 + band
-                } else {
-                    OWN
-                };
-                labels.push(label);
-            }
-            let mut sub = TriMesh::new(positions, tris);
-            sub.face_labels = Some(labels);
-            let params = DecimateParams {
-                preserve_labels: true,
-                max_valence: REDUCE_MAX_VALENCE,
-                ..DecimateParams::to_tolerance(tol)
-            };
-            let out = qem::decimate(&sub, &params).map_err(geom)?.mesh;
-            let keep = out.face_labels.clone().unwrap_or_default();
-            let tris = out
-                .tris
-                .iter()
-                .zip(&keep)
-                .filter(|(_, l)| **l != RING)
-                .map(|(t, _)| *t)
-                .collect();
-            Ok(TriMesh::new(out.positions, tris))
-        })
-        .collect();
-    // weld the slabs on their seams (the same positions, bit for bit)
-    let mut index = std::collections::HashMap::new();
-    let mut positions = Vec::new();
-    let mut tris = Vec::new();
-    for part in parts {
-        let part = part?;
-        let map: Vec<u32> = part
-            .positions
+        let out = qem::decimate(&sub, &params).map_err(geom)?.mesh;
+        let keep = out.face_labels.clone().unwrap_or_default();
+        let tris = out
+            .tris
             .iter()
-            .map(|p| {
-                *index
-                    .entry(p.to_array().map(f32::to_bits))
-                    .or_insert_with(|| {
-                        positions.push(*p);
-                        (positions.len() - 1) as u32
-                    })
-            })
+            .zip(&keep)
+            .filter(|(_, l)| **l != RING)
+            .map(|(t, _)| *t)
             .collect();
-        tris.extend(part.tris.iter().map(|t| t.map(|i| map[i as usize])));
+        Ok(TriMesh::new(out.positions, tris))
     }
-    // vertices of dropped ring faces are not referenced: compact
-    let mut used = vec![u32::MAX; positions.len()];
-    let mut compact = Vec::new();
-    for t in &mut tris {
-        for i in t.iter_mut() {
-            if used[*i as usize] == u32::MAX {
-                used[*i as usize] = compact.len() as u32;
-                compact.push(positions[*i as usize]);
-            }
-            *i = used[*i as usize];
-        }
-    }
-    Ok(TriMesh::new(compact, tris))
 }
 
 /// A reduced solid with its sizes and its measured deviation.
