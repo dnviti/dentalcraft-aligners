@@ -150,6 +150,7 @@ impl DemoArch {
             scan_border: &[],
             clearance_mm: 0.0,
             thickness_mm: self.wall,
+            cut: None,
         }
     }
 }
