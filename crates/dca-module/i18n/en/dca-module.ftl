@@ -254,7 +254,12 @@ aligners-cmd-teeth-frames-doc = Measures every segmented tooth: the local frame 
 
 ## ---- commands: reconstruct ----
 
+aligners-cmd-reconstruction-automatic-doc = Closes every segmented tooth into a watertight solid. The teeth are measured first (tooth frames, as Tooth frames and widths does); each crown is then cut along a smooth margin line, the surface the scanner closed over the contacts, thin sheets and the strip next to the margin are rebuilt, and the opening is closed by a fair surface tangent to the crown that narrows to a neck below the gingival margin and ends in a rounded stump (thin-plate fairing, Kobbelt 1998). The rebuilt surface follows the convex outline of every horizontal section of the crown and reaches the contact surface where the scan joined two teeth. The solids are stored in the case (case coordinates) and their numbers returned; the scans are not modified. Needs the segmentation. Parameters: arch (all, upper or lower), neck_depth_mm, apex_mm, neck_scale.
+aligners-cmd-reconstruction-rebuild-tooth-doc = Closes one tooth again into a watertight solid, with its stored frame (measured first when missing), and replaces its solid in the case. Needs the segmentation. Parameters: fdi (the tooth number, required), neck_depth_mm, apex_mm, neck_scale.
+
 ## ---- commands: gingiva ----
+
+aligners-cmd-gingiva-doc = Builds the gingiva without holes of every segmented arch: the scan cut along the smoothed gingival margin of all the teeth, continued under the crowns by a harmonic membrane lowered up to col_mm (the ridge under the teeth and the interdental col seen when teeth move apart). It is stored in the case with the tooth every vertex moves with; harmonic blend weights then move it with the teeth (margin rigid with its tooth, papillae shared by neighbouring teeth, base still). The scans are not modified. Needs the segmentation. Parameters: arch (all, upper or lower), col_mm, papilla_mm, collar_mm, collar_gap_mm, radius_mm, root_mm, root_fade_mm.
 
 ## ---- commands: diagnosis ----
 
