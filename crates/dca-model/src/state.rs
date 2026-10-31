@@ -6,7 +6,7 @@ use dc_case::{BlobRef, Fdi, Pose, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{SCHEMA_VERSION, Settings, TrimParams, Visit};
+use crate::{SCHEMA_VERSION, Settings, TrimParams};
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
 /// number. Seeds tell the segmentation which teeth exist and where.
@@ -182,8 +182,13 @@ pub struct AlignersState {
     pub trim: TrimParams,
     /// Settings.
     pub settings: Settings,
-    /// Control visits, in order (`dca_algo::visits`).
-    pub visits: Vec<Visit>,
+    /// Closed solid of each reconstructed tooth (a mesh blob in case
+    /// coordinates: watertight, outward normals).
+    pub crowns: BTreeMap<Fdi, BlobRef>,
+    /// Gingiva without holes of each arch (a mesh blob in case coordinates
+    /// whose vertex labels hold the tooth a vertex moves with and the
+    /// margin, membrane and col flags of `dca_algo::gingiva`).
+    pub gingiva: BTreeMap<ScanRole, BlobRef>,
 }
 
 impl dc_case::ModuleData for AlignersState {
@@ -202,12 +207,13 @@ impl dc_case::ModuleData for AlignersState {
     fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
     }
-    /// The label blobs and the scans of the control visits are the blob
-    /// references in the state (the other fields are plain numbers and poses).
+    /// The label, closed crown and gingiva blobs are the blob references in
+    /// the state (the other fields are plain numbers and poses).
     fn referenced_blobs(&self) -> Vec<BlobRef> {
         self.labels
             .values()
-            .chain(self.visits.iter().filter_map(|v| v.scan.as_ref()))
+            .chain(self.crowns.values())
+            .chain(self.gingiva.values())
             .copied()
             .collect()
     }
@@ -295,6 +301,39 @@ mod tests {
         case.blobs.retain_only(&keep);
         assert!(case.blobs.contains(&labels));
         assert!(!case.blobs.contains(&garbage));
+    }
+
+    #[test]
+    fn crown_and_gingiva_blobs_survive_pruning() {
+        use dc_case::CaseState;
+        use dc_mesh::TriMesh;
+        let tri = |z: f32| {
+            TriMesh::new(
+                vec![
+                    glam::Vec3::ZERO,
+                    glam::Vec3::X,
+                    glam::Vec3::new(0.0, 1.0, z),
+                ],
+                vec![[0, 1, 2]],
+            )
+        };
+        let mut case = CaseState::default();
+        let crown = case.blobs.insert(tri(1.0));
+        let gum = case.blobs.insert(tri(2.0));
+        let garbage = case.blobs.insert(tri(3.0));
+        let mut st = AlignersState::default();
+        st.crowns.insert(Fdi::new(11).unwrap(), crown);
+        st.gingiva.insert(ScanRole::Upper, gum);
+        case.set_module("aligners", ModuleState::new(st.clone()));
+        let used = case.referenced_blobs();
+        assert!(used.contains(&crown) && used.contains(&gum) && !used.contains(&garbage));
+        let keep = used.iter().copied().collect();
+        case.blobs.retain_only(&keep);
+        assert!(case.blobs.contains(&crown) && case.blobs.contains(&gum));
+        assert!(!case.blobs.contains(&garbage));
+        // and the JSON keys are the tooth numbers and the arches
+        let json = serde_json::to_value(&st).unwrap();
+        assert!(json["crowns"]["11"].is_string() && json["gingiva"]["upper"].is_string());
     }
 
     #[test]
