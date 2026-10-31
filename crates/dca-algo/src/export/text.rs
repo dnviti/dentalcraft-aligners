@@ -397,6 +397,35 @@ static TABLE: &[(&str, &str, &str)] = &[
         "Controllo di stampabilita: superficie chiusa e manifold, orientamento coerente, un solo pezzo, nessuna auto-intersezione (BVH), nessun foro passante, volume positivo, parete minima con raggi nel solido, ingombro entro il piano di stampa.",
     ),
     ("rpt-references", "References", "Bibliografia"),
+    // ---- notes on the print files ----
+    (
+        "rpt-file-notes",
+        "Notes on the print files",
+        "Note sui file di stampa",
+    ),
+    (
+        "rpt-note-scans",
+        "the models are the deformed scans and there are no aligners to print: {0}",
+        "i modelli sono le scansioni deformate e non ci sono allineatori da stampare: {0}",
+    ),
+    (
+        "rpt-note-shells",
+        "models and aligners from the shell stage, {0}",
+        "modelli e allineatori dalla fase del guscio, {0}",
+    ),
+    ("rpt-note-stamp", "no stamp: {0}", "senza scritta: {0}"),
+    ("rpt-note-ramps", "ramps: {0}", "rampe: {0}"),
+    (
+        "rpt-note-bite",
+        "occlusal thickness not shaped: {0}",
+        "spessore occlusale non modellato: {0}",
+    ),
+    ("rpt-note-trim", "trim: {0}", "bordo: {0}"),
+    (
+        "rpt-note-reduce",
+        "full resolution kept: the reduction within {0} folded the surface",
+        "tenuta la risoluzione piena: la riduzione entro {0} piegava la superficie",
+    ),
 ];
 
 /// The text of `key` in `lang`; the key itself when there is no such entry.
@@ -417,6 +446,23 @@ pub fn fmt(lang: Lang, key: &str, args: &[String]) -> String {
         s = s.replace(&format!("{{{i}}}"), a);
     }
     s
+}
+
+/// The text of a note of the export, after the name of its file.
+pub fn note(n: &super::provider::Note, lang: Lang) -> String {
+    let text = fmt(lang, n.key, std::slice::from_ref(&n.detail));
+    match (n.arch, n.stage) {
+        (Some(arch), Some(k)) => {
+            let name = if n.aligner {
+                super::package::aligner_name(arch, k, false)
+            } else {
+                super::package::model_name(arch, k)
+            };
+            let file = name.rsplit('/').next().unwrap_or(&name).to_owned();
+            format!("{file}: {text}")
+        }
+        _ => text,
+    }
 }
 
 #[cfg(test)]

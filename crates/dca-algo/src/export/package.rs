@@ -17,13 +17,18 @@
 //! ```
 //!
 //! The work that the plugin spread over background Blender processes
-//! (`export_parallel.py`) is one `rayon` parallel loop here: one task per
-//! stage, arch and kind of file. Every task is a pure function of its
-//! inputs and writes its own file, and the lists are sorted by name before
-//! they are used, so the files and their hashes do not depend on the number
-//! of threads (`threads` in the parameters builds a pool of that size).
+//! (`export_parallel.py`) is a parallel loop here: one task per stage, arch
+//! and kind of file, taken in turn by a few workers (`parallel`, or what
+//! the provider says one build can afford: a shell at 0.1 mm is a few
+//! gigabytes of distance fields), each task using the `rayon` pool inside.
+//! Every task is a pure function of its inputs and writes its own file, and
+//! the lists are sorted by name before they are used, so the files and their
+//! hashes do not depend on the number of threads (`threads` in the
+//! parameters builds a pool of that size) or of workers.
 //!
-//! The meshes come from a [`MeshProvider`](super::provider::MeshProvider).
+//! The meshes come from a [`MeshProvider`](super::provider::MeshProvider);
+//! what it could not do as asked (a stamp without room, a ramp left out)
+//! comes back as notes, listed in the report.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -31,14 +36,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use dca_model::AlignersState;
-use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::manifest::{self, Entry, Generator, MANIFEST_NAME, Manifest, PrintSummary};
 use super::patient::{self, PatientOptions};
 use super::printcheck::{self, CheckOptions};
-use super::provider::MeshProvider;
+use super::provider::{MeshProvider, Note, Quality};
 use super::report::{self, FileCheck, Renders, ReportInput};
 use super::{
     ExportError, Input, Params, Workflow, arch_label, arch_name, check_input, plan_calendars,
@@ -83,6 +87,24 @@ pub struct FullParams {
     /// Date written in the files, `YYYY-MM-DD` (default today). Fixing it
     /// makes two exports of the same case byte for byte equal.
     pub generated: Option<String>,
+    /// Print files from the shell stage (the printable model and the
+    /// trimmed aligner): `null` when the case has the closed teeth and the
+    /// gingiva, else the deformed scans as the models and no aligner;
+    /// `true` requires them, `false` uses the scans.
+    pub shells: Option<bool>,
+    /// Quality of the shell-stage files (voxel and mesh tolerance).
+    pub quality: Quality,
+    /// Voxel of the model and shell fields (mm), instead of the quality's.
+    pub voxel_mm: Option<f64>,
+    /// Identification stamp: embossed on the models, engraved in the
+    /// aligners (arch, number, date of the export, `stamp_code`).
+    pub stamp: bool,
+    /// Case code in the stamp (letters, digits, `-`; at most 8; never the
+    /// name of the patient).
+    pub stamp_code: String,
+    /// Meshes built at the same time (default: what the source of the meshes
+    /// says one build can afford, at most the threads).
+    pub parallel: Option<usize>,
 }
 
 impl Default for FullParams {
@@ -104,6 +126,12 @@ impl Default for FullParams {
             embed_renders: true,
             threads: None,
             generated: None,
+            shells: None,
+            quality: Quality::default(),
+            voxel_mm: None,
+            stamp: true,
+            stamp_code: String::new(),
+            parallel: None,
         }
     }
 }
@@ -133,6 +161,11 @@ pub struct CaseInfo<'a> {
     pub attachments: BTreeMap<Arch, Vec<String>>,
     /// Images for the report (used when `embed_renders` is set).
     pub renders: Renders,
+    /// Where the meshes come from (`shells`, `scans`), for the manifest.
+    pub meshes: &'a str,
+    /// Notes of the caller about the whole export (the source of the meshes
+    /// chosen and why), before the notes of the provider.
+    pub notes: Vec<Note>,
 }
 
 /// What the full export did.
@@ -154,6 +187,10 @@ pub struct FullReport {
     pub total_days: u32,
     /// The print check (`None` when it was not run).
     pub print_check: Option<PrintSummary>,
+    /// Where the meshes came from (`shells`, `scans`).
+    pub meshes: String,
+    /// What could not be done as asked, in the language of the export.
+    pub notes: Vec<String>,
     /// Milliseconds the export took.
     pub elapsed_ms: u64,
 }
@@ -243,10 +280,66 @@ pub fn run(
                 .num_threads(n)
                 .build()
                 .map_err(|e| ExportError::Package(e.to_string()))?;
-            pool.install(|| run_inner(input, case, provider, params))
+            // not inside the pool: the workers of the meshes wait for it
+            run_inner(input, case, provider, params, Some(&pool))
         }
-        _ => run_inner(input, case, provider, params),
+        _ => run_inner(input, case, provider, params, None),
     }
+}
+
+/// `f` of every item, `workers` at a time on threads of their own (each
+/// one using the `rayon` pool `pool`, or the global one, inside), the
+/// results in the order of the items. The first error stops the workers
+/// at their next item.
+fn bounded_map<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    pool: Option<&rayon::ThreadPool>,
+    f: impl Fn(&T) -> Result<R, ExportError> + Sync,
+) -> Result<Vec<R>, ExportError> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let slots: Mutex<Vec<Option<Result<R, ExportError>>>> =
+        Mutex::new((0..items.len()).map(|_| None).collect());
+    let work = || {
+        loop {
+            if failed.load(Ordering::Relaxed) {
+                break;
+            }
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(i) else { break };
+            let r = match pool {
+                Some(p) => p.install(|| f(item)),
+                None => f(item),
+            };
+            if r.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
+        }
+    };
+    let workers = workers.clamp(1, items.len().max(1));
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(work);
+        }
+    });
+    let slots = slots.into_inner().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::with_capacity(items.len());
+    for r in slots {
+        match r {
+            Some(Ok(v)) => out.push(v),
+            Some(Err(e)) => return Err(e),
+            // not started: an error stopped the workers (found above)
+            None => {}
+        }
+    }
+    if out.len() < items.len() {
+        return Err(ExportError::Package("the export stopped".to_owned()));
+    }
+    Ok(out)
 }
 
 fn run_inner(
@@ -254,6 +347,7 @@ fn run_inner(
     case: &CaseInfo<'_>,
     provider: &dyn MeshProvider,
     params: &FullParams,
+    pool: Option<&rayon::ThreadPool>,
 ) -> Result<FullReport, ExportError> {
     let t0 = Instant::now();
     check_input(input, &params.dir)?;
@@ -325,12 +419,22 @@ fn run_inner(
         let keep = (kind == Kind::Aligner && k == plan.active[&arch]).then_some(bytes);
         Ok(Some(Made { entry, check, keep }))
     };
-    let mut made: Vec<Made> = tasks
-        .par_iter()
-        .map(make)
-        .collect::<Result<Vec<_>, _>>()?
+    let threads = pool.map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
+    let workers = params
+        .parallel
+        .filter(|&n| n > 0)
+        .or_else(|| provider.parallel_hint())
+        .unwrap_or(threads)
+        .min(threads);
+    let mut made: Vec<Made> = bounded_map(&tasks, workers, pool, make)?
         .into_iter()
         .flatten()
+        .collect();
+    let notes: Vec<String> = case
+        .notes
+        .iter()
+        .chain(&provider.notes())
+        .map(|n| super::text::note(n, lang))
         .collect();
 
     // the passive aligners repeat the shell of the last stage of the arch
@@ -488,6 +592,7 @@ fn run_inner(
             checks: &checks,
             renders: &renders,
             workflow: params.workflow,
+            notes: &notes,
         });
         put(&dir, &mut entries, "report.html", "html", page.into_bytes())?;
     }
@@ -524,6 +629,10 @@ fn run_inner(
             "min_thickness_mm": params.min_thickness_mm,
             "shell_thickness_mm": case.state.settings.shell_thickness_mm,
             "clearance_mm": case.state.settings.clearance_mm,
+            "meshes": case.meshes,
+            "quality": params.quality,
+            "voxel_mm": params.voxel_mm.unwrap_or(params.quality.voxel_mm()),
+            "stamp": params.stamp,
         }),
         aligners: aligners.clone(),
         total_aligners: plan.total,
@@ -542,6 +651,8 @@ fn run_inner(
         end: first.end.to_iso(),
         total_days: first.total_days,
         print_check: summary,
+        meshes: case.meshes.to_owned(),
+        notes,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
 }
@@ -757,6 +868,8 @@ mod tests {
                     occlusal: Some(vec![0x89, b'P', b'N', b'G']),
                     frontal: None,
                 },
+                meshes: "test",
+                notes: Vec::new(),
             }
         }
     }

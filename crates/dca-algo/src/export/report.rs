@@ -81,6 +81,8 @@ pub struct ReportInput<'a> {
     pub renders: &'a Renders,
     /// Which print files the export makes.
     pub workflow: Workflow,
+    /// What could not be done as asked for the print files (text).
+    pub notes: &'a [String],
 }
 
 /// Movement of one tooth over the whole series.
@@ -685,6 +687,18 @@ pub fn report_html(input: &ReportInput<'_>) -> String {
             );
         }
         o.push_str("</table>");
+    }
+
+    if !input.notes.is_empty() {
+        let _ = write!(
+            o,
+            "<h2>{}</h2><ul class=\"note\">",
+            esc(t("rpt-file-notes"))
+        );
+        for n in input.notes {
+            let _ = write!(o, "<li>{}</li>", esc(n));
+        }
+        o.push_str("</ul>");
     }
 
     // ---- methods and references ----
