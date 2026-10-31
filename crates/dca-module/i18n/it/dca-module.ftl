@@ -202,8 +202,14 @@ aligners-desc-output = File e viste del risultato.
 aligners-menu-output-export-stl = Esporta STL per stadio
 aligners-desc-output-export-stl = Esporta i modelli e gli allineatori di ogni stadio come file STL.
 
+aligners-menu-output-print-check = Controllo di stampabilità
+aligners-desc-output-print-check = Verifica che ogni modello e allineatore sia pronto per la stampa: chiuso, manifold, senza auto-intersezioni, parete minima, entro il piano di stampa.
+
+aligners-menu-output-manifest = Manifest
+aligners-desc-output-manifest = Hash BLAKE3 e dimensioni dei file di un'esportazione, e loro verifica.
+
 aligners-menu-output-report = Report
-aligners-desc-output-report = Relazione clinica e tecnica del caso.
+aligners-desc-output-report = Relazione clinica e tecnica del caso, scritta con i file di stampa, i programmi del paziente e il manifest dell'esportazione.
 
 aligners-menu-output-viewer = Visualizzatore paziente e animazione
 aligners-desc-output-viewer = Animazione del trattamento allineatore per allineatore, da mostrare al paziente.
@@ -285,3 +291,6 @@ aligners-cmd-schedule-doc = Costruisce il calendario dei cambi degli allineatori
 
 ## ---- commands: visits ----
 aligners-cmd-export-doc = Scrive gli allineatori in una cartella: la scansione di ogni arcata con i denti a ogni stadio come STL binario (upper_stage_00.stl è la situazione iniziale; la gengiva non è ancora deformata), stages.csv con il movimento di ogni dente a ogni stadio e le date dell'allineatore, e visits.ics con i cambi di allineatore delle due arcate come file iCalendar. Il caso non viene modificato. Richiede lo staging. Parametri: dir (obbligatorio), start_date (AAAA-MM-GG, predefinita oggi), interval_days, policy (fixed o adaptive), lang (en o it), title.
+aligners-cmd-report-doc = Pacchetto di esportazione completo in una cartella, in parallelo: il modello di ogni stadio e i gusci degli allineatori (file SUP/INF in modelli_termoformatura e stampa_resina, allineatori passivi compresi), il controllo di stampabilità di ogni mesh (chiusa, manifold, senza auto-intersezioni, parete minima, entro il piano di stampa), stages.csv, visits.ics, il programma del paziente e il manifest di stampa di ogni arcata, report.html (diagnosi, setup, IPR, movimenti, staging, calendario, file, controllo di stampabilità, bibliografia; con una vista occlusale e una frontale), print_check.json e manifest.json con l'hash BLAKE3 di ogni file. Il caso non viene modificato. Richiede lo staging. Parametri: dir (obbligatorio), start_date (AAAA-MM-GG, predefinita oggi), interval_days, policy, lang (en o it: lingua della relazione, dei programmi e del calendario), title, workflow (both, thermo o direct), print_check, self_intersections, min_thickness_mm, build_plate_mm, report, embed_renders, threads, generated (AAAA-MM-GG, fissa la data scritta nei file).
+aligners-cmd-print-check-doc = Verifica che i modelli di alcuni stadi siano pronti per la stampa: superficie chiusa e manifold, orientamento coerente, un solo pezzo, nessuna auto-intersezione, nessun foro passante, volume positivo, entro il piano di stampa. Non scrive nulla; il caso non viene modificato. Richiede lo staging. Parametri: stages (predefiniti il primo e l'ultimo), self_intersections, build_plate_mm.
+aligners-cmd-manifest-doc = Verifica una cartella di esportazione con il suo manifest.json (hash BLAKE3 e dimensione di ogni file, file mancanti e non elencati), oppure con verify=false scrive un manifest dei file trovati. Parametri: dir (obbligatorio), verify.
