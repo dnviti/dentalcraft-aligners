@@ -35,6 +35,7 @@ pub mod setup;
 pub mod shell;
 pub mod staging;
 pub mod stamp;
+pub mod study_base;
 pub mod teeth;
 pub mod trim;
 pub mod visits;

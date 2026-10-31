@@ -323,3 +323,26 @@ aligners-cmd-manual-seeds-doc = Aggiunge, sposta o elimina il seme di un dente. 
 aligners-cmd-manual-rebuild-tooth = Ricostruisci un dente a mano
 aligners-cmd-manual-rebuild-tooth-doc = Costruisce di nuovo un solo dente dalla sua regione sulla scansione: dalle etichette attuali, da una selezione di vertici che diventa il dente (gli altri suoi vertici vanno alla gengiva), oppure dopo aver ritrovato la regione dal seme del dente (resegment). La regione viene controllata prima (dimensioni, altezza, bordo della scansione, buchi) e una non valida viene rifiutata con il motivo, senza cambiare nulla. I denti dell'arcata vengono poi misurati di nuovo e il solido chiuso del dente sostituisce il vecchio; gli altri denti tengono solidi, riferimenti e movimenti, mentre setup e staging di questo dente sono da rifare. Parametri: fdi (obbligatorio), vertices, resegment, neck_depth_mm, apex_mm, neck_scale.
 aligners-cmd-manual-adjust-doc = Sposta e ruota a mano un dente, nella posizione finale (setup) o a un allineatore (stage). Il movimento è un incremento nel riferimento del dente, attorno al suo centro di resistenza: mesial_mm, buccal_mm, extrusion_mm, torque_deg, tip_deg, rotation_deg, e/o una posa delta (t in mm, q come quaternione x, y, z, w; absolute la rende la nuova posa; reset riporta prima il dente a riposo). Il risultato è memorizzato come fanno le altre fasi. La corona viene poi controllata contro i vicini con la misura di collisione dello staging: la penetrazione con ogni vicino è riportata prima e dopo, e refuse_on_collision trasforma una collisione in un errore. Una modifica del setup rende lo staging da rifare; lock tiene il dente dove è messo quando il setup viene ricalcolato. Parametri: fdi (obbligatorio), stage, le sei componenti, delta, absolute, reset, lock, refuse_on_collision.
+
+## ---- commands: study_base ----
+aligners-menu-output-study-models = Modelli studio (europeo / ABO)
+aligners-desc-output-study-models = Modelli studio ortodontici con lo zoccolo squadrato, nello stile europeo o americano (ABO) scelto nelle impostazioni.
+aligners-cmd-study-models-doc = Costruisce i modelli studio ortodontici delle arcate che hanno una scansione e le etichette dei denti, in occlusione (dopo la registrazione del morso o il morso virtuale), su uno zoccolo squadrato. Comune ai due stili: piani di base paralleli al piano occlusale, un piano posteriore perpendicolare al rafe palatino mediano (stimato dalla simmetria dell'arcata superiore) comune alle due arcate, pareti verticali e anatomia (denti, gengiva fino al fornice, palato) mai tagliata: al suo posto lo zoccolo viene abbassato e le pareti spostate in fuori, con un avviso. ABO: 70 mm per la coppia in occlusione, un terzo di parte artistica, eptagono superiore con talloni a 115 gradi, lati a 65 gradi e tagli anteriori che si incontrano sul rafe, arco anteriore inferiore da canino a canino. Europeo: pareti a 90 gradi, zoccolo di 10 mm sotto l'anatomia, punta superiore sul rafe, fronte inferiore piatto. I parametri partono dalle impostazioni del caso; ogni campo indicato le sostituisce. Con dir scrive lì study-model-upper.stl e study-model-lower.stl. Restituisce il riferimento, i piani, il contorno, gli angoli e le altezze progettati e misurati sulle mesh e gli avvisi. Il caso non viene modificato. Parametri: arch, dir, style, total_height_mm, art_fraction, art_thickness_mm, base_thickness_mm, m_base_mm, back_margin_mm, side_angle_deg, lower_side_angle_deg, heel_angle_deg, heel_length_mm, front_angle_deg, side_clear_mm, canine_clear_mm, labial_clear_mm, vestibule_clear_mm, eu_side_angle_deg, eu_heels, sulcus_reach_mm, voxel_mm, tolerance_mm.
+aligners-cmd-study-models-settings = Impostazioni dei modelli studio
+aligners-cmd-study-models-settings-doc = Cambia le impostazioni dei modelli studio del caso: i campi indicati sostituiscono quelli attuali e diventano i valori predefiniti dei modelli studio. Parametri: style (european o abo), total_height_mm, art_fraction, base_thickness_mm, m_base_mm, back_margin_mm, side_angle_deg, heel_angle_deg, side_clear_mm, vestibule_clear_mm.
+aligners-study-settings = Impostazioni dello zoccolo
+aligners-study-style = Stile
+aligners-study-style-european = Europeo
+aligners-study-style-abo = Americano (ABO)
+aligners-study-total-height = Altezza della coppia, ABO (mm)
+aligners-study-art-fraction = Parte artistica, ABO (frazione)
+aligners-study-base-thickness = Spessore dello zoccolo, europeo (mm)
+aligners-study-m-base = Margine sotto l'anatomia (mm)
+aligners-study-back-margin = Margine posteriore (mm)
+aligners-study-side-angle = Angolo dei tagli laterali, ABO (gradi)
+aligners-study-heel-angle = Angolo dei talloni (gradi)
+aligners-study-side-clear = Margine laterale, ABO (mm)
+aligners-study-vestibule-clear = Margine del vestibolo, europeo (mm)
+aligners-study-apply = Applica
+aligners-study-reset = Annulla modifiche
+aligners-study-no-case = Apri un caso con i dati degli Allineatori per modificare le impostazioni.

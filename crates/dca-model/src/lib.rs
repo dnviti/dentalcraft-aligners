@@ -20,7 +20,10 @@ pub use bite::{
     AlignerBite, BiteClosing, OcclusalMode, OcclusalSettings, Ramp, RampKind, RampSettings,
 };
 pub use migrate::{ModelError, migrate};
-pub use settings::{PerioStage, Settings, StagingPattern, StagingSettings, TrimMode, TrimParams};
+pub use settings::{
+    PerioStage, Settings, StagingPattern, StagingSettings, StudyBaseSettings, StudyBaseStyle,
+    TrimMode, TrimParams,
+};
 pub use state::{
     AlignersState, ArchDetails, ArchSpace, Diagnosis, IprStep, Seed, Setup, Stage, ToothFrame,
     ToothMeasures,

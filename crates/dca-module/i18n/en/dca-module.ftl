@@ -323,3 +323,26 @@ aligners-cmd-manual-seeds-doc = Adds, moves or deletes the seed of a tooth. A se
 aligners-cmd-manual-rebuild-tooth = Rebuild one tooth by hand
 aligners-cmd-manual-rebuild-tooth-doc = Builds a single tooth again from its region on the scan: from the current labels, from a selection of vertices that becomes the tooth (its other vertices go to the gingiva), or after finding the region again from the seed of the tooth (resegment). The region is checked first (size, height, border of the scan, holes) and an invalid one is refused with the reason, changing nothing. The teeth of the arch are then measured again and the closed solid of the tooth replaces the old one; the other teeth keep their solids, frames and movements, and the setup and staging of this tooth are out of date. Parameters: fdi (required), vertices, resegment, neck_depth_mm, apex_mm, neck_scale.
 aligners-cmd-manual-adjust-doc = Moves and turns one tooth by hand, in the final position (setup) or at one aligner (stage). The movement is an increment in the frame of the tooth, about its centre of resistance: mesial_mm, buccal_mm, extrusion_mm, torque_deg, tip_deg, rotation_deg, and/or a pose delta (t in mm, q as a quaternion x, y, z, w; absolute makes it the new pose; reset brings the tooth back to rest first). The result is stored as the other stages store it. The crown is then checked against its neighbours with the collision metric of the staging: the penetration with each neighbour is reported before and after, and refuse_on_collision turns a collision into an error. A move of the setup leaves the staging out of date; lock keeps the tooth where it is put when the setup is computed again. Parameters: fdi (required), stage, the six components, delta, absolute, reset, lock, refuse_on_collision.
+
+## ---- commands: study_base ----
+aligners-menu-output-study-models = Study models (European / ABO)
+aligners-desc-output-study-models = Orthodontic study models on a trimmed base, in the European or the American (ABO) style chosen in the settings.
+aligners-cmd-study-models-doc = Builds the orthodontic study models of the arches that have a scan and tooth labels, in occlusion (after the bite registration or the virtual bite), on a trimmed base. Common to both styles: base planes parallel to the occlusal plane, a back plane perpendicular to the midpalatal raphe (estimated from the symmetry of the upper arch) shared by both arches, vertical walls, and the anatomy (teeth, gingiva down to the sulcus, palate) never cut: the base is lowered and the walls pushed out instead, with a warning. ABO: 70 mm for the articulated pair, one third art portion, upper heptagon with heels at 115 degrees, sides at 65 degrees and the front cuts meeting on the raphe, lower front arc from canine to canine. European: walls at 90 degrees, 10 mm base under the anatomy, upper tip on the raphe, lower front flat. The parameters start from the case settings; every field given overrides them. With dir it writes study-model-upper.stl and study-model-lower.stl there. Returns the frame, the planes, the outline, the angles and heights designed and measured on the meshes, and the warnings. The case is not modified. Parameters: arch, dir, style, total_height_mm, art_fraction, art_thickness_mm, base_thickness_mm, m_base_mm, back_margin_mm, side_angle_deg, lower_side_angle_deg, heel_angle_deg, heel_length_mm, front_angle_deg, side_clear_mm, canine_clear_mm, labial_clear_mm, vestibule_clear_mm, eu_side_angle_deg, eu_heels, sulcus_reach_mm, voxel_mm, tolerance_mm.
+aligners-cmd-study-models-settings = Study model settings
+aligners-cmd-study-models-settings-doc = Changes the study model settings of the case: the fields given replace the current ones and become the defaults of the study models. Parameters: style (european or abo), total_height_mm, art_fraction, base_thickness_mm, m_base_mm, back_margin_mm, side_angle_deg, heel_angle_deg, side_clear_mm, vestibule_clear_mm.
+aligners-study-settings = Base settings
+aligners-study-style = Style
+aligners-study-style-european = European
+aligners-study-style-abo = American (ABO)
+aligners-study-total-height = Pair height, ABO (mm)
+aligners-study-art-fraction = Art portion, ABO (fraction)
+aligners-study-base-thickness = Base thickness, European (mm)
+aligners-study-m-base = Clearance under the anatomy (mm)
+aligners-study-back-margin = Back margin (mm)
+aligners-study-side-angle = Side cut angle, ABO (deg)
+aligners-study-heel-angle = Heel angle (deg)
+aligners-study-side-clear = Side clearance, ABO (mm)
+aligners-study-vestibule-clear = Vestibule clearance, European (mm)
+aligners-study-apply = Apply
+aligners-study-reset = Revert
+aligners-study-no-case = Open a case with the Aligners data to edit the settings.

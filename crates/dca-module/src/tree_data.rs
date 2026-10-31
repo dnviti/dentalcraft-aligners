@@ -404,6 +404,12 @@ pub(crate) static GROUPS: &[Node] = &[
                 "check-circle",
             ),
             Node::leaf(
+                "aligners.output.study-models",
+                "aligners-menu-output-study-models",
+                "aligners-desc-output-study-models",
+                "cube",
+            ),
+            Node::leaf(
                 "aligners.output.manifest",
                 "aligners-menu-output-manifest",
                 "aligners-desc-output-manifest",
