@@ -6,7 +6,7 @@ use dc_case::{BlobRef, Fdi, Pose, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{SCHEMA_VERSION, Settings, TrimParams, Visit};
+use crate::{AlignerBite, SCHEMA_VERSION, Settings, TrimParams, Visit};
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
 /// number. Seeds tell the segmentation which teeth exist and where.
@@ -182,6 +182,8 @@ pub struct AlignersState {
     pub trim: TrimParams,
     /// Settings.
     pub settings: Settings,
+    /// Bite with the aligners worn: occlusal settings and ramps.
+    pub aligner_bite: AlignerBite,
     /// Closed solid of each reconstructed tooth (a mesh blob in case
     /// coordinates: watertight, outward normals).
     pub crowns: BTreeMap<Fdi, BlobRef>,
