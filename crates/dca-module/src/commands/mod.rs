@@ -77,6 +77,7 @@ macro_rules! stage_command {
     };
 }
 
+mod auto;
 mod autoseed;
 mod bite;
 mod demo;
@@ -84,8 +85,8 @@ mod diagnosis;
 mod export;
 mod frame;
 mod gingiva;
-mod occlusion;
 mod manual;
+mod occlusion;
 mod ramps;
 mod reconstruct;
 mod schedule;
@@ -120,9 +121,9 @@ pub fn all() -> Vec<CommandSpec> {
         stamp::specs,
         export::specs,
         visits::specs,
-    ]
         manual::specs,
         auto::specs,
+    ]
     .iter()
     .flat_map(|specs| specs())
     .collect()
