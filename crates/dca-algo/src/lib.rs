@@ -14,6 +14,7 @@
 //! `Params: Deserialize + JsonSchema + Default`, and `dca-module` registers
 //! it as a command with `stage_command!`.
 
+pub mod aligner_bite;
 pub mod anatomy;
 pub mod archform;
 pub mod autoseed;
