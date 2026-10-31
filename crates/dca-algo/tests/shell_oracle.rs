@@ -269,7 +269,7 @@ fn check(name: &str, k: Option<usize>, params: &Params, thickness_tol: f64) -> f
         .map(|x| (x - design.clearance_mm).abs())
         .collect();
     // signed: negative where the wall is thinner than asked
-    let mut outer: Vec<f64> = d
+    let outer: Vec<f64> = d
         .iter()
         .filter(|x| **x >= split)
         .map(|x| x - design.clearance_mm - design.thickness_mm)
