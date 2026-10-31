@@ -6,7 +6,7 @@ use dc_case::{BlobRef, Fdi, Pose, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{SCHEMA_VERSION, Settings, TrimParams};
+use crate::{SCHEMA_VERSION, Settings, TrimParams, Visit};
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
 /// number. Seeds tell the segmentation which teeth exist and where.
@@ -189,6 +189,8 @@ pub struct AlignersState {
     /// whose vertex labels hold the tooth a vertex moves with and the
     /// margin, membrane and col flags of `dca_algo::gingiva`).
     pub gingiva: BTreeMap<ScanRole, BlobRef>,
+    /// Control visits, in order (`dca_algo::visits`).
+    pub visits: Vec<Visit>,
 }
 
 impl dc_case::ModuleData for AlignersState {
@@ -207,13 +209,15 @@ impl dc_case::ModuleData for AlignersState {
     fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
     }
-    /// The label, closed crown and gingiva blobs are the blob references in
-    /// the state (the other fields are plain numbers and poses).
+    /// The label, closed crown, gingiva and control-visit scan blobs are the
+    /// blob references in the state (the other fields are plain numbers and
+    /// poses).
     fn referenced_blobs(&self) -> Vec<BlobRef> {
         self.labels
             .values()
             .chain(self.crowns.values())
             .chain(self.gingiva.values())
+            .chain(self.visits.iter().filter_map(|v| v.scan.as_ref()))
             .copied()
             .collect()
     }
