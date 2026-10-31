@@ -225,7 +225,13 @@ aligners-desc-tools-history = Fasi fatte, da fare e da rifare; torna a una fase 
 
 ## ---- commands: frame ----
 
+aligners-cmd-frame-world = Riferimento mondo
+aligners-cmd-frame-world-doc = Porta il paziente sugli assi del mondo: calcola la trasformazione rigida che sposta il caso in modo che l'origine sia il centro dell'arcata sul piano occlusale, la linea mediana corra lungo Y con gli incisivi verso -Y e la destra del paziente verso -X, l'arcata inferiore abbia i denti in alto (+Z) e la superiore i denti in basso. Le scansioni non vengono modificate: la trasformazione è salvata nel caso. Il riferimento è l'arcata inferiore, oppure la superiore se manca l'inferiore. Il riferimento d'arcata viene dai semi dell'arcata di riferimento se sono abbastanza, altrimenti è stimato dalla forma della scansione. Parametro: reference (auto, upper o lower).
+
 ## ---- commands: demo ----
+
+aligners-cmd-demo-generate = Arcata dimostrativa
+aligners-cmd-demo-generate-doc = Genera un'arcata dentale sintetica (un typodont, non dati di un paziente) con la verità di riferimento: la scansione è aggiunta al caso come scansione superiore o inferiore, al posto di quella già presente, e il seme di ogni dente e le etichette dei denti per vertice sono salvati nei dati di Allineatori. Gli stessi parametri danno sempre lo stesso modello. Parametri: arch (upper o lower), severity (mild, moderate o severe: quanto i denti sono ruotati, spostati e affollati), seed (numero dell'estrazione casuale), third_molars (include i terzi molari, predefinito false).
 
 ## ---- commands: autoseed ----
 

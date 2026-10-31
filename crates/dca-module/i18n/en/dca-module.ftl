@@ -225,7 +225,13 @@ aligners-desc-tools-history = Steps done, to do and to redo; go back to an earli
 
 ## ---- commands: frame ----
 
+aligners-cmd-frame-world = World frame
+aligners-cmd-frame-world-doc = Puts the patient on the world axes: computes the rigid transform that moves the case so that the origin is the centre of the dental arch on the occlusal plane, the midline runs along Y with the incisors towards -Y and the patient's right towards -X, the lower arch has the teeth up (+Z) and the upper arch the teeth down. The scans are not modified: the transform is stored in the case. The reference is the lower arch, or the upper arch when there is no lower one. The arch frame comes from the seeds of the reference arch when there are enough of them, otherwise it is estimated from the shape of the scan. Parameter: reference (auto, upper or lower).
+
 ## ---- commands: demo ----
+
+aligners-cmd-demo-generate = Demo arch
+aligners-cmd-demo-generate-doc = Generates a synthetic dental arch (a typodont, not patient data) with the ground truth: the scan is added to the case as the upper or lower scan, replacing the one already there, and the seed of every tooth and the per-vertex tooth labels are stored in the Aligners data. The same parameters always give the same model. Parameters: arch (upper or lower), severity (mild, moderate or severe: how much the teeth are rotated, displaced and crowded), seed (number of the random draw), third_molars (include the third molars, default false).
 
 ## ---- commands: autoseed ----
 
