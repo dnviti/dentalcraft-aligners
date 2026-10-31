@@ -435,27 +435,7 @@ pub fn fill_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manual::tests::grid;
-
-    /// A gingival plane (40 x 40 mm, 0.4 mm apart) with a tooth-shaped bump of
-    /// radius `r_tooth` and height `h`: a rounded rim and a vertical wall that
-    /// meets the gingiva at a sharp concave fold, as a crown does. `+Z` is up.
-    fn plateau(r_tooth: f64, h: f64) -> (Vec<DVec3>, Vec<[u32; 3]>, Vec<f64>) {
-        let (mut v, t) = grid(101);
-        let mut r = Vec::new();
-        for p in &mut v {
-            p.x *= 0.4;
-            p.y *= 0.4;
-            let d = ((p.x - 20.0).powi(2) + (p.y - 20.0).powi(2)).sqrt();
-            p.z = if d < r_tooth {
-                h * (1.0 - (d / r_tooth).powi(6)).sqrt()
-            } else {
-                0.0
-            };
-            r.push(d);
-        }
-        (v, t, r)
-    }
+    use crate::manual::tests::bump as plateau;
 
     fn iou(got: &[u32], truth: &[u32]) -> f64 {
         let inter = got.iter().filter(|g| truth.contains(g)).count();

@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 
 use dc_case::Fdi;
-use dc_mesh::TriMesh;
 use glam::{DVec2, DVec3};
 use serde::Serialize;
 
@@ -252,56 +251,168 @@ pub fn check_region(
         }
     }
 
-    // holes: gingiva inside the crown (more than one outline of the main piece)
-    let main_tris: Vec<[u32; 3]> = full
-        .iter()
-        .filter(|t| t.iter().all(|&i| in_main(i)))
-        .copied()
-        .collect();
-    if !main_tris.is_empty() {
-        let mut map = vec![u32::MAX; n];
-        let mut positions = Vec::new();
-        for t in &main_tris {
-            for &i in t {
-                if map[i as usize] == u32::MAX {
-                    map[i as usize] = positions.len() as u32;
-                    positions.push(scan.vertices[i as usize].as_vec3());
+    // holes: gingiva inside the crown (more than one outline of the main piece). The
+    // outlines are the boundary edges of the main piece, grouped by the connected piece of
+    // the rest of the scan that lies across them (a hole is an enclosed piece; the outer
+    // outline is the longest).
+    let outside: Vec<bool> = (0..n as u32).map(|i| !in_main(i)).collect();
+    let mut piece = vec![u32::MAX; n];
+    let mut pieces = 0u32;
+    for s in 0..n {
+        if !outside[s] || piece[s] != u32::MAX {
+            continue;
+        }
+        piece[s] = pieces;
+        let mut stack = vec![s as u32];
+        while let Some(u) = stack.pop() {
+            for &v in scan.adjacency().neighbors(u) {
+                if outside[v as usize] && piece[v as usize] == u32::MAX {
+                    piece[v as usize] = pieces;
+                    stack.push(v);
                 }
             }
         }
-        let tris: Vec<[u32; 3]> = main_tris
-            .iter()
-            .map(|t| t.map(|i| map[i as usize]))
-            .collect();
-        let mesh = TriMesh::new(positions, tris);
-        let loops = mesh.boundary_loops();
-        if loops.len() > 1 {
-            let mut lens: Vec<f64> = loops
-                .iter()
-                .map(|lp| {
-                    (0..lp.len())
-                        .map(|k| {
-                            let a = mesh.positions[lp[k] as usize];
-                            let b = mesh.positions[lp[(k + 1) % lp.len()] as usize];
-                            f64::from(a.distance(b))
-                        })
-                        .sum()
-                })
-                .collect();
-            lens.sort_by(|a, b| b.total_cmp(a));
-            let holes: Vec<f64> = lens[1..].iter().copied().filter(|&x| x > HOLE_MM).collect();
-            let biggest = holes.iter().copied().fold(0.0, f64::max);
-            if !holes.is_empty() && biggest > HOLE_ERROR * lens[0] {
-                out.errors.push(format!(
-                    "the region has a hole as big as the crown (outline {biggest:.1} mm): it is not a crown; fill it with the brush or clean the labels"
-                ));
-            } else if !holes.is_empty() {
-                out.warnings.push(format!(
-                    "the region has {} holes (gingiva inside the crown, outline up to {biggest:.1} mm), closed without anatomical shape: better fill them with the brush or clean the labels",
-                    holes.len()
-                ));
+        pieces += 1;
+    }
+    let main_tris = full
+        .iter()
+        .filter(|t| t.iter().all(|&i| in_main(i)))
+        .copied();
+    let boundary: std::collections::HashSet<(u32, u32)> =
+        border_edges(main_tris).into_iter().collect();
+    let edge_len =
+        |a: u32, b: u32| (scan.vertices[a as usize] - scan.vertices[b as usize]).length();
+    let mut contour: HashMap<u32, f64> = HashMap::new();
+    for t in scan.tris {
+        for k in 0..3 {
+            let (a, b, w) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            if boundary.contains(&(a.min(b), a.max(b))) && !in_main(w) {
+                *contour.entry(piece[w as usize]).or_insert(0.0) += edge_len(a, b);
             }
         }
     }
+    // a boundary edge of the scan itself is part of the outer outline
+    for &(a, b) in &scan_border {
+        if boundary.contains(&(a, b)) {
+            *contour.entry(u32::MAX).or_insert(0.0) += edge_len(a, b);
+        }
+    }
+    let mut lens: Vec<f64> = contour.into_values().filter(|&l| l > 0.0).collect();
+    lens.sort_by(|a, b| b.total_cmp(a));
+    if lens.len() > 1 {
+        let holes: Vec<f64> = lens[1..].iter().copied().filter(|&x| x > HOLE_MM).collect();
+        let biggest = holes.iter().copied().fold(0.0, f64::max);
+        if !holes.is_empty() && biggest > HOLE_ERROR * lens[0] {
+            out.errors.push(format!(
+                "the region has a hole as big as the crown (outline {biggest:.1} mm): it is not a crown; fill it with the brush or clean the labels"
+            ));
+        } else if !holes.is_empty() {
+            out.warnings.push(format!(
+                "the region has {} holes (gingiva inside the crown, outline up to {biggest:.1} mm), closed without anatomical shape: better fill them with the brush or clean the labels",
+                holes.len()
+            ));
+        }
+    }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manual::tests::bump;
+
+    fn fdi() -> Fdi {
+        Fdi::new(36).unwrap()
+    }
+
+    fn check(labels: &[u16], v: &[DVec3], t: &[[u32; 3]]) -> RegionReport {
+        let scan = Scan::new(v, t).unwrap();
+        check_region(&scan, labels, fdi(), v)
+    }
+
+    #[test]
+    fn a_crown_on_the_gingiva_is_accepted() {
+        let (v, t, r) = bump(5.5, 7.5);
+        let labels: Vec<u16> = r.iter().map(|&d| if d < 5.6 { 36 } else { 0 }).collect();
+        let rep = check(&labels, &v, &t);
+        assert!(rep.errors.is_empty(), "{rep:?}");
+        assert!(rep.warnings.is_empty(), "{rep:?}");
+        assert_eq!(rep.parts, 1);
+        assert!((rep.width_mm - 11.0).abs() < 0.6, "{}", rep.width_mm);
+        assert!((rep.height_mm - 7.5).abs() < 0.1);
+        assert!(rep.area_mm2 > 90.0);
+        assert!(rep.message(fdi()).starts_with("Tooth 36: "));
+    }
+
+    #[test]
+    fn a_region_that_cannot_be_a_crown_is_refused_with_the_reason() {
+        let (v, t, r) = bump(5.5, 7.5);
+        // nothing labelled
+        let none = vec![0u16; v.len()];
+        assert!(check(&none, &v, &t).errors[0].contains("no region"));
+        // a speck
+        let speck: Vec<u16> = r.iter().map(|&d| if d < 1.2 { 36 } else { 0 }).collect();
+        assert!(check(&speck, &v, &t).errors[0].contains("too small"));
+        // a flat disc of gingiva
+        let flat: Vec<u16> = r
+            .iter()
+            .map(|&d| if d > 8.0 && d < 14.0 { 36 } else { 0 })
+            .collect();
+        let rep = check(&flat, &v, &t);
+        assert!(rep.errors[0].contains("too low"), "{rep:?}");
+        assert!(rep.message(fdi()).contains("gingiva"));
+        // the corner of the scan: the outline lies on its open border
+        let corner: Vec<u16> = v
+            .iter()
+            .map(|p| {
+                if p.x < 7.0 && p.y < 7.0 && p.z >= 0.0 {
+                    36
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let rep = check(&corner, &v, &t);
+        assert!(
+            rep.errors.iter().any(|e| e.contains("border")),
+            "border: {rep:?}"
+        );
+        // a ring: a hole as big as the crown
+        let ring: Vec<u16> = r
+            .iter()
+            .map(|&d| if d > 4.5 && d < 5.5 { 36 } else { 0 })
+            .collect();
+        let rep = check(&ring, &v, &t);
+        assert!(rep.errors.iter().any(|e| e.contains("hole")), "{rep:?}");
+    }
+
+    #[test]
+    fn warnings_do_not_refuse_the_region() {
+        let (v, t, r) = bump(5.5, 7.5);
+        // the crown and a distant piece: split in two parts
+        let split: Vec<u16> = (0..v.len())
+            .map(|i| {
+                let far = (v[i].x - 4.0).powi(2) + (v[i].y - 4.0).powi(2) < 4.0;
+                if r[i] < 5.6 || far { 36 } else { 0 }
+            })
+            .collect();
+        let rep = check(&split, &v, &t);
+        assert!(rep.errors.is_empty(), "{rep:?}");
+        assert_eq!(rep.parts, 2);
+        assert!(rep.warnings.iter().any(|w| w.contains("split")), "{rep:?}");
+        // a small hole in the crown is reported, not refused
+        let holed: Vec<u16> = r
+            .iter()
+            .map(|&d| {
+                if d < 5.6 && !(d > 2.0 && d < 2.8) {
+                    36
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let rep = check(&holed, &v, &t);
+        assert!(rep.errors.is_empty(), "{rep:?}");
+        assert!(rep.warnings.iter().any(|w| w.contains("hole")), "{rep:?}");
+    }
 }

@@ -387,6 +387,28 @@ mod tests {
         (v, t)
     }
 
+    /// A gingival plane (40 x 40 mm, 0.4 mm apart) with a tooth-shaped bump of
+    /// radius `r_tooth` and height `h` in the middle: a rounded rim and a
+    /// vertical wall that meets the gingiva at a sharp concave fold, as a
+    /// crown does. `+Z` is up. Returns the distance of every vertex from the
+    /// axis of the bump too.
+    pub(crate) fn bump(r_tooth: f64, h: f64) -> (Vec<DVec3>, Vec<[u32; 3]>, Vec<f64>) {
+        let (mut v, t) = grid(101);
+        let mut r = Vec::new();
+        for p in &mut v {
+            p.x *= 0.4;
+            p.y *= 0.4;
+            let d = ((p.x - 20.0).powi(2) + (p.y - 20.0).powi(2)).sqrt();
+            p.z = if d < r_tooth {
+                h * (1.0 - (d / r_tooth).powi(6)).sqrt()
+            } else {
+                0.0
+            };
+            r.push(d);
+        }
+        (v, t, r)
+    }
+
     #[test]
     fn adjacency_lists_each_neighbour_once() {
         let (v, t) = grid(3);
