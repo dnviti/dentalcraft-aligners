@@ -8,31 +8,31 @@
 //! * **model** of aligner `k`: the closed teeth at their stage pose and the
 //!   gingiva moved with them, closed into a cast with a flat base
 //!   ([`dca_algo::shell::run`], model only, reduced within the mesh
-//!   tolerance), then the stamp embossed on it (`k >= 1`; the initial model
-//!   has none);
+//!   tolerance without crossings in case coordinates), then the stamp
+//!   embossed on it (`k >= 1`; the initial model has none);
 //! * **aligner** `k`: the closed field of the same parts (the blockout of the
-//!   trim mode: 0.8 mm for the smooth border, `SMOOTH_BLOCKOUT_MM`), the
-//!   shell field between the offsets at `clearance` and `clearance + wall`,
-//!   the ramps united with it on the field and the cavity of their tooth cut
-//!   again ([`dca_algo::ramps::apply_to_grid`]), the trim (cutter, reach of
-//!   the crowns, rounded rim: [`dca_algo::trim::run`]), the reduction within
-//!   the mesh tolerance, the occlusal thickness and the grinding of the bite
-//!   with the aligners worn ([`occlusal::shape_shell`], when the case asks
-//!   for it and both arches are there), then the stamp engraved inside the
-//!   wall.
+//!   trim mode: 0.8 mm for the smooth border, `SMOOTH_BLOCKOUT_MM`; its band
+//!   reaching `clearance + wall`, [`shell::closed_grid_for`]), the shell
+//!   field between its levels at `clearance` and `clearance + wall`, the
+//!   ramps united with it on the field and the cavity of their tooth cut
+//!   again ([`dca_algo::ramps::apply_to_grid`]), the occlusal thickness and
+//!   the grinding of the bite with the aligners worn cut from the field
+//!   ([`occlusal::shape_field`], when the case asks for it and both arches
+//!   are there), the trim (cutter, reach of the crowns, rounded rim:
+//!   [`dca_algo::trim::run`]), the reduction within the mesh tolerance
+//!   ([`shell::reduce_to`]), then the stamp engraved inside the wall.
 //!
-//! Every step after the trim is checked as the print check would (self-
-//! intersections, holes, thinnest wall): a reduction, an occlusal shaping or
-//! a stamp that makes the file worse to print is left out and the report
-//! says so (the reduction of the shell stage accepts a fold within the
-//! tolerance; the local stamp and the occlusal shaping can fold a coarse
-//! surface).
+//! The reduction and the stamp are checked as the print check would, in
+//! case coordinates (self-intersections, holes, thinnest wall): one that
+//! makes the file worse to print is left out and the report says so.
 //!
 //! Deviation: the plugin adds the ramps after the occlusal shaping, with mesh
-//! booleans. Here they are united on the shell field before the trim (one
-//! meshing, a closed surface by construction), and the vertices on the
-//! ramps that the occlusal shaping would lower are put back where they were,
-//! so the ramps keep their height as in the plugin.
+//! booleans, and lowers the outer vertices of the shell mesh onto the
+//! occlusal limit. Here both are done on the shell field before the trim
+//! (one meshing, a closed surface by construction): the ramps are united
+//! with it, the solid above the occlusal limit is subtracted from it except
+//! within the minimum thickness of the model, and nothing is cut over the
+//! ramps, so they keep their height as in the plugin.
 //!
 //! Nothing is kept between two calls but the bite of a stage (small, used by
 //! the aligners of both arches): every call builds its fields and drops
@@ -298,17 +298,18 @@ impl<'a> ShellProvider<'a> {
             .collect()
     }
 
-    /// The reduction of `full` within the tolerance (or half of it) when it
-    /// is no worse to print than `full`: no more self-intersections, the
-    /// same holes, no wall thinner than `min_wall` that `full` does not have
-    /// (the shell stage accepts a reduction on its distance alone: a fold
-    /// within the tolerance passes). Otherwise the full resolution, with a
-    /// note. Also the self-intersections of the mesh returned.
+    /// The reduction of `full` (arch coordinates) within the tolerance (or
+    /// half of it, [`shell::reduce_to`]: no crossing where the vertices land
+    /// in case coordinates, `to_case`) when it is no worse to print than
+    /// `full`: no more self-intersections, the same holes, no wall thinner
+    /// than `min_wall` that `full` does not have. Otherwise the full
+    /// resolution, with a note. Also the self-intersections of the mesh
+    /// returned, in case coordinates.
     fn reduce_checked(
         &self,
         full: TriMesh,
-        arch: Arch,
-        k: u32,
+        to_case: &DMat4,
+        (arch, k): (Arch, u32),
         aligner: bool,
         min_wall: Option<f64>,
     ) -> Result<(TriMesh, Option<usize>), ExportError> {
@@ -316,15 +317,16 @@ impl<'a> ShellProvider<'a> {
         if tol <= 0.0 {
             return Ok((full, None));
         }
-        let base = check(&full, min_wall);
+        let base = check(&rigid(to_case, &full), min_wall);
         let wall = |c: &printcheck::PrintCheck| c.min_thickness_mm.unwrap_or(f64::INFINITY);
         let floor = min_wall.map_or(0.0, |m| wall(&base).min(m));
         for t in [tol, 0.5 * tol] {
-            let r = shell::reduce(&full, t).map_err(|e| package("reduction", arch, k, e))?;
+            let r = shell::reduce_to(&full, t, Some(to_case))
+                .map_err(|e| package("reduction", arch, k, e))?;
             if r.tris.len() == full.tris.len() {
                 break;
             }
-            let c = check(&r, min_wall);
+            let c = check(&rigid(to_case, &r), min_wall);
             if c.self_intersections <= base.self_intersections
                 && c.genus == base.genus
                 && c.boundary_edges == 0
@@ -337,18 +339,19 @@ impl<'a> ShellProvider<'a> {
         Ok((full, base.self_intersections))
     }
 
-    /// The stamp on `mesh` (arch coordinates): the mesh stamped, or as it was
+    /// The stamp on `mesh` (arch coordinates): the mesh stamped, or `None`
     /// with a note (no room, or the text would fold the surface: more
-    /// self-intersections than `before`, the ones of `mesh` when known).
+    /// self-intersections in case coordinates, `to_case`, than `before`, the
+    /// ones of `mesh` there when known).
     fn stamped(
         &self,
-        mesh: TriMesh,
+        mesh: &TriMesh,
         before: Option<usize>,
-        arch: Arch,
-        k: u32,
+        to_case: &DMat4,
+        (arch, k): (Arch, u32),
         kind: stamp::Kind,
         sites: Vec<ToothSite>,
-    ) -> Result<TriMesh, ExportError> {
+    ) -> Option<TriMesh> {
         let aligner = kind == stamp::Kind::Shell;
         let params = stamp::Params {
             number: k,
@@ -363,38 +366,28 @@ impl<'a> ShellProvider<'a> {
             ..stamp::Params::default()
         };
         let input = stamp::Input {
-            mesh: &mesh,
+            mesh,
             arch,
             teeth: sites,
         };
-        match stamp::run(&input, &params) {
+        let why = match stamp::run(&input, &params) {
             Ok(Outcome::Stamped(done)) => {
-                let before = before.or_else(|| check(&mesh, None).self_intersections);
-                let after = check(&done.mesh, None).self_intersections;
-                if after > before {
-                    self.note(
-                        arch,
-                        k,
-                        aligner,
-                        "rpt-note-stamp",
-                        format!(
-                            "the text would fold the surface ({} self-intersections)",
-                            after.unwrap_or(0) - before.unwrap_or(0)
-                        ),
-                    );
-                    return Ok(mesh);
+                let before =
+                    before.or_else(|| check(&rigid(to_case, mesh), None).self_intersections);
+                let after = check(&rigid(to_case, &done.mesh), None).self_intersections;
+                if after <= before {
+                    return Some(done.mesh);
                 }
-                Ok(done.mesh)
+                format!(
+                    "the text would fold the surface ({} self-intersections)",
+                    after.unwrap_or(0) - before.unwrap_or(0)
+                )
             }
-            Ok(Outcome::Skipped { reason }) => {
-                self.note(arch, k, aligner, "rpt-note-stamp", reason);
-                Ok(mesh)
-            }
-            Err(e) => {
-                self.note(arch, k, aligner, "rpt-note-stamp", e.to_string());
-                Ok(mesh)
-            }
-        }
+            Ok(Outcome::Skipped { reason }) => reason,
+            Err(e) => e.to_string(),
+        };
+        self.note(arch, k, aligner, "rpt-note-stamp", why);
+        None
     }
 }
 
@@ -412,38 +405,20 @@ fn check(mesh: &TriMesh, min_wall: Option<f64>) -> printcheck::PrintCheck {
     )
 }
 
-/// Vertices of `shaped` that the occlusal shaping moved within the box of a
-/// ramp (grown by `reach`) put back where they were in `before` (same
-/// topology): the ramp and the wall it stands on keep their height.
-fn keep_ramps(before: &TriMesh, shaped: &mut TriMesh, ramps: &[TriMesh], reach: f32) {
-    let boxes: Vec<(glam::Vec3, glam::Vec3)> = ramps
+/// The plan boxes of the ramps (their coordinates), grown by `reach`: the
+/// occlusal shaping cuts nothing over them, so the ramps keep their height.
+fn ramp_boxes(ramps: &[TriMesh], reach: f64) -> Vec<(DVec3, DVec3)> {
+    ramps
         .iter()
         .filter(|r| !r.positions.is_empty())
         .map(|r| {
-            let lo = r
-                .positions
-                .iter()
-                .copied()
-                .reduce(glam::Vec3::min)
-                .unwrap_or_default();
-            let hi = r
-                .positions
-                .iter()
-                .copied()
-                .reduce(glam::Vec3::max)
-                .unwrap_or_default();
-            (lo - glam::Vec3::splat(reach), hi + glam::Vec3::splat(reach))
+            let (lo, hi) = r.positions.iter().fold(
+                (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+                |(lo, hi), p| (lo.min(p.as_dvec3()), hi.max(p.as_dvec3())),
+            );
+            (lo - DVec3::splat(reach), hi + DVec3::splat(reach))
         })
-        .collect();
-    for (p, q) in shaped.positions.iter_mut().zip(&before.positions) {
-        if p != q
-            && boxes
-                .iter()
-                .any(|(lo, hi)| q.cmpge(*lo).all() && q.cmple(*hi).all())
-        {
-            *p = *q;
-        }
-    }
+        .collect()
 }
 
 impl MeshProvider for ShellProvider<'_> {
@@ -457,31 +432,36 @@ impl MeshProvider for ShellProvider<'_> {
             blockout: false,
             shell: false,
         };
-        let full_res = shell::Params {
-            tolerance_mm: 0.0,
-            ..self.params.clone()
-        };
-        let out = shell::run(&print.input(&g), &full_res, &self.design, outputs)
+        // reduced within the tolerance by the shell stage (no crossing in case
+        // coordinates, the deviation rule of the plugin)
+        let out = shell::run(&print.input(&g), &self.params, &self.design, outputs)
             .map_err(|e| package("model", arch, k, e))?;
         let Some(model) = out.model else {
             return Ok(None);
         };
-        let (model, si) = self.reduce_checked(model, arch, k, false, None)?;
         if !self.options.stamp || k == 0 {
             return Ok(Some(model));
         }
         let to_arch = print.to_arch();
+        let from_arch = dca_algo::frame::rigid_inverse(&to_arch);
         let Some(parts) = self.trim_parts(arch, &g, &to_arch, &[]) else {
             return Ok(Some(model));
         };
         let sites = self.stamp_sites(&parts, &g, &to_arch);
         let local = rigid(&to_arch, &model);
-        drop(model);
-        let done = self.stamped(local, si, arch, k, stamp::Kind::Model, sites)?;
-        Ok(Some(rigid(
-            &dca_algo::frame::rigid_inverse(&to_arch),
-            &done,
-        )))
+        Ok(Some(
+            match self.stamped(
+                &local,
+                None,
+                &from_arch,
+                (arch, k),
+                stamp::Kind::Model,
+                sites,
+            ) {
+                Some(done) => rigid(&from_arch, &done),
+                None => model,
+            },
+        ))
     }
 
     fn aligner(&self, arch: Arch, k: u32) -> Result<Option<TriMesh>, ExportError> {
@@ -492,13 +472,18 @@ impl MeshProvider for ShellProvider<'_> {
         let to_arch = print.to_arch();
         let from_arch = dca_algo::frame::rigid_inverse(&to_arch);
         let err = |what: &str, e: &dyn std::fmt::Display| package(what, arch, k, e);
-        // the untrimmed shell field
+        // the untrimmed shell field, read from the closing field by arithmetic
         let parts = shell::model_parts(&print.input(&g), self.params.base_height_mm)
             .map_err(|e| err("model", &e))?;
-        let closed = shell::closed_grid(&parts, self.params.shell_voxel_mm, self.shell_blockout)
-            .map_err(|e| err("shell", &e))?;
+        let mut closed = shell::closed_grid_for(
+            &parts,
+            self.params.shell_voxel_mm,
+            self.shell_blockout,
+            self.design.clearance_mm + self.design.thickness_mm,
+        )
+        .map_err(|e| err("shell", &e))?;
+        drop(parts);
         let mut field = shell::shell_grid(&closed, &self.design).map_err(|e| err("shell", &e))?;
-        drop(closed);
         let teeth: Vec<TriMesh> = g.teeth.iter().map(|t| rigid(&to_arch, t)).collect();
 
         // the ramps, on the field (arch coordinates of the bite → of the shell)
@@ -531,6 +516,30 @@ impl MeshProvider for ShellProvider<'_> {
             }
         }
 
+        // the occlusal thickness and the grinding of the bite: the solid above
+        // the allowed top, cut from the field after the rim is rounded (nothing
+        // over the ramps)
+        let mut cut = None;
+        if self.shape
+            && let (Some(bite_to_arch), Some(b)) = (self.bite.to_arch(arch), self.bite_at(k))
+        {
+            let keep = ramp_boxes(&ramps_bite, occlusal::CELL + self.params.shell_voxel_mm);
+            cut = occlusal::shape_cutter(
+                &mut closed,
+                self.design.clearance_mm,
+                &b,
+                !arch.is_upper(),
+                &self.bite.covered(arch),
+                self.bite.design(),
+                &(bite_to_arch * from_arch),
+                &keep,
+                &field,
+            )
+            .map_err(|e| err("occlusal shaping", &e))?
+            .map(|(c, _)| c);
+        }
+        drop(closed);
+
         // the trim
         let Some(tp) = self.trim_parts(arch, &g, &to_arch, &teeth) else {
             return Ok(None);
@@ -544,6 +553,7 @@ impl MeshProvider for ShellProvider<'_> {
             scan_border: &tp.scan_border,
             clearance_mm: self.design.clearance_mm,
             thickness_mm: self.design.thickness_mm,
+            cut: cut.as_ref(),
         };
         let done = trim::run(&input, &self.trim).map_err(|e| err("trim", &e))?;
         drop(field);
@@ -565,65 +575,17 @@ impl MeshProvider for ShellProvider<'_> {
                 format!("{} holes through the wall left", done.genus),
             );
         }
-        let (mut mesh, mut si) =
-            self.reduce_checked(done.mesh, arch, k, true, Some(MIN_WALL_MM))?;
-
-        // the occlusal thickness and the grinding of the bite
-        if self.shape
-            && let (Some(bite_to_arch), Some(b)) = (self.bite.to_arch(arch), self.bite_at(k))
-        {
-            let to_bite = bite_to_arch * from_arch;
-            let shell_b = rigid(&to_bite, &mesh);
-            let model_b = rigid(&to_bite, &parts);
-            let (mut shaped, _report) = occlusal::shape_shell(
-                &shell_b,
-                &model_b,
-                &b,
-                !arch.is_upper(),
-                &self.bite.covered(arch),
-                self.bite.design(),
-            );
-            if !ramps_bite.is_empty() {
-                keep_ramps(
-                    &shell_b,
-                    &mut shaped,
-                    &ramps_bite,
-                    self.params.shell_voxel_mm as f32,
-                );
-            }
-            let shaped = rigid(
-                &(to_arch * dca_algo::frame::rigid_inverse(&bite_to_arch)),
-                &shaped,
-            );
-            // the shaping may lower the outer surface through the fitting one
-            // where the blockout keeps the fitting surface off the model: the
-            // wall of the shell stays then, as with the occlusal mode `same`
-            let before = si.or_else(|| check(&mesh, None).self_intersections);
-            let c = check(&shaped, Some(MIN_WALL_MM));
-            if c.self_intersections <= before && c.min_thickness_mm.is_none_or(|w| w >= MIN_WALL_MM)
-            {
-                si = c.self_intersections;
-                mesh = shaped;
-            } else {
-                self.note(
-                    arch,
-                    k,
-                    true,
-                    "rpt-note-bite",
-                    format!(
-                        "the shaping would fold the wall ({} self-intersections, wall {:.2} mm)",
-                        c.self_intersections.unwrap_or(0),
-                        c.min_thickness_mm.unwrap_or(0.0)
-                    ),
-                );
-            }
-        }
-        drop(parts);
+        let (mut mesh, si) =
+            self.reduce_checked(done.mesh, &from_arch, (arch, k), true, Some(MIN_WALL_MM))?;
 
         // the stamp, engraved inside the wall
         if self.options.stamp {
             let sites = self.stamp_sites(&tp, &g, &to_arch);
-            mesh = self.stamped(mesh, si, arch, k, stamp::Kind::Shell, sites)?;
+            if let Some(done) =
+                self.stamped(&mesh, si, &from_arch, (arch, k), stamp::Kind::Shell, sites)
+            {
+                mesh = done;
+            }
         }
         Ok(Some(rigid(&from_arch, &mesh)))
     }
