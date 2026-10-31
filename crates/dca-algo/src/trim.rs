@@ -17,9 +17,11 @@
 //!
 //! Modes ([`Mode`]):
 //!
-//! * **Equator** ([`line::tooth_equators`], [`cutter::equator_field`]): the
+//! * **Equator** ([`line::tooth_equator`], [`cutter::equator_field`]): the
 //!   border on the equator (survey line, height of contour) of every crown
-//!   along the insertion path, moved by `equator_offset_mm`, its tabs
+//!   along its insertion path ([`warp`]: vertical, one common tilted path or
+//!   one path per tooth, the plugin's default; the work is done in the space
+//!   warped so that the paths are vertical), moved by `equator_offset_mm`, its tabs
 //!   rounded, never under the gingival margin nor within 1 mm of the top;
 //!   the trim surface keeps the caps over the crowns and the wall beside
 //!   them above the equator and above the gingiva.
@@ -29,26 +31,38 @@
 //!   (2 nearest).
 //! * **Scalloped**: the gingival margin lowered by `extension_mm` (4
 //!   nearest).
-//! * **Smooth** (the plugin's default): not ported yet; it falls back to
-//!   Scalloped, as the plugin does when the smooth border cannot be built,
-//!   and [`Output::fallback`] says so.
+//! * **Smooth** (the plugin's default, [`smooth::smooth_border`]): the
+//!   margin of the covered teeth taken along the line of the arch, side by
+//!   side, smoothed into a line without steps with gentle scallops
+//!   (`scallop_mm`), `margin_gap_mm` above it, round the distal face of the
+//!   last covered tooth of each side, nothing kept behind it or over the
+//!   teeth left out (3 nearest). With fewer than two covered teeth with a
+//!   margin it falls back to Scalloped, as the plugin does, and
+//!   [`Output::fallback`] says so.
 //!
-//! Not ported yet (documented deviations): the insertion axes COMMON and
-//! PER_TOOTH (the warp of the insertion paths: the vertical axis is used),
-//! the SMOOTH line (`aligner.smooth_border`), the bars of the equator border
-//! over a space between two caps, the fills and slots that close a hole the
-//! rounded rim opens (`shell_fills`, `_plug_holes`, `_window_cuts`: the
-//! genus of the result is reported instead) and the checks of the panel
-//! (labial cover, removal).
+//! Not ported yet (documented deviations): the bars of the equator border over a space between two caps, the fills
+//! and slots that close a hole the rounded rim opens (`shell_fills`,
+//! `_plug_holes`, `_window_cuts`: the genus of the result is reported
+//! instead) and the checks of the panel (labial cover, removal). The rim
+//! radius is limited so that the opening leaves at least
+//! [`RIM_MIN_WALL_VOXELS`] voxels of wall (the plugin rebuilds a shell with
+//! a hole at its print voxel instead). The shell
+//! is the caller's: the plugin blocks out 0.8 mm for the smooth border
+//! (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the covered crowns; here
+//! the reach is measured from [`Input::crowns`].
 
 pub mod cutter;
 pub mod grid;
 pub mod line;
 pub mod model;
+pub mod smooth;
 pub mod survey;
+pub mod warp;
 
 #[cfg(test)]
 mod tests;
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
 use dc_geom::sdf::{SdfGrid, SdfParams};
@@ -57,6 +71,7 @@ use glam::{DVec3, Vec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::anatomy::{self, Arch};
 use crate::evidence;
 use cutter::{EquatorDesign, EquatorModel, NEAR_TEETH_EXTRA};
 use grid::PlanGrid;
@@ -67,6 +82,8 @@ pub const RIM_ROUND_WALL: f64 = 0.3;
 /// ... at most this (`aligner.BLOCKOUT_MM`: the fitting surface, blocked out
 /// as much, is not touched).
 pub const RIM_ROUND_MAX_MM: f64 = 0.3;
+/// The rounded rim never erodes the wall below this many voxels.
+pub const RIM_MIN_WALL_VOXELS: f64 = 1.5;
 /// STRAIGHT, SCALLOPED: grid of the trim surface (mm, `trim_cutter`).
 pub const MARGIN_CELL_MM: f64 = 0.4;
 /// STRAIGHT, SCALLOPED: control points farther than this (plan) from a node
@@ -102,8 +119,7 @@ pub enum Mode {
     Straight,
     /// Following the gingival margin.
     Scalloped,
-    /// The gingival margin smoothed along the arch with gentle scallops (not
-    /// ported yet: falls back to Scalloped).
+    /// The gingival margin smoothed along the arch with gentle scallops.
     #[default]
     Smooth,
 }
@@ -128,6 +144,8 @@ pub struct Params {
     /// Radius of the rounded rim (mm); default `min(0.3 x wall, 0.3)`, 0 for
     /// a sharp cut.
     pub round_mm: Option<f64>,
+    /// EQUATOR: the insertion axis the equators are surveyed along.
+    pub insertion_axis: warp::InsertionAxis,
 }
 
 impl Default for Params {
@@ -139,6 +157,7 @@ impl Default for Params {
             equator_offset_mm: evidence::param_f64("trim_equator_offset").unwrap_or(0.0),
             extension_mm: evidence::param_f64("trim_extension").unwrap_or(2.0),
             round_mm: None,
+            insertion_axis: warp::InsertionAxis::PerTooth,
         }
     }
 }
@@ -205,13 +224,14 @@ pub struct Input<'a> {
     pub thickness_mm: f64,
 }
 
-/// The trim line of one tooth.
+/// The trim line of one tooth, or of the whole arch.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ToothLine {
-    /// FDI number.
-    pub fdi: Fdi,
+    /// FDI number; `None` for the line of the whole arch (SMOOTH).
+    pub fdi: Option<Fdi>,
     /// EQUATOR: the closed loop around the crown (one point per azimuth);
-    /// otherwise the control points of the tooth.
+    /// SMOOTH: the border points along the arch (both sides and round the
+    /// distal faces); otherwise the control points of the tooth.
     pub points: Vec<DVec3>,
 }
 
@@ -227,9 +247,13 @@ pub struct Output {
     pub mesh: TriMesh,
     /// The trim line of every tooth.
     pub lines: Vec<ToothLine>,
-    /// The trim surface: its plan grid and the height of every node.
+    /// The trim surface: its plan grid and the height of every node (in the
+    /// warped space of [`Output::warp`] when there is one).
     pub surface: (PlanGrid, Vec<f64>),
-    /// Radius of the rounded rim used (mm).
+    /// EQUATOR: the warp of the insertion paths (`None`: vertical).
+    pub warp: Option<warp::PathWarp>,
+    /// Radius of the rounded rim used (mm; at most half the wall less
+    /// [`RIM_MIN_WALL_VOXELS`] voxels).
     pub round_mm: f64,
     /// Pieces of the trimmed shell dropped (only the largest is kept).
     pub dropped_pieces: usize,
@@ -304,14 +328,21 @@ pub fn genus(mesh: &TriMesh) -> i64 {
 }
 
 /// The closed solid above the trim surface as a field on the voxels of
-/// `like` (`trim_cutter`).
+/// `like` (`trim_cutter`), taken back from the warped space of the
+/// insertion paths.
 fn cutter_grid(
     grid: &PlanGrid,
     z: &[f64],
     z_top: f64,
+    warp: Option<&warp::PathWarp>,
     like: &SdfGrid,
 ) -> Result<SdfGrid, TrimError> {
-    let slab = grid::slab_solid(grid, z, z_top);
+    let mut slab = grid::slab_solid(grid, z, z_top);
+    if let Some(w) = warp {
+        for p in &mut slab.positions {
+            *p = w.from_warp(p.as_dvec3()).as_vec3();
+        }
+    }
     SdfGrid::from_mesh(
         &slab,
         &SdfParams {
@@ -338,6 +369,48 @@ fn near_grid(crowns: &TriMesh, radius: f64, like: &SdfGrid) -> Result<SdfGrid, T
     .map_err(geom)?;
     g.offset(radius as f32).map_err(geom)?;
     Ok(g)
+}
+
+/// The control points of the SMOOTH border (`smooth_trim_points`): the
+/// margin of the covered teeth in arch order made into the smooth border,
+/// kept 1 mm above the border of the scan, then the high points; with the
+/// border points alone (the line). `None` with fewer than two covered teeth
+/// with a margin.
+fn smooth_points(
+    input: &Input<'_>,
+    params: &Params,
+    outer: f64,
+) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
+    let covered: BTreeSet<Fdi> = input
+        .teeth
+        .iter()
+        .filter(|t| t.covered)
+        .map(|t| t.fdi)
+        .collect();
+    let crowns: BTreeMap<Fdi, Vec<DVec3>> = input
+        .teeth
+        .iter()
+        .filter(|t| !t.crown.is_empty())
+        .map(|t| (t.fdi, t.crown.clone()))
+        .collect();
+    let with_margin: Vec<Fdi> = input
+        .teeth
+        .iter()
+        .filter(|t| t.covered && t.margin.len() >= 3 && crowns.contains_key(&t.fdi))
+        .map(|t| t.fdi)
+        .collect();
+    let arch = Arch::of(*with_margin.first()?);
+    let marg: Vec<(Fdi, Vec<DVec3>)> = anatomy::arch_sequence(&with_margin, arch)
+        .into_iter()
+        .filter_map(|f| Some((f, input.teeth.iter().find(|t| t.fdi == f)?.margin.clone())))
+        .collect();
+    let gap = params.margin_gap_mm;
+    let (mut c, high) =
+        smooth::smooth_border(&marg, &crowns, &covered, outer, gap, params.scallop_mm)?;
+    line::border_floor(&mut c, input.scan_border, (-gap).max(0.0) + 0.5);
+    let mut ctrl = c.clone();
+    ctrl.extend(high);
+    Some((ctrl, c))
 }
 
 /// Trims the shell of one aligner: the trim line of the mode, the trim
@@ -367,24 +440,72 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     let (lo, hi) = bounds(&[input.teeth_mesh, input.gingiva])
         .ok_or_else(|| TrimError::Invalid("the model is empty".into()))?;
     let z_top = hi.z + 5.0;
+    // SMOOTH: the smooth border, or SCALLOPED when it cannot be built (fewer
+    // than two covered teeth with a margin), as the plugin falls back
+    let smooth = if params.mode == Mode::Smooth {
+        smooth_points(input, params, outer)
+    } else {
+        None
+    };
     let (mode, fallback) = match params.mode {
-        Mode::Smooth => (Mode::Scalloped, true),
+        Mode::Smooth if smooth.is_none() => (Mode::Scalloped, true),
         m => (m, false),
     };
 
+    let mut warp: Option<warp::PathWarp> = None;
     let (grid, mut z, lines, near_r) = match mode {
         Mode::Equator => {
-            let (loops, cut) = line::equator_loops(input.teeth, params.equator_offset_mm, wall);
+            // the insertion paths: the work is done in the warped space where they are vertical
+            let crowns: BTreeMap<Fdi, Vec<DVec3>> = input
+                .teeth
+                .iter()
+                .map(|t| (t.fdi, t.crown.clone()))
+                .collect();
+            let fdis: Vec<Fdi> = crowns.keys().copied().collect();
+            let order = fdis
+                .first()
+                .map(|f| anatomy::arch_sequence(&fdis, Arch::of(*f)))
+                .unwrap_or_default();
+            warp = warp::insertion_warp(&crowns, params.insertion_axis, &order);
+            let to_w = |p: &[DVec3]| -> Vec<DVec3> {
+                warp.as_ref()
+                    .map_or_else(|| p.to_vec(), |w| p.iter().map(|&q| w.to_warp(q)).collect())
+            };
+            let warped: Vec<Tooth> = input
+                .teeth
+                .iter()
+                .map(|t| Tooth {
+                    crown: to_w(&t.crown),
+                    closed: to_w(&t.closed),
+                    margin: to_w(&t.margin),
+                    ..t.clone()
+                })
+                .collect();
+            let mesh_w = |m: &TriMesh| -> TriMesh {
+                match &warp {
+                    None => m.clone(),
+                    Some(w) => TriMesh::new(
+                        m.positions
+                            .iter()
+                            .map(|p| w.to_warp(p.as_dvec3()).as_vec3())
+                            .collect(),
+                        m.tris.clone(),
+                    ),
+                }
+            };
+            let (teeth_w, gum_w) = (mesh_w(input.teeth_mesh), mesh_w(input.gingiva));
+            let (wlo, whi) = bounds(&[&teeth_w, &gum_w]).unwrap_or((lo, hi));
+            let (loops, cut) = line::equator_loops(&warped, params.equator_offset_mm, wall);
             if loops.is_empty() {
                 return Err(TrimError::Invalid(
                     "no covered tooth has a crown with at least 20 points".into(),
                 ));
             }
-            let grid = PlanGrid::around(lo, hi, cutter::equator_cell(wall));
+            let grid = PlanGrid::around(wlo, whi, cutter::equator_cell(wall));
             let model = EquatorModel {
-                teeth: input.teeth_mesh,
-                gingiva: input.gingiva,
-                z0: z_top,
+                teeth: &teeth_w,
+                gingiva: &gum_w,
+                z0: whi.z + 5.0,
             };
             let design = EquatorDesign {
                 outer,
@@ -401,11 +522,25 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
             let lines = loops
                 .iter()
                 .map(|(f, l)| ToothLine {
-                    fdi: *f,
-                    points: l.points.clone(),
+                    fdi: Some(*f),
+                    points: warp.as_ref().map_or_else(
+                        || l.points.clone(),
+                        |w| l.points.iter().map(|&q| w.from_warp(q)).collect(),
+                    ),
                 })
                 .collect();
             (grid, z, lines, outer + NEAR_TEETH_EXTRA)
+        }
+        Mode::Smooth => {
+            let (ctrl, line) = smooth.unwrap_or_default();
+            let grid = PlanGrid::around(lo, hi, MARGIN_CELL_MM);
+            let z = cutter::interpolated(&grid, &ctrl, 3, MARGIN_REACH_MM, MARGIN_SLOPE, z_top);
+            let lines = vec![ToothLine {
+                fdi: None,
+                points: line,
+            }];
+            let reach = outer + (-params.margin_gap_mm).max(0.0) + smooth::SMOOTH_NEAR_MM;
+            (grid, z, lines, reach)
         }
         _ => {
             let (mm, k) = if mode == Mode::Straight {
@@ -428,7 +563,10 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
             let z = cutter::interpolated(&grid, &ctrl, k, MARGIN_REACH_MM, MARGIN_SLOPE, z_top);
             let lines = per
                 .into_iter()
-                .map(|(fdi, points)| ToothLine { fdi, points })
+                .map(|(fdi, points)| ToothLine {
+                    fdi: Some(fdi),
+                    points,
+                })
                 .collect();
             (grid, z, lines, ext + NEAR_TEETH_EXTRA)
         }
@@ -442,11 +580,15 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     }
 
     let mut f = input.shell.clone();
-    f.intersect(&cutter_grid(&grid, &z, z_top, input.shell)?)
+    f.intersect(&cutter_grid(&grid, &z, z_top, warp.as_ref(), input.shell)?)
         .map_err(geom)?;
     f.intersect(&near_grid(input.crowns, near_r, input.shell)?)
         .map_err(geom)?;
-    let r = rim_round(wall, params.round_mm);
+    // the opening never erodes the wall below 1.5 voxels: at a voxel coarse
+    // for the wall it would cut holes through it (the plugin builds such a
+    // shell again at its print voxel)
+    let r = rim_round(wall, params.round_mm)
+        .min(((wall - RIM_MIN_WALL_VOXELS * f64::from(input.shell.voxel_size)) / 2.0).max(0.0));
     if r > 0.0 {
         f.open(r as f32).map_err(geom)?;
     } else {
@@ -466,6 +608,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         mesh,
         lines,
         surface: (grid, z),
+        warp,
         round_mm: r,
         dropped_pieces,
         genus,

@@ -2,21 +2,27 @@
 //! plugin (`ortho_aligner/case_print.py`, `aligner.py`).
 //!
 //! `tests/fixtures/trim.json` is produced by `gen_trim.py` from the plugin's own
-//! functions (python3 + numpy, no Blender): three synthetic teeth (the plugin's
+//! functions (python3 + numpy, no Blender): four synthetic teeth (the plugin's
 //! demo crowns, the incisors proclined, the cervical ring scalloped) with the
 //! equator loops of `tooth_equators` along the vertical axis, the EQUATOR trim
 //! loops of `equator_trim` for three offsets, the loops bridged at the
 //! contacts (`_bridge_contacts`), the STRAIGHT and SCALLOPED control points of
-//! `trim_points` and the trim surfaces of `trim_cutter`. Bound: 1e-6 mm.
+//! `trim_points`, the trim surfaces of `trim_cutter` and the SMOOTH border of
+//! `smooth_border` (all covered, one tooth left out), the insertion paths
+//! (COMMON and PER_TOOTH, `insertion_paths`, `insertion_warp`) and the
+//! equator trims surveyed along them. Bound: 1e-6 mm.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use dc_case::Fdi;
+use dca_algo::anatomy::{self, Arch};
 use dca_algo::trim::Tooth;
 use dca_algo::trim::cutter;
 use dca_algo::trim::grid::PlanGrid;
 use dca_algo::trim::line::{self, MarginMode};
-use dca_algo::trim::survey;
+use dca_algo::trim::warp::{self, InsertionAxis};
+use dca_algo::trim::{smooth, survey};
 use glam::DVec3;
 use serde_json::Value;
 
@@ -131,6 +137,92 @@ fn margin_lines_and_trim_surfaces_match_the_plugin() {
         assert_eq!(z.len(), want.len(), "{key} grid");
         for (i, (a, b)) in z.iter().zip(&want).enumerate() {
             assert!((a - b).abs() < TOL_MM, "{key} surface [{i}]: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn smooth_border_matches_the_plugin() {
+    let f = fixture();
+    let teeth: Vec<Tooth> = f["teeth"].as_array().unwrap().iter().map(tooth).collect();
+    let crowns: BTreeMap<Fdi, Vec<DVec3>> =
+        teeth.iter().map(|t| (t.fdi, t.crown.clone())).collect();
+    for case in f["smooth"].as_array().unwrap() {
+        let covered: BTreeSet<Fdi> = case["covered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| Fdi::new(num(v) as u8).unwrap())
+            .collect();
+        let marg: Vec<(Fdi, Vec<DVec3>)> = teeth
+            .iter()
+            .filter(|t| covered.contains(&t.fdi))
+            .map(|t| (t.fdi, t.margin.clone()))
+            .collect();
+        let (border, high) = smooth::smooth_border(
+            &marg,
+            &crowns,
+            &covered,
+            num(&case["outer"]),
+            num(&case["gap"]),
+            num(&case["scallop"]),
+        )
+        .unwrap();
+        let what = format!("smooth {covered:?}");
+        close(&border, &points(&case["border"]), &format!("{what} border"));
+        close(&high, &points(&case["high"]), &format!("{what} high"));
+    }
+}
+
+#[test]
+fn insertion_paths_and_equators_along_them_match_the_plugin() {
+    let f = fixture();
+    let wall = num(&f["wall"]);
+    let teeth: Vec<Tooth> = f["teeth"].as_array().unwrap().iter().map(tooth).collect();
+    let crowns: BTreeMap<Fdi, Vec<DVec3>> =
+        teeth.iter().map(|t| (t.fdi, t.crown.clone())).collect();
+    let fdis: Vec<Fdi> = crowns.keys().copied().collect();
+    let order = anatomy::arch_sequence(&fdis, Arch::Lower);
+    for (key, axis) in [
+        ("COMMON", InsertionAxis::Common),
+        ("PER_TOOTH", InsertionAxis::PerTooth),
+    ] {
+        let rec = &f["axes"][key];
+        let w = warp::insertion_warp(&crowns, axis, &order).expect(key);
+        let want = &rec["warp"];
+        assert!(
+            (w.z0 - num(&want["z0"])).abs() < TOL_MM && (w.zlo - num(&want["zlo"])).abs() < TOL_MM
+        );
+        assert!(
+            (w.zhi - num(&want["zhi"])).abs() < TOL_MM
+                && (w.sigma - num(&want["sigma"])).abs() < TOL_MM
+        );
+        let shears: Vec<DVec3> = w.shears.iter().map(|s| s.extend(0.0)).collect();
+        let want_s: Vec<DVec3> = want["shears"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                let n: Vec<f64> = v.as_array().unwrap().iter().map(num).collect();
+                DVec3::new(n[0], n[1], 0.0)
+            })
+            .collect();
+        close(&shears, &want_s, &format!("{key} shears"));
+        for t in &teeth {
+            let warped = Tooth {
+                crown: t.crown.iter().map(|&q| w.to_warp(q)).collect(),
+                closed: t.closed.iter().map(|&q| w.to_warp(q)).collect(),
+                margin: t.margin.iter().map(|&q| w.to_warp(q)).collect(),
+                ..t.clone()
+            };
+            let eq = line::tooth_equator(&warped, line::EQUATOR_AZIMUTHS).unwrap();
+            let tr = line::equator_trim(&eq, 0.0, wall);
+            let back: Vec<DVec3> = tr.points.iter().map(|&q| w.from_warp(q)).collect();
+            close(
+                &back,
+                &points(&rec["trim"][t.fdi.to_string()]),
+                &format!("{key} {} trim", t.fdi),
+            );
         }
     }
 }

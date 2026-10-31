@@ -3,7 +3,7 @@
 //! `aligners.production.trim-line` computes the trim line of the aligner of
 //! an arch and cuts the shell along it: the line of the mode (equator of
 //! every crown, straight beyond the gingival zenith, scalloped along the
-//! margin; smooth falls back to scalloped until it is ported), the trim
+//! margin, smooth along the margin of the arch), the trim
 //! surface through it, the shell intersected with the solid above that
 //! surface and with the reach from the crowns, with a rounded rim. Until the
 //! model of a stage comes from the shell stage, the model is the segmented
@@ -26,6 +26,7 @@ use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
 use dca_algo::frame;
 use dca_algo::teeth::{self, Which};
+use dca_algo::trim::warp::InsertionAxis;
 use dca_algo::trim::{self, Mode, model};
 use dca_model::TrimMode;
 use glam::DVec3;
@@ -70,6 +71,8 @@ pub(crate) struct TrimLineParams {
     extension_mm: Option<f64>,
     /// Radius of the rounded rim (mm; default 0.3 x wall, at most 0.3).
     round_mm: Option<f64>,
+    /// Equator: the insertion axis (vertical, common or per_tooth).
+    insertion_axis: InsertionAxis,
     /// Wall thickness of the shell (mm).
     thickness_mm: Option<f64>,
     /// Internal clearance (mm).
@@ -91,6 +94,7 @@ impl Default for TrimLineParams {
             equator_offset_mm: None,
             extension_mm: None,
             round_mm: None,
+            insertion_axis: InsertionAxis::PerTooth,
             thickness_mm: None,
             clearance_mm: None,
             voxel_mm: 0.1,
@@ -123,6 +127,7 @@ fn run_trim_line(
         equator_offset_mm: params.equator_offset_mm.unwrap_or(case.equator_offset_mm),
         extension_mm: params.extension_mm.unwrap_or(case.extension_mm),
         round_mm: params.round_mm,
+        insertion_axis: params.insertion_axis,
     };
     let wall = params
         .thickness_mm
@@ -276,7 +281,8 @@ fn trim_arch(
                 .iter()
                 .map(|&p| to_case.transform_point3(p).to_array())
                 .collect();
-            (l.fdi.to_string(), json!(pts))
+            let key = l.fdi.map_or_else(|| "arch".to_owned(), |f| f.to_string());
+            (key, json!(pts))
         })
         .collect();
     let written = match dir {
