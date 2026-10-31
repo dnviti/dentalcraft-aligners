@@ -1,5 +1,6 @@
 //! The local method: refine the surface under the text and move its vertices
-//! along their normals by the stamp field (see the module docs of `stamp`).
+//! along the rays of the text by the stamp field (see the module docs of
+//! `stamp`).
 
 use dc_mesh::TriMesh;
 use glam::{DVec2, DVec3, Vec3};
@@ -12,6 +13,14 @@ use super::{Located, Params};
 /// A triangle (or vertex) is on the surface seen from the crown when the first
 /// crossing of the ray through it is this close to it (mm).
 const SHEET_TOL_MM: f64 = 0.02;
+/// The depth along the rays is the depth across the surface divided by the
+/// cosine of their angle, at most this far (60 degrees).
+const MIN_COS: f64 = 0.5;
+
+/// `3 s^2 - 2 s^3`: the ramp of the field without a kink at its ends.
+fn smoothstep(s: f64) -> f64 {
+    s * s * (3.0 - 2.0 * s)
+}
 
 /// The stamped mesh and the number of triangles the refinement added.
 ///
@@ -90,15 +99,35 @@ pub(super) fn stamp(
     } else {
         1.0
     };
-    for (&i, on) in candidates.iter().zip(on_sheet(&points)) {
+    let on = on_sheet(&points);
+    // every vertex moves along one direction, the rays of the text (`frame.n`,
+    // turned to the side of the engraving or of the relief): the patch under
+    // the text is the first crossing of those rays, a height field along
+    // them, and stays one whatever each vertex moves, so the text cannot
+    // fold the surface (moving along the vertex normals did where they lean
+    // over a coarse surface: the bisected faces take the normals of their
+    // corners). The depth is kept across the surface with the mean slope of
+    // the patch.
+    let mean: DVec3 = candidates
+        .iter()
+        .zip(&on)
+        .filter(|(_, on)| **on)
+        .map(|(&i, _)| refiner.normals[i])
+        .sum();
+    let toward = sign * mean.dot(frame.n);
+    let dir = if toward >= 0.0 { frame.n } else { -frame.n };
+    let cos = (mean.normalize_or_zero().dot(frame.n))
+        .abs()
+        .clamp(MIN_COS, 1.0);
+    let depth = params.depth / cos;
+    for (&i, on) in candidates.iter().zip(on) {
         if !on {
             continue;
         }
         let sd = field.signed_distance(plane(refiner.positions[i]));
-        let s = (0.5 - sd / (2.0 * reach)).clamp(0.0, 1.0);
+        let s = smoothstep((0.5 - sd / (2.0 * reach)).clamp(0.0, 1.0));
         if s > 0.0 {
-            let n = refiner.normals[i];
-            refiner.positions[i] += sign * params.depth * s * n;
+            refiner.positions[i] += depth * s * dir;
         }
     }
     let added = refiner.tris.len() - before;

@@ -39,8 +39,10 @@
 //!
 //! * [`Method::Local`] (default): the triangles of the surface under the text
 //!   are refined by longest-edge bisection to `resolution_mm`, and the
-//!   vertices are moved along their normals by `depth` times a ramp of the
-//!   field (0.5 at the outline). The surface keeps its topology (a closed
+//!   vertices are moved by `depth` times a smooth ramp of the field (0.5 at
+//!   the outline), all along the rays the text was projected with (the
+//!   patch is a height field along them and stays one: the text cannot fold
+//!   the surface). The surface keeps its topology (a closed
 //!   manifold mesh stays so, an open one keeps its boundary), its labels and
 //!   its triangles away from the text, and it costs a few milliseconds.
 //! * [`Method::Sdf`]: the solid of the text (prisms along the surface) is
