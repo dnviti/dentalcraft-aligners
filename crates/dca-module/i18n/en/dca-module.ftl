@@ -265,8 +265,10 @@ aligners-cmd-diagnosis-complexity-doc = Runs the whole diagnosis (see the space 
 ## ---- commands: occlusion ----
 
 ## ---- commands: bite ----
+aligners-cmd-staging-automatic-doc = Divides the movement of every tooth, from its rest position to the setup, into aligners. The number of aligners of a tooth is the smallest one that keeps every component under its limit per aligner (translation 0.25 mm, torque and tip 1 degree, rotation 2 degrees or 1.5 for canines and premolars) and every crown point under the crown cap (0.33 mm); a periodontal stage reduces the limits. The pattern (proportional, maximum velocity, sequential distalization, structured or automatic from the complexity of the case) decides when each tooth moves. Adjacent crowns are checked at every aligner and the tooth that moves into its neighbour is delayed; the aligner at which each IPR is done is returned. The aligners are stored in the case and the notes, the collisions that remain and the overlap of the final setup are returned. Needs the tooth frames and the setup. Parameters: arch (all, upper or lower), pattern, perio, collision, collision_tol_mm, overcorrection, step_linear_mm, step_vertical_mm, step_rotation_deg, step_rotation_round_deg, step_angular_deg, max_crown_step_mm (what is not given comes from the settings of the case).
 
 ## ---- commands: ramps ----
+aligners-cmd-schedule-doc = Builds the change calendar of the aligners under full compliance (at least 22 hours a day, changed on the due date): first and last day of every aligner, days of wear (the same for all, or 7 days for anterior translations and 14 days when the aligner has posterior angular or vertical movements), what to do before it (attachments, IPR) and the passive aligners that keep the two arches changing together. The calendar is returned and the case is not modified. Needs the staging. Parameters: arch (all, upper or lower), start_date (YYYY-MM-DD, default today), interval_days, policy (fixed or adaptive), lang (en or it), attachments (teeth bonded before aligner 1).
 
 ## ---- commands: shell ----
 
@@ -277,3 +279,4 @@ aligners-cmd-diagnosis-complexity-doc = Runs the whole diagnosis (see the space 
 ## ---- commands: export ----
 
 ## ---- commands: visits ----
+aligners-cmd-export-doc = Writes the aligners into a directory: the scan of each arch with the teeth at every stage as binary STL (upper_stage_00.stl is the initial situation; the gingiva is not deformed yet), stages.csv with the movement of every tooth at every stage and the dates of the aligner, and visits.ics with the aligner changes of both arches as an iCalendar file. The case is not modified. Needs the staging. Parameters: dir (required), start_date (YYYY-MM-DD, default today), interval_days, policy (fixed or adaptive), lang (en or it), title.

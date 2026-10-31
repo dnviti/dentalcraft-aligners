@@ -117,6 +117,13 @@ pub struct Setup {
     pub poses: BTreeMap<Fdi, Pose>,
     /// Teeth the clinician locked: automatic recomputation leaves them alone.
     pub locked: BTreeSet<Fdi>,
+    /// Interproximal reduction planned by the setup, one entry per contact
+    /// (`amount_mm` in total over both surfaces). The staging decides at
+    /// which aligner each one is done.
+    pub ipr: Vec<IprStep>,
+    /// The arch line the setup aligned each arch on (case coordinates, mm,
+    /// evenly spaced points).
+    pub lines: BTreeMap<ScanRole, Vec<DVec3>>,
 }
 
 /// Interproximal reduction on the contact between two neighbouring teeth.

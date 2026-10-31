@@ -265,8 +265,10 @@ aligners-cmd-diagnosis-complexity-doc = Esegue l'intera diagnosi (vedi analisi d
 ## ---- commands: occlusion ----
 
 ## ---- commands: bite ----
+aligners-cmd-staging-automatic-doc = Divide il movimento di ogni dente, dalla posizione di riposo al setup, in allineatori. Il numero di allineatori di un dente è il più piccolo che mantiene ogni componente sotto il suo limite per allineatore (traslazione 0,25 mm, torque e tip 1 grado, rotazione 2 gradi o 1,5 per canini e premolari) e ogni punto della corona sotto il tetto della corona (0,33 mm); uno stadio parodontale riduce i limiti. Lo schema (proporzionale, velocità massima, distalizzazione sequenziale, strutturato o automatico dalla complessità del caso) decide quando si muove ogni dente. Le corone adiacenti sono controllate a ogni allineatore e il dente che si muove contro il vicino viene ritardato; viene restituito l'allineatore in cui si esegue ogni IPR. Gli allineatori sono salvati nel caso e vengono restituiti le note, le collisioni residue e la sovrapposizione del setup finale. Richiede i sistemi di riferimento dei denti e il setup. Parametri: arch (all, upper o lower), pattern, perio, collision, collision_tol_mm, overcorrection, step_linear_mm, step_vertical_mm, step_rotation_deg, step_rotation_round_deg, step_angular_deg, max_crown_step_mm (ciò che non è indicato viene dalle impostazioni del caso).
 
 ## ---- commands: ramps ----
+aligners-cmd-schedule-doc = Costruisce il calendario dei cambi degli allineatori con piena aderenza (almeno 22 ore al giorno, cambio alla data prevista): primo e ultimo giorno di ogni allineatore, giorni di utilizzo (uguali per tutti, oppure 7 giorni per le traslazioni anteriori e 14 giorni quando l'allineatore ha movimenti angolari o verticali posteriori), cosa fare prima (attachment, IPR) e gli allineatori passivi che fanno cambiare insieme le due arcate. Il calendario viene restituito e il caso non viene modificato. Richiede lo staging. Parametri: arch (all, upper o lower), start_date (AAAA-MM-GG, predefinita oggi), interval_days, policy (fixed o adaptive), lang (en o it), attachments (denti incollati prima dell'allineatore 1).
 
 ## ---- commands: shell ----
 
@@ -277,3 +279,4 @@ aligners-cmd-diagnosis-complexity-doc = Esegue l'intera diagnosi (vedi analisi d
 ## ---- commands: export ----
 
 ## ---- commands: visits ----
+aligners-cmd-export-doc = Scrive gli allineatori in una cartella: la scansione di ogni arcata con i denti a ogni stadio come STL binario (upper_stage_00.stl è la situazione iniziale; la gengiva non è ancora deformata), stages.csv con il movimento di ogni dente a ogni stadio e le date dell'allineatore, e visits.ics con i cambi di allineatore delle due arcate come file iCalendar. Il caso non viene modificato. Richiede lo staging. Parametri: dir (obbligatorio), start_date (AAAA-MM-GG, predefinita oggi), interval_days, policy (fixed o adaptive), lang (en o it), title.
