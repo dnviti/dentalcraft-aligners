@@ -238,6 +238,8 @@ aligners-cmd-demo-generate-doc = Genera un'arcata dentale sintetica (un typodont
 ## ---- commands: segmentation ----
 
 ## ---- commands: teeth ----
+aligners-cmd-teeth-frames = Assi e larghezze dei denti
+aligners-cmd-teeth-frames-doc = Misura ogni dente segmentato: il sistema di riferimento locale (asse mesio-distale, vestibolo-linguale e asse lungo, in coordinate del caso), le larghezze mesio-distale e vestibolo-linguale, l'altezza della corona, la cuspide, i contatti interprossimali e la giunzione amelo-cementizia, la cresta alveolare, l'apice radicolare e il centro di resistenza stimati (stime di popolazione, una scansione di superficie non contiene le radici). L'asse lungo deriva dal margine gengivale e dalle pareti laterali della corona, l'asse mesio-distale dai contatti, dal bordo incisale o dalla simmetria della corona. I sistemi di riferimento sono salvati nel caso e le misure sono restituite; le scansioni non vengono modificate. Richiede la segmentazione. Parametri: arch (all, upper o lower), margin_to_crest_mm, cres_ratio, max_tilt_deg.
 
 ## ---- commands: reconstruct ----
 
