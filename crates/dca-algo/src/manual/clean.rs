@@ -215,3 +215,82 @@ pub fn clean_labels(
     let vertices = new.iter().zip(labels).filter(|(a, b)| a != b).count();
     (new, CleanReport { islands, vertices })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manual::tests::grid;
+
+    /// 24 x 24 grid: tooth 36 is the block `[6, 16)`, with a one-vertex hole in it,
+    /// and a two-vertex island of 36 in the corner.
+    fn labelled() -> (Adjacency, Vec<u16>) {
+        let (v, t) = grid(24);
+        let adj = Adjacency::new(v.len(), &t);
+        let at = |x: usize, y: usize| y * 24 + x;
+        let mut l = vec![0u16; v.len()];
+        for y in 6..16 {
+            for x in 6..16 {
+                l[at(x, y)] = 36;
+            }
+        }
+        l[at(10, 10)] = 0; // hole
+        l[at(1, 1)] = 36; // island
+        l[at(2, 1)] = 36;
+        (adj, l)
+    }
+
+    #[test]
+    fn islands_and_holes_take_the_label_of_their_surroundings() {
+        let (adj, l) = labelled();
+        let (clean, rep) = clean_labels(&l, &adj, None, 0, &BTreeMap::new());
+        let at = |x: usize, y: usize| y * 24 + x;
+        assert_eq!(clean[at(10, 10)], 36, "hole filled");
+        assert_eq!(clean[at(1, 1)], 0, "island removed");
+        assert_eq!(clean[at(2, 1)], 0);
+        assert_eq!(rep.islands, 2);
+        assert_eq!(rep.vertices, 3);
+        // the rest is untouched
+        let changed = clean.iter().zip(&l).filter(|(a, b)| a != b).count();
+        assert_eq!(changed, 3);
+        // only the teeth asked for
+        let (only, _) = clean_labels(&l, &adj, Some(&[11]), 0, &BTreeMap::new());
+        assert_eq!(only, l, "tooth 11 is not there");
+        let (only, rep) = clean_labels(&l, &adj, Some(&[36]), 0, &BTreeMap::new());
+        assert_eq!(only, clean);
+        assert_eq!(rep.islands, 2);
+    }
+
+    #[test]
+    fn the_piece_with_the_seed_is_the_tooth() {
+        let (adj, mut l) = labelled();
+        let at = |x: usize, y: usize| y * 24 + x;
+        // a second piece of tooth 36 beside the block: 2 x 10 vertices, a fifth of its size
+        for y in 6..16 {
+            for x in 18..20 {
+                l[at(x, y)] = 36;
+            }
+        }
+        let (clean, _) = clean_labels(&l, &adj, None, 0, &BTreeMap::new());
+        assert_eq!(clean[at(19, 8)], 0, "the small piece is an island");
+        assert_eq!(clean[at(8, 8)], 36);
+        // the seed is on the small piece: it is the tooth, and the block is not an island
+        let seeds = BTreeMap::from([(36u16, at(19, 8) as u32)]);
+        let (clean, _) = clean_labels(&l, &adj, None, 0, &seeds);
+        assert_eq!(clean[at(19, 8)], 36);
+        assert_eq!(clean[at(8, 8)], 36);
+    }
+
+    #[test]
+    fn smoothing_rounds_a_jagged_border() {
+        let (adj, mut l) = labelled();
+        let at = |x: usize, y: usize| y * 24 + x;
+        l[at(10, 10)] = 36;
+        l[at(1, 1)] = 0;
+        l[at(2, 1)] = 0;
+        // a spike of the tooth into the gingiva
+        l[at(16, 10)] = 36;
+        let (flat, _) = clean_labels(&l, &adj, None, 1, &BTreeMap::new());
+        assert_eq!(flat[at(16, 10)], 0, "the spike is smoothed away");
+        assert_eq!(flat[at(10, 10)], 36);
+    }
+}
