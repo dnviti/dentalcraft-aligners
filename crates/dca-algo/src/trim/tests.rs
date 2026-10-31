@@ -1,0 +1,313 @@
+//! Tests of the trim: the loop operations, the lines of every mode and the
+//! trimmed aligner of the demo arch.
+
+use std::collections::BTreeMap;
+
+use dc_case::Fdi;
+use dc_geom::bvh::Bvh;
+use dc_geom::sdf::SdfGrid;
+use dc_mesh::TriMesh;
+use glam::{DVec2, DVec3, Vec3};
+
+use super::line::{self, MarginMode};
+use super::model;
+use super::survey::{self, circular_smooth, loop_nearest, round_tabs, slope_floor};
+use super::*;
+use crate::anatomy::Arch;
+use crate::demo;
+
+#[test]
+fn slope_floor_raises_only_and_limits_the_steps() {
+    let z = [0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let f = slope_floor(&z, 0.5);
+    assert_eq!(f, vec![2.0, 2.5, 3.0, 2.5, 2.0, 1.5, 1.0, 1.5]);
+    assert_eq!(slope_floor(&z, 0.0), z.to_vec());
+}
+
+#[test]
+fn circular_smooth_is_a_median_then_a_mean() {
+    let z = [0.0, 0.0, 9.0, 0.0, 0.0, 0.0];
+    // the spike goes with the running median of 5
+    assert!(circular_smooth(&z, 5).iter().all(|v| v.abs() < 1e-12));
+    let r: Vec<f64> = (0..8).map(f64::from).collect();
+    let s = circular_smooth(&r, 5);
+    assert!((s[4] - 4.0).abs() < 1e-12);
+}
+
+#[test]
+fn round_tabs_lifts_a_narrow_v_and_keeps_a_gentle_curve() {
+    // a square loop 10 x 10 mm, 40 points, with a narrow V down at one point
+    let mut e: Vec<DVec3> = (0..40)
+        .map(|k| {
+            let t = k as f64 / 10.0;
+            let (x, y) = match k / 10 {
+                0 => (t * 10.0, 0.0),
+                1 => (10.0, (t - 1.0) * 10.0),
+                2 => (10.0 - (t - 2.0) * 10.0, 10.0),
+                _ => (0.0, 10.0 - (t - 3.0) * 10.0),
+            };
+            DVec3::new(x, y, 5.0)
+        })
+        .collect();
+    let flat = round_tabs(&e, 1.0, 4);
+    assert!(flat.iter().all(|&z| (z - 5.0).abs() < 1e-9));
+    e[5].z = 2.0;
+    let r = round_tabs(&e, 1.0, 4);
+    // points 1 mm apart: the V of one point is narrower than 2 mm and rises
+    // to where a disk of 1 mm resting on its sides touches it
+    assert!(r[5] > 3.9, "{}", r[5]);
+    assert!(r.iter().zip(&e).all(|(a, b)| *a >= b.z - 1e-12));
+}
+
+#[test]
+fn loop_nearest_tells_inside_from_outside() {
+    let e: Vec<DVec3> = (0..64)
+        .map(|k| {
+            let a = std::f64::consts::TAU * k as f64 / 64.0;
+            DVec3::new(5.0 * a.cos(), 5.0 * a.sin(), 1.0 + a.cos())
+        })
+        .collect();
+    let (d, z) = loop_nearest(&e, DVec2::new(1.0, 0.0));
+    assert!((d - 4.0).abs() < 0.02 && (z - 2.0).abs() < 0.01, "{d} {z}");
+    let (d, _) = loop_nearest(&e, DVec2::new(-7.0, 0.0));
+    assert!((d + 2.0).abs() < 0.02, "{d}");
+    let lz = survey::loop_z(&e, DVec2::ZERO, &[DVec2::new(0.0, 3.0)]);
+    assert!((lz[0] - 1.0).abs() < 0.01, "{lz:?}");
+}
+
+#[test]
+fn border_floor_keeps_the_line_above_the_border_of_the_scan() {
+    let mut c = vec![DVec3::new(0.0, 0.0, 1.0), DVec3::new(10.0, 0.0, 1.0)];
+    let border = [DVec3::new(0.5, 0.0, 0.5), DVec3::new(10.0, 0.0, -5.0)];
+    line::border_floor(&mut c, &border, 2.0);
+    assert_eq!(c[0].z, 1.5);
+    assert_eq!(c[1].z, 1.0);
+}
+
+#[test]
+fn params_are_checked() {
+    let p = Params {
+        extension_mm: 9.0,
+        ..Params::default()
+    };
+    assert!(p.check().is_err());
+    assert!(Params::default().check().is_ok());
+    assert_eq!(Params::default().mode, Mode::Smooth);
+    assert_eq!(Params::default().extension_mm, 2.0);
+}
+
+/// The demo arch as the trim takes it: the closed teeth and the closed
+/// gum shell of the demo, the crowns above the gum (what a scan shows),
+/// the margin where every tooth enters the gum, the shell of a sheet of
+/// `wall` on the closed model.
+pub(super) struct DemoArch {
+    pub teeth_mesh: TriMesh,
+    pub gingiva: TriMesh,
+    pub crowns: TriMesh,
+    pub teeth: Vec<Tooth>,
+    pub shell: SdfGrid,
+    pub wall: f64,
+    pub voxel: f32,
+}
+
+pub(super) fn demo_arch(arch: Arch, wall: f64, voxel: f32) -> DemoArch {
+    let d = demo::run(&demo::Params {
+        arch,
+        ..demo::Params::default()
+    });
+    let m = &d.mesh;
+    let v: Vec<DVec3> = m.positions.iter().map(|p| p.as_dvec3()).collect();
+    let labels = m.vertex_labels.clone().unwrap();
+    let parts = model::parts(&v, &m.tris, &labels, &BTreeMap::new(), None);
+    assert!(parts.scan_border.is_empty());
+    assert!(
+        parts
+            .teeth
+            .iter()
+            .all(|t| t.margin.len() >= 20 && t.crown.len() >= 20)
+    );
+    // the shell: a sheet of `wall` on the closed model (crevices under 0.6 mm filled)
+    let shell = model::untrimmed_shell(m, f64::from(voxel), 0.3, 0.0, wall).unwrap();
+    DemoArch {
+        teeth_mesh: parts.teeth_mesh,
+        gingiva: parts.gingiva,
+        crowns: parts.crowns,
+        teeth: parts.teeth,
+        shell,
+        wall,
+        voxel,
+    }
+}
+
+impl DemoArch {
+    pub(super) fn input(&self) -> Input<'_> {
+        Input {
+            shell: &self.shell,
+            teeth_mesh: &self.teeth_mesh,
+            gingiva: &self.gingiva,
+            crowns: &self.crowns,
+            teeth: &self.teeth,
+            scan_border: &[],
+            clearance_mm: 0.0,
+            thickness_mm: self.wall,
+        }
+    }
+}
+
+fn check_solid(out: &Output) {
+    let report = out.mesh.validate();
+    assert!(report.is_watertight() && report.is_manifold(), "{report:?}");
+    assert_eq!(report.components, 1);
+}
+
+#[test]
+fn straight_line_on_the_demo_arch() {
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let p = Params {
+        mode: Mode::Straight,
+        ..Params::default()
+    };
+    let t0 = std::time::Instant::now();
+    let out = run(&a.input(), &p).unwrap();
+    eprintln!(
+        "straight: {} tris, genus {}, dropped {}, {:.1?}",
+        out.mesh.face_count(),
+        out.genus,
+        out.dropped_pieces,
+        t0.elapsed()
+    );
+    check_solid(&out);
+    assert_eq!(out.mode, Mode::Straight);
+    // the plugin's rule: every side of a tooth at its gingival zenith less the extension
+    for (t, l) in a.teeth.iter().zip(&out.lines) {
+        assert_eq!(t.fdi, l.fdi);
+        assert_eq!(l.points.len(), 2, "{}", t.fdi);
+        let step = (t.margin.len() / 60).max(1);
+        let m: Vec<DVec3> = t.margin.iter().step_by(step).copied().collect();
+        for (want_buccal, q) in [(true, l.points[0]), (false, l.points[1])] {
+            let zen = m
+                .iter()
+                .filter(|v| ((**v - t.origin).dot(t.e_bl) > 0.0) == want_buccal)
+                .map(|v| v.z)
+                .fold(f64::INFINITY, f64::min);
+            assert!((q.z - (zen - p.extension_mm)).abs() < 1e-9, "{}", t.fdi);
+            // the trim surface passes within 0.1 mm of the line there
+            let s = out.surface_at(q.x, q.y);
+            assert!((s - q.z).abs() < 0.1, "{} {s} {}", t.fdi, q.z);
+        }
+    }
+    // nothing of the aligner is below the trim surface (the rim is rounded: up to a voxel)
+    let tol = f64::from(a.voxel) + 0.05;
+    let low = out
+        .mesh
+        .positions
+        .iter()
+        .map(|v| v.z as f64 - out.surface_at(v.x as f64, v.y as f64))
+        .fold(f64::INFINITY, f64::min);
+    assert!(low > -tol, "{low}");
+    // and the shell is kept above the trim surface: the points of the
+    // untrimmed shell near the line, 0.5 mm above the surface and 0.5 mm
+    // within the reach from the crowns (extension + 1.5 mm), are still on
+    // the aligner (the cut is where the line is, not higher; the rounded rim
+    // takes off a few thin webs between the teeth)
+    let untrimmed = a.shell.to_mesh().unwrap();
+    let trimmed = Bvh::build(&out.mesh).unwrap();
+    let crowns = Bvh::build(&a.crowns).unwrap();
+    let reach = (p.extension_mm + cutter::NEAR_TEETH_EXTRA) as f32;
+    let (mut kept, mut all) = (0usize, 0usize);
+    for l in &out.lines {
+        let q = l.points[0];
+        for v in untrimmed.positions.iter().filter(|v| {
+            (v.as_dvec3().truncate() - q.truncate()).length() < 3.0
+                && f64::from(v.z) > out.surface_at(f64::from(v.x), f64::from(v.y)) + 0.5
+        }) {
+            if crowns
+                .closest_point(*v, 50.0)
+                .is_some_and(|c| c.distance < reach - 0.5)
+            {
+                all += 1;
+                kept += usize::from(
+                    trimmed
+                        .closest_point(*v, 1.0)
+                        .is_some_and(|h| h.distance < a.voxel),
+                );
+            }
+        }
+    }
+    eprintln!("kept {kept} of {all}");
+    assert!(
+        all > 1000 && kept as f64 > 0.99 * all as f64,
+        "kept {kept} of {all}"
+    );
+}
+
+#[test]
+fn equator_line_on_the_demo_arch() {
+    let a = demo_arch(Arch::Upper, 0.6, 0.25);
+    let p = Params {
+        mode: Mode::Equator,
+        ..Params::default()
+    };
+    let t0 = std::time::Instant::now();
+    let out = run(&a.input(), &p).unwrap();
+    eprintln!(
+        "equator: {} tris, genus {}, dropped {}, {:.1?}",
+        out.mesh.face_count(),
+        out.genus,
+        out.dropped_pieces,
+        t0.elapsed()
+    );
+    check_solid(&out);
+    let by: BTreeMap<Fdi, &Tooth> = a.teeth.iter().map(|t| (t.fdi, t)).collect();
+    for l in &out.lines {
+        let t = by[&l.fdi];
+        let eq = line::tooth_equator(t, line::EQUATOR_AZIMUTHS).unwrap();
+        let top = eq.top;
+        let zm = eq.margin.clone().unwrap();
+        assert_eq!(l.points.len(), line::EQUATOR_AZIMUTHS);
+        for (k, q) in l.points.iter().enumerate() {
+            // the plugin's limits: under the top less 1 mm, over the margin plus 0.1 mm
+            let floor = (zm[k] + line::EQUATOR_GUM_GAP_MM).min(top - line::EQUATOR_GUM_GAP_MM);
+            assert!(q.z >= floor - 1e-9, "{} {k}", l.fdi);
+            assert!(
+                q.z <= (top - line::EQUATOR_TOP_MM).max(floor) + 1e-9,
+                "{} {k}",
+                l.fdi
+            );
+            // offset 0: the line is the equator where no tab is rounded
+            assert!(q.z >= eq.points[k].z - 1e-9);
+        }
+        // the equator is the height of contour: no crown point beyond the
+        // loop in plan is far below it
+        let c = eq.centre;
+        let mean_eq = eq.points.iter().map(|q| q.z).sum::<f64>() / eq.points.len() as f64;
+        assert!(
+            mean_eq < top - line::EQUATOR_TOP_MM + 1e-9
+                && mean_eq > zm.iter().copied().fold(f64::INFINITY, f64::min)
+        );
+        let _ = c;
+    }
+    // every crown keeps its cap: the aligner covers the top of every crown
+    let bvh = Bvh::build(&out.mesh).unwrap();
+    for t in &a.teeth {
+        let top = t
+            .crown
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.z > a.z { b } else { a })
+            .unwrap();
+        let h = bvh.ray_cast((top + DVec3::Z * 10.0).as_vec3(), Vec3::NEG_Z, 20.0);
+        assert!(h.is_some(), "{} uncovered", t.fdi);
+    }
+}
+
+#[test]
+fn smooth_falls_back_to_scalloped() {
+    let a = demo_arch(Arch::Lower, 0.6, 0.3);
+    let out = run(&a.input(), &Params::default()).unwrap();
+    assert_eq!(out.mode, Mode::Scalloped);
+    assert!(out.fallback);
+    check_solid(&out);
+    let m = line::margin_points(&a.teeth, MarginMode::Scalloped, 2.0);
+    assert_eq!(out.lines.len(), m.len());
+}
