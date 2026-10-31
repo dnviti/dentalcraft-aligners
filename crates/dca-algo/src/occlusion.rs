@@ -70,7 +70,8 @@ pub const S_FLIP: DMat3 = DMat3::from_cols(
 /// Colour scale of the signed distance to the antagonist (mm; negative =
 /// interpenetration): 50 µm bins of interpenetration and distance (Dentsply
 /// Sirona 2019), contact up to 0.10 mm (Lee 2018; Beck 2023), near contact
-/// up to 0.50 mm. Each entry: upper bound (exclusive) and linear RGBA.
+/// up to 0.50 mm. Each entry: upper bound (exclusive) and RGBA in sRGB (the
+/// plugin writes them as sRGB vertex colours; convert to linear to shade).
 pub const CONTACT_SCALE: [(f64, [f32; 4]); 7] = [
     (-0.10, [0.80, 0.00, 0.60, 1.0]),
     (-0.05, [0.90, 0.05, 0.05, 1.0]),
