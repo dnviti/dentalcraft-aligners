@@ -19,7 +19,10 @@
 //!     (`aligners.occlusion.virtual-bite`, `aligners.occlusion.contact-map`;
 //!     parameter `occlusion`);
 //! 11. with `export_dir`, the export (`aligners.output.export-stl`, or the
-//!     full package `aligners.output.report` with `full_report`).
+//!     full package `aligners.output.report` with `full_report`). With
+//!     `shells` the full package has the print files of the shell stage
+//!     (printable models, trimmed aligners, at `quality`, draft by default);
+//!     without it the models are the deformed scans.
 //!
 //! The first step that fails stops the pipeline: the error names the step
 //! and the case is left as it was (the command is one undoable change). The
@@ -33,6 +36,7 @@ use dc_case::{CaseState, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
+use dca_algo::export::provider::Quality;
 use dca_model::{AlignersState, MODULE_ID};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -83,6 +87,11 @@ pub struct Params {
     /// Export the full package (`aligners.output.report`) instead of the
     /// models, the table and the calendar (`aligners.output.export-stl`).
     pub full_report: bool,
+    /// Put the print files of the shell stage in the export (printable
+    /// models and trimmed aligners; implies `full_report`).
+    pub shells: bool,
+    /// Quality of those files (voxel and mesh tolerance).
+    pub quality: Quality,
 }
 
 impl Default for Params {
@@ -96,6 +105,8 @@ impl Default for Params {
             interval_days: None,
             export_dir: None,
             full_report: false,
+            shells: false,
+            quality: Quality::Draft,
         }
     }
 }
@@ -196,7 +207,11 @@ fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
     if let Some(dir) = params.export_dir.as_ref().filter(|d| !d.trim().is_empty()) {
         let mut p = calendar(params);
         p.insert("dir".to_owned(), json!(dir));
-        let id = if params.full_report {
+        let id = if params.full_report || params.shells {
+            p.insert("shells".to_owned(), json!(params.shells));
+            if params.shells {
+                p.insert("quality".to_owned(), json!(params.quality));
+            }
             "aligners.output.report"
         } else {
             "aligners.output.export-stl"
