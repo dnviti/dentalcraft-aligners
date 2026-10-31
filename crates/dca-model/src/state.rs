@@ -28,6 +28,53 @@ pub struct ToothFrame {
     pub center_of_resistance: DVec3,
 }
 
+/// Measures of one tooth that the diagnosis (and the later planning stages)
+/// read, kept by the teeth stage. Positions are in case coordinates (mm), like
+/// [`ToothFrame`]; distances and angles do not depend on the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ToothMeasures {
+    /// Area-weighted centroid of the crown.
+    pub centroid: DVec3,
+    /// Reference point of the crown (origin of the [`ToothFrame`]).
+    pub reference: DVec3,
+    /// Mesio-distal width (mm).
+    pub width_md: f64,
+    /// Bucco-lingual width (mm).
+    pub width_bl: f64,
+    /// Crown height above the mean of the gingival margin (mm).
+    pub height: f64,
+    /// Cusp tip (the highest point of the crown along the long axis).
+    pub tip: DVec3,
+    /// Cemento-enamel junction (estimate).
+    pub cej: DVec3,
+    /// Alveolar crest (estimate).
+    pub crest: DVec3,
+    /// Root apex (estimate).
+    pub apex: DVec3,
+    /// Mesial interproximal contact point.
+    pub contact_m: DVec3,
+    /// Distal interproximal contact point.
+    pub contact_d: DVec3,
+    /// Rotation about the long axis relative to the arch tangent (degrees).
+    pub rot_dev_deg: f64,
+    /// Tilt of the long axis from the vertical of the arch (degrees).
+    pub axis_tilt_deg: f64,
+    /// `+1` when the tooth frame's x axis points mesially, `-1` distally.
+    pub md_sign: i8,
+}
+
+/// Further results of the space analysis of one arch.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchDetails {
+    /// Largest space between two adjacent crowns (mm).
+    pub largest_space_mm: f64,
+    /// Offset of the dental midline from the middle of the arch (mm).
+    pub midline_offset_mm: f64,
+    /// CAT-CAT model-analysis score (points).
+    pub catcat_score: u32,
+}
+
 /// Space analysis of one arch.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct ArchSpace {
@@ -58,6 +105,8 @@ pub struct Diagnosis {
     pub bolton_overall: Option<f64>,
     /// Complexity score of the case.
     pub complexity_score: Option<f64>,
+    /// Further results per arch.
+    pub details: BTreeMap<ScanRole, ArchDetails>,
 }
 
 /// Final position of the teeth (the setup).
@@ -117,6 +166,9 @@ pub struct AlignersState {
     pub diagnosis: Diagnosis,
     /// Final position of the teeth.
     pub setup: Setup,
+    /// Measures of each tooth (widths, contacts, landmarks), from the teeth
+    /// stage.
+    pub tooth_geometry: BTreeMap<Fdi, ToothMeasures>,
     /// The aligners, in order.
     pub stages: Vec<Stage>,
     /// Trim line parameters.
