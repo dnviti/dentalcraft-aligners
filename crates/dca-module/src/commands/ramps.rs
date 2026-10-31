@@ -495,6 +495,118 @@ fn check_size(name: &str, v: Option<f64>, lo: f64, hi: f64) -> Result<(), Comman
     }
 }
 
+/// The ramps and the bite with the aligners worn, prepared once for the
+/// print files of every stage (the export): the arches of the case with
+/// their crowns, in the arch coordinates of the bite (`ArchModel`).
+pub(crate) struct StageBite {
+    lower: Option<ArchCase>,
+    upper: Option<ArchCase>,
+    rel: Option<DMat4>,
+    data: AlignersState,
+    design: Design,
+}
+
+impl StageBite {
+    /// The arches of the case that are segmented (an arch that is not has
+    /// no ramps and no bite).
+    pub(crate) fn new(state: &CaseState) -> Result<Self, CommandError> {
+        let data = aligners_data(state)?;
+        let lower = arch_case(state, &data, Arch::Lower).ok();
+        let upper = arch_case(state, &data, Arch::Upper).ok();
+        let rel = match (&lower, &upper) {
+            (Some(l), Some(u)) => Some(occlusion::relation(&l.model, &u.model)),
+            _ => None,
+        };
+        let design = Design::new(&data.settings, &data.aligner_bite.occlusal, &data.trim);
+        Ok(Self {
+            lower,
+            upper,
+            rel,
+            data,
+            design,
+        })
+    }
+
+    fn arch(&self, arch: Arch) -> Option<&ArchCase> {
+        if arch.is_upper() {
+            self.upper.as_ref()
+        } else {
+            self.lower.as_ref()
+        }
+    }
+
+    /// Case to the arch coordinates of the ramps and of the bite.
+    pub(crate) fn to_arch(&self, arch: Arch) -> Option<DMat4> {
+        self.arch(arch).map(|c| c.to_arch)
+    }
+
+    /// The design of the bite (clearance, wall, blockout, occlusal settings).
+    pub(crate) fn design(&self) -> &Design {
+        &self.design
+    }
+
+    /// The occlusal limit changes the shells (`case_occlusal.active`).
+    pub(crate) fn shapes_shells(&self) -> bool {
+        self.data.aligner_bite.occlusal.active()
+    }
+
+    /// Why there is no bite to shape the shells with; `None`: there is one.
+    pub(crate) fn missing(&self) -> Option<&'static str> {
+        match (&self.lower, &self.upper) {
+            (Some(_), Some(_)) => None,
+            _ => Some("the bite needs both arches segmented"),
+        }
+    }
+
+    /// The ramps of `arch` at aligner `k` as solids (arch coordinates of
+    /// [`Self::to_arch`]); empty when the ramps are off.
+    pub(crate) fn ramps(&self, arch: Arch, k: u32) -> Vec<RampSolid> {
+        let ramps = &self.data.aligner_bite.ramps;
+        let Some(c) = self.arch(arch).filter(|_| ramps.enabled) else {
+            return Vec::new();
+        };
+        let own: Vec<Ramp> = ramps
+            .ramps
+            .iter()
+            .filter(|r| Arch::of(r.fdi) == arch)
+            .copied()
+            .collect();
+        if own.is_empty() {
+            return Vec::new();
+        }
+        let placed = place(c, &stage_deltas(&self.data, arch, k), &own, false);
+        ramps::solids(&own, &placed.to_arch)
+    }
+
+    /// The bite of the two aligners `kl` (lower) and `ku` (upper), the ramps
+    /// included when they are on; `None` without both arches or crown points.
+    pub(crate) fn bite(&self, kl: u32, ku: u32) -> Option<occlusal::Bite> {
+        let (l, u, rel) = (self.lower.as_ref()?, self.upper.as_ref()?, self.rel?);
+        let use_ramps = self.data.aligner_bite.ramps.enabled;
+        let list = &self.data.aligner_bite.ramps.ramps;
+        let lower = place(
+            l,
+            &stage_deltas(&self.data, Arch::Lower, kl),
+            list,
+            use_ramps,
+        );
+        let upper = place(
+            u,
+            &stage_deltas(&self.data, Arch::Upper, ku),
+            list,
+            use_ramps,
+        );
+        occlusal::bite(&lower.stage, &upper.stage, &rel, &self.design, [kl, ku])
+    }
+
+    /// The teeth under the aligner of `arch` (all its crowns).
+    pub(crate) fn covered(&self, arch: Arch) -> Vec<i64> {
+        self.arch(arch)
+            .map(|c| c.crowns.keys().map(|f| i64::from(f.get())).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// The ramps of the case as solids in the arch coordinates of `arch` at
 /// stage `k` (for the shell: [`dca_algo::ramps::apply_to_grid`]); empty when
 /// the ramps are off.

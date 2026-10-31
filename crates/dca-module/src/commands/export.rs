@@ -6,13 +6,14 @@
 //!   the movement of every tooth at every stage and the dates, and
 //!   `visits.ics` with the aligner changes of both arches. Parameters:
 //!   `dir`, `start_date`, `interval_days`, `policy`, `lang`.
-//! * `aligners.output.report` is the full export package: the models (and
-//!   the shells, once `shell.rs` is wired in), the print check of every
-//!   mesh, the tables and calendars, the programme of the patient for each
-//!   arch, the HTML report with two renders, `print_check.json` and
-//!   `manifest.json`, in parallel. See [`dca_algo::export::package`].
-//! * `aligners.output.print-check` runs the print check on the models of
-//!   some stages without writing anything.
+//! * `aligners.output.report` is the full export package: the models and
+//!   the aligners of every stage, the print check of every mesh, the tables
+//!   and calendars, the programme of the patient for each arch, the HTML
+//!   report with two renders, `print_check.json` and `manifest.json`, in
+//!   parallel. See [`dca_algo::export::package`].
+//! * `aligners.output.print-check` runs the print check on the models (and
+//!   the aligners, from the shell stage) of some stages without writing
+//!   anything.
 //! * `aligners.output.manifest` verifies a folder against its
 //!   `manifest.json`, or writes a manifest for a folder that has none.
 //!
@@ -20,11 +21,17 @@
 //! when the arch has a stored gingiva (`aligners.preparation.gingiva`,
 //! [`dca_algo::export::GumDeform`]); otherwise it stays where it is.
 //!
-//! # Wiring the shells
+//! # Where the meshes come from
 //!
-//! The meshes come from [`mesh_provider`]: today the deformed scan as the
-//! model and no shell. When `shell.rs` is ready, return a provider built on
-//! it there (the trait is `dca_algo::export::provider::MeshProvider`).
+//! [`mesh_provider`]: when every arch with aligners has its closed teeth and
+//! its gingiva, the shell stage ([`shells::ShellProvider`]: the printable
+//! model with the stamp embossed, the trimmed aligner with the ramps, the
+//! occlusal shaping and the stamp engraved, at the voxel of the quality);
+//! otherwise the deformed scans as the models and no aligner
+//! ([`ScanProvider`]), with a note in the report saying why. `shells: false`
+//! asks for the scans, `shells: true` refuses to fall back.
+
+mod shells;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -36,7 +43,7 @@ use dca_algo::anatomy::{self, Arch};
 use dca_algo::export::manifest;
 use dca_algo::export::package::{self, CaseInfo, FullParams};
 use dca_algo::export::printcheck::{self, CheckOptions};
-use dca_algo::export::provider::{MeshProvider, ScanProvider};
+use dca_algo::export::provider::{MeshProvider, Note, Quality, ScanProvider};
 use dca_algo::export::report::Renders;
 use dca_algo::export::{self, ArchSeries, GumDeform};
 use dca_algo::schedule;
@@ -164,10 +171,84 @@ fn input<'a>(arches: &'a [ArchData], data: &'a AlignersState) -> export::Input<'
     }
 }
 
-/// Where the printable meshes of every stage come from. Wiring point of
-/// the shell code: return the provider built on `shell.rs` here.
-fn mesh_provider<'a>(input: &'a export::Input<'a>) -> Box<dyn MeshProvider + 'a> {
-    Box::new(ScanProvider::new(input))
+/// What decides where the meshes come from.
+struct MeshChoice {
+    /// `None`: the shells when the case has what they need.
+    shells: Option<bool>,
+    quality: Quality,
+    voxel_mm: Option<f64>,
+    stamp: bool,
+    stamp_code: String,
+    date: schedule::Date,
+}
+
+/// The source of the printable meshes of every stage, its name for the
+/// manifest (`shells`, `scans`) and the note that says why when it is the
+/// scans.
+type Provider<'a> = (Box<dyn MeshProvider + 'a>, &'static str, Vec<Note>);
+
+/// Where the printable meshes of every stage come from (see the module
+/// docs).
+fn mesh_provider<'a>(
+    state: &CaseState,
+    data: &'a AlignersState,
+    input: &'a export::Input<'a>,
+    choice: &MeshChoice,
+) -> Result<Provider<'a>, CommandError> {
+    let scans = |why: String| -> Provider<'a> {
+        let note = Note {
+            arch: None,
+            stage: None,
+            aligner: false,
+            key: "rpt-note-scans",
+            detail: why,
+        };
+        (Box::new(ScanProvider::new(input)), "scans", vec![note])
+    };
+    if choice.shells == Some(false) {
+        return Ok(scans("shells: false".to_owned()));
+    }
+    let voxel = choice.voxel_mm.unwrap_or(choice.quality.voxel_mm());
+    if !(voxel.is_finite() && (0.04..=0.5).contains(&voxel)) {
+        return Err(CommandError::Invalid(format!(
+            "voxel_mm must be between 0.04 and 0.5, got {voxel}"
+        )));
+    }
+    let options = shells::Options {
+        voxel_mm: voxel,
+        tolerance_mm: choice.quality.tolerance_mm(),
+        stamp: choice.stamp,
+        stamp_code: choice.stamp_code.clone(),
+        date: choice.date,
+    };
+    match shells::ShellProvider::new(state, data, input, options)? {
+        Ok(p) => {
+            let note = Note {
+                arch: None,
+                stage: None,
+                aligner: false,
+                key: "rpt-note-shells",
+                detail: format!(
+                    "voxel {voxel} mm, tolerance {} mm",
+                    choice.quality.tolerance_mm()
+                ),
+            };
+            Ok((Box::new(p), "shells", vec![note]))
+        }
+        Err(why) if choice.shells == Some(true) => {
+            Err(CommandError::Invalid(format!("shells: true, but {why}")))
+        }
+        Err(why) => Ok(scans(why)),
+    }
+}
+
+/// The date of the files: `generated`, else today.
+fn export_date(generated: Option<&str>) -> Result<schedule::Date, CommandError> {
+    match generated {
+        Some(g) => schedule::Date::parse(g)
+            .ok_or_else(|| CommandError::Invalid(format!("generated: invalid date {g:?}"))),
+        None => Ok(schedule::Date::today()),
+    }
 }
 
 fn export_error(e: export::ExportError) -> CommandError {
@@ -264,8 +345,23 @@ fn run_report(
         // the attachments are not planned yet (WP: attachments)
         attachments: BTreeMap::new(),
         renders,
+        meshes: "",
+        notes: Vec::new(),
     };
-    let provider = mesh_provider(&input);
+    let choice = MeshChoice {
+        shells: params.shells,
+        quality: params.quality,
+        voxel_mm: params.voxel_mm,
+        stamp: params.stamp,
+        stamp_code: params.stamp_code.clone(),
+        date: export_date(params.generated.as_deref())?,
+    };
+    let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
+    let case = CaseInfo {
+        meshes,
+        notes,
+        ..case
+    };
     let report = package::run(&input, &case, provider.as_ref(), &params).map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
     Ok((state.clone(), out))
@@ -284,6 +380,15 @@ pub struct PrintCheckParams {
     pub self_intersections: bool,
     /// Build volume of the printer `[x, y, z]` (mm); `null` skips the fit.
     pub build_plate_mm: Option<[f64; 3]>,
+    /// Meshes from the shell stage (models and aligners): `null` when the
+    /// case has the closed teeth and the gingiva, `false` the scans.
+    pub shells: Option<bool>,
+    /// Quality of the shell-stage meshes.
+    pub quality: Quality,
+    /// Voxel of the fields (mm), instead of the quality's.
+    pub voxel_mm: Option<f64>,
+    /// Thinnest wall allowed in an aligner (mm); `null` skips the thickness.
+    pub min_thickness_mm: Option<f64>,
 }
 
 impl Default for PrintCheckParams {
@@ -292,6 +397,10 @@ impl Default for PrintCheckParams {
             stages: Vec::new(),
             self_intersections: true,
             build_plate_mm: Some(printcheck::DEFAULT_PLATE_MM),
+            shells: None,
+            quality: Quality::default(),
+            voxel_mm: None,
+            min_thickness_mm: Some(0.3),
         }
     }
 }
@@ -305,7 +414,15 @@ fn run_print_check(
     let data = aligners_data(state)?;
     let arches = prepare(state, &data)?;
     let input = input(&arches, &data);
-    let provider = mesh_provider(&input);
+    let choice = MeshChoice {
+        shells: params.shells,
+        quality: params.quality,
+        voxel_mm: params.voxel_mm,
+        stamp: false,
+        stamp_code: String::new(),
+        date: schedule::Date::today(),
+    };
+    let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
     let options = CheckOptions {
         self_intersections: params.self_intersections,
         build_plate_mm: params.build_plate_mm,
@@ -320,25 +437,52 @@ fn run_print_check(
             params.stages.clone()
         };
         for k in stages.into_iter().filter(|&k| k <= n) {
-            ctx.check_cancelled()?;
-            let Some(model) = provider.model(a.arch, k).map_err(export_error)? else {
-                continue;
-            };
-            let check = printcheck::check(&model, &options);
-            results.push(serde_json::json!({
-                "arch": if a.arch.is_upper() { "upper" } else { "lower" },
-                "stage": k,
-                "kind": "model",
-                "ok": check.ok,
-                "problems": check.problem_texts(dca_algo::schedule::Lang::En),
-                "check": check,
-            }));
+            for aligner in [false, true] {
+                ctx.check_cancelled()?;
+                let mesh = if aligner {
+                    if k == 0 {
+                        continue;
+                    }
+                    provider.aligner(a.arch, k)
+                } else {
+                    provider.model(a.arch, k)
+                };
+                let Some(mesh) = mesh.map_err(export_error)? else {
+                    continue;
+                };
+                let check = printcheck::check(
+                    &mesh,
+                    &CheckOptions {
+                        min_thickness_mm: if aligner {
+                            params.min_thickness_mm
+                        } else {
+                            None
+                        },
+                        ..options.clone()
+                    },
+                );
+                results.push(serde_json::json!({
+                    "arch": if a.arch.is_upper() { "upper" } else { "lower" },
+                    "stage": k,
+                    "kind": if aligner { "aligner" } else { "model" },
+                    "ok": check.ok,
+                    "problems": check.problem_texts(dca_algo::schedule::Lang::En),
+                    "check": check,
+                }));
+            }
         }
     }
     let passed = results.iter().filter(|r| r["ok"] == true).count();
+    let notes: Vec<String> = notes
+        .iter()
+        .chain(&provider.notes())
+        .map(|n| dca_algo::export::text::note(n, dca_algo::schedule::Lang::En))
+        .collect();
     let out = serde_json::json!({
         "checked": results.len(),
         "passed": passed,
+        "meshes": meshes,
+        "notes": notes,
         "files": results,
     });
     Ok((state.clone(), out))
@@ -615,6 +759,17 @@ mod tests {
 
         // the scans are open surfaces: the print check says so
         assert!(!out["print_check"]["failed"].as_array().unwrap().is_empty());
+        // no closed teeth and no gingiva: the scans, and the report says why
+        assert_eq!(out["meshes"], "scans");
+        assert!(
+            out["notes"][0]
+                .as_str()
+                .unwrap()
+                .contains("i modelli sono le scansioni deformate"),
+            "{}",
+            out["notes"]
+        );
+        assert!(report.contains("Note sui file di stampa"));
 
         // a changed file is found by the manifest command
         std::fs::write(dir.join("stages.csv"), b"x").unwrap();
@@ -626,6 +781,96 @@ mod tests {
         .unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["verification"]["mismatched"][0], "stages.csv");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_shells_are_refused_without_the_closed_teeth() {
+        let s = staged_both();
+        let dir = temp("no-shells");
+        let err = exec(
+            "aligners.output.report",
+            &s,
+            json!({ "dir": dir.display().to_string(), "shells": true }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CommandError::Invalid(ref m) if m.contains("reconstruction")),
+            "{err:?}"
+        );
+        let err = exec(
+            "aligners.output.report",
+            &s,
+            json!({ "dir": dir.display().to_string(), "voxel_mm": 2.0 }),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::Invalid(ref m) if m.contains("voxel_mm")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The full export of a golden arch from the shell stage at the draft
+    /// quality: a printable model and a trimmed aligner per stage, every one
+    /// closed, in one piece and passing the print check.
+    #[test]
+    #[ignore = "reconstruction, gingiva and the shells of every stage: run with --release --ignored"]
+    fn the_shells_of_a_golden_arch_pass_the_print_check() {
+        let mut s = super::super::reconstruct::golden_state("demo_lower_mild");
+        for id in [
+            "aligners.teeth.frames",
+            "aligners.preparation.reconstruction.automatic",
+            "aligners.preparation.gingiva",
+            "aligners.planning.setup.automatic",
+            "aligners.planning.staging.automatic",
+        ] {
+            let t = std::time::Instant::now();
+            s = exec(id, &s, Value::Null).unwrap().0;
+            eprintln!("{id}: {:.1} s", t.elapsed().as_secs_f64());
+        }
+        let dir = temp("shells");
+        let quality = std::env::var("DCA_QUALITY").unwrap_or_else(|_| "draft".to_owned());
+        let t = std::time::Instant::now();
+        let (_, out) = exec(
+            "aligners.output.report",
+            &s,
+            json!({
+                "dir": dir.display().to_string(),
+                "quality": quality,
+                "self_intersections": true,
+                "embed_renders": false,
+                "generated": "2026-01-01",
+                "stamp_code": "GOLD-1",
+            }),
+        )
+        .unwrap();
+        eprintln!("export ({quality}): {:.1} s", t.elapsed().as_secs_f64());
+        eprintln!("notes: {:#}", out["notes"]);
+        assert_eq!(out["meshes"], "shells");
+        let n = out["aligners"]["lower"].as_u64().unwrap();
+        let files = out["files"].as_array().unwrap();
+        let stl = |p: &str| {
+            files
+                .iter()
+                .filter(|f| f["name"].as_str().unwrap().starts_with(p))
+                .count() as u64
+        };
+        assert_eq!(stl("modelli_termoformatura/"), n + 1);
+        assert_eq!(stl("stampa_resina/"), n);
+        let check: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("print_check.json")).unwrap()).unwrap();
+        for f in check["files"].as_array().unwrap() {
+            eprintln!(
+                "{:<48} ok {:<5} {}",
+                f["name"].as_str().unwrap(),
+                f["ok"],
+                f["problems_text"]
+            );
+        }
+        assert_eq!(
+            out["print_check"]["failed"],
+            json!([]),
+            "{:#}",
+            out["print_check"]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -681,7 +926,7 @@ mod tests {
             let data = aligners_data(state).unwrap();
             let arches = prepare(state, &data).unwrap();
             let input = input(&arches, &data);
-            let provider = mesh_provider(&input);
+            let provider = ScanProvider::new(&input);
             let n = schedule::active_stages(Arch::Lower, &data.stages);
             assert!(n > 0);
             let first = provider.model(Arch::Lower, 0).unwrap().unwrap();
