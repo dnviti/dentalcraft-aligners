@@ -132,7 +132,7 @@ fn the_ramps_are_proposed_on_the_upper_incisors_of_a_deep_bite() {
             .contains("morso non profondo"),
         "{out}"
     );
-    assert_eq!(data(&same).aligner_bite.ramps.enabled, false);
+    assert!(!data(&same).aligner_bite.ramps.enabled);
     // with a lower threshold they go on the upper central and lateral incisors
     let state = deep(2.5);
     let (next, out) = exec(
