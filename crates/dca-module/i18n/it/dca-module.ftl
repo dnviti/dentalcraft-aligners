@@ -254,7 +254,12 @@ aligners-cmd-teeth-frames-doc = Misura ogni dente segmentato: il sistema di rife
 
 ## ---- commands: reconstruct ----
 
+aligners-cmd-reconstruction-automatic-doc = Chiude ogni dente segmentato in un solido a tenuta. Prima misura i denti (sistemi di riferimento, come Assi e larghezze dei denti); poi taglia ogni corona lungo una linea di margine regolare, ricostruisce la superficie che lo scanner ha chiuso sui contatti, le lamine sottili e la striscia accanto al margine, e chiude l'apertura con una superficie regolare tangente alla corona che si restringe in un colletto sotto il margine gengivale e termina con un moncone arrotondato (fairing a piastra sottile, Kobbelt 1998). La superficie ricostruita segue il contorno convesso di ogni sezione orizzontale della corona e raggiunge la superficie di contatto dove la scansione univa due denti. I solidi sono salvati nel caso (coordinate del caso) e i loro numeri restituiti; le scansioni non cambiano. Richiede la segmentazione. Parametri: arch (all, upper o lower), neck_depth_mm, apex_mm, neck_scale.
+aligners-cmd-reconstruction-rebuild-tooth-doc = Chiude di nuovo un dente in un solido a tenuta, con il suo sistema di riferimento salvato (misurato prima se manca), e ne sostituisce il solido nel caso. Richiede la segmentazione. Parametri: fdi (il numero del dente, obbligatorio), neck_depth_mm, apex_mm, neck_scale.
+
 ## ---- commands: gingiva ----
+
+aligners-cmd-gingiva-doc = Costruisce la gengiva senza fori di ogni arcata segmentata: la scansione tagliata lungo il margine gengivale regolarizzato di tutti i denti, continuata sotto le corone da una membrana armonica abbassata fino a col_mm (la cresta sotto i denti e il col interdentale visibile quando i denti si allontanano). È salvata nel caso con il dente che ogni vertice segue; pesi di fusione armonici la muovono poi con i denti (margine solidale al suo dente, papille condivise dai denti vicini, base ferma). Le scansioni non cambiano. Richiede la segmentazione. Parametri: arch (all, upper o lower), col_mm, papilla_mm, collar_mm, collar_gap_mm, radius_mm, root_mm, root_fade_mm.
 
 ## ---- commands: diagnosis ----
 
