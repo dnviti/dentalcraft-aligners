@@ -235,6 +235,9 @@ aligners-cmd-demo-generate-doc = Generates a synthetic dental arch (a typodont, 
 
 ## ---- commands: autoseed ----
 
+aligners-cmd-autoseed-orientation-doc = Puts the patient on the world axes, like the world frame command, and stores the transform in the case (the scans are not modified): the origin is the centre of the dental arch on the occlusal plane, the incisors towards -Y, the patient's right towards -X, the lower arch with the teeth up and the upper arch with the teeth down. The arch frame comes from the seeds of the reference arch when there are enough of them, otherwise from the crowns of the scan (occlusal direction from the open border or the flat base, anterior direction from the U of the crown tops). Parameter: reference (auto, upper or lower; auto is the lower arch, else the upper).
+aligners-cmd-autoseed-numbering-doc = Finds the teeth of each arch scan and puts a numbered seed (FDI) on the occlusal face of every tooth, replacing the seeds of that arch. The crown profile along the arch is matched to the typical tooth widths for every plausible number of molars; a tooth inside the arch may be missing. The proposal must be checked. It fails when fewer than 4 teeth are found: place the seeds manually. Parameters: arch (all, upper or lower), third_molars (third molars may be present, default false), missing (FDI numbers of the teeth known to be missing), ends (forced distal tooth of the right and left side, positions 5 to 8, e.g. [7, 7]; default chosen by the data).
+
 ## ---- commands: segmentation ----
 
 ## ---- commands: teeth ----

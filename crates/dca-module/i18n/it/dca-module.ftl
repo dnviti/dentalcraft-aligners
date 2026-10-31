@@ -235,6 +235,9 @@ aligners-cmd-demo-generate-doc = Genera un'arcata dentale sintetica (un typodont
 
 ## ---- commands: autoseed ----
 
+aligners-cmd-autoseed-orientation-doc = Porta il paziente sugli assi del mondo, come il comando del riferimento mondo, e salva la trasformazione nel caso (le scansioni non vengono modificate): l'origine è il centro dell'arcata sul piano occlusale, gli incisivi verso -Y, la destra del paziente verso -X, l'arcata inferiore con i denti in alto e la superiore con i denti in basso. Il riferimento d'arcata viene dai semi dell'arcata di riferimento se sono abbastanza, altrimenti dalle corone della scansione (direzione occlusale dal bordo aperto o dalla base piatta, direzione anteriore dalla U delle sommità delle corone). Parametro: reference (auto, upper o lower; auto è l'arcata inferiore, altrimenti la superiore).
+aligners-cmd-autoseed-numbering-doc = Trova i denti di ogni scansione d'arcata e mette un seme numerato (FDI) sulla faccia occlusale di ogni dente, al posto dei semi di quell'arcata. Il profilo delle corone lungo l'arcata è confrontato con le larghezze tipiche dei denti per ogni numero plausibile di molari; un dente dentro l'arcata può mancare. La proposta va verificata. Non riesce se trova meno di 4 denti: posiziona i semi a mano. Parametri: arch (all, upper o lower), third_molars (possono esserci i terzi molari, predefinito false), missing (numeri FDI dei denti che si sa mancare), ends (dente distale imposto del lato destro e sinistro, posizioni da 5 a 8, per esempio [7, 7]; predefinito scelto dai dati).
+
 ## ---- commands: segmentation ----
 
 ## ---- commands: teeth ----
