@@ -13,8 +13,9 @@
 //! scan (crown points), and the diagnosis (crowding, Little index, score) for
 //! the automatic pattern.
 //!
-//! The crown points are the labelled vertices of the scan until the closed
-//! crowns of the reconstruction are used.
+//! The crown points are the closed crowns of the reconstruction
+//! (`AlignersState::crowns`) when the tooth has one, else the labelled
+//! vertices of the scan.
 //!
 //! The two arches have their own series; `stages` holds the longer of the
 //! two and the arch that finishes first repeats its last pose (the passive
@@ -239,11 +240,26 @@ fn run_automatic(
             .iter()
             .map(|(&f, r)| (f, frame::rigid_inverse(&r.to_mat4())))
             .collect();
+        // the closed crowns of the reconstruction when they exist, else the
+        // labelled vertices of the scan
+        for (&f, r) in &data.crowns {
+            if let Some(inv) = inverse.get(&f) {
+                let mesh = state.blobs.require(r)?;
+                crowns.insert(
+                    f,
+                    mesh.positions
+                        .iter()
+                        .map(|p| inv.transform_point3(p.as_dvec3()))
+                        .collect(),
+                );
+            }
+        }
         for (p, &l) in case_vertices.iter().zip(&scan.labels) {
             if l == 0 {
                 continue;
             }
             if let Some(f) = u8::try_from(l).ok().and_then(|n| Fdi::new(n).ok())
+                && !data.crowns.contains_key(&f)
                 && let Some(inv) = inverse.get(&f)
             {
                 crowns.entry(f).or_default().push(inv.transform_point3(*p));
