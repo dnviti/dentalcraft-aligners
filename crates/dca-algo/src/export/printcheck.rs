@@ -10,9 +10,10 @@
 //! The mesh is welded first (identical positions become one vertex): that is
 //! what the slicer sees in the STL file, which has no connectivity. The
 //! topology counts come from that welded mesh; the self-intersections use
-//! the BVH of `dc-geom` (candidate triangles by box overlap, then an exact
-//! triangle/triangle test); the thickness casts a ray into the solid from
-//! the centre of the faces.
+//! the robust crossing test of the shell stage
+//! ([`crate::shell::crossing_pairs`]: an edge of a triangle through another
+//! one, nearly coplanar triangles left out); the thickness casts a ray into
+//! the solid from the centre of the faces.
 //!
 //! Not ported: `shell_reach` (fins and flaps of an EQUATOR shell far from
 //! the teeth) needs the teeth and bars of the stage, so it belongs to the
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 
 use dc_geom::bvh::Bvh;
 use dc_mesh::TriMesh;
-use glam::{DVec2, DVec3, Vec3};
+use glam::{DVec3, Vec3};
 use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -30,8 +31,6 @@ use serde::{Deserialize, Serialize};
 use super::text;
 use crate::schedule::Lang;
 
-/// Distance under which a point counts as on a plane (mm).
-const PLANE_EPS: f64 = 1e-6;
 /// Area (twice) under which a triangle is degenerate (the plugin's value).
 const DEGENERATE_AREA2: f64 = 1e-10;
 /// Inward ray start offset along the face (mm), to leave the face itself.
@@ -369,15 +368,12 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
         })
         .sum();
 
-    let welded = TriMesh::new(pos.clone(), tris.clone());
-    let bvh = Bvh::build(&welded).ok();
     if options.self_intersections {
-        let (count, pairs) = bvh
-            .as_ref()
-            .map_or((0, Vec::new()), |b| self_intersections(&pos, &tris, b));
+        let (count, pairs) = self_intersections(&pos, &tris);
         out.self_intersections = Some(count);
         out.intersecting_pairs = pairs;
     }
+    let bvh = Bvh::build(&TriMesh::new(pos.clone(), tris.clone())).ok();
 
     let closed = out.boundary_edges == 0 && out.nonmanifold_edges == 0;
     if let (Some(_), true, true, Some(b)) = (
@@ -386,7 +382,13 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
         out.volume_mm3 > 0.0,
         bvh.as_ref(),
     ) {
-        out.min_thickness_mm = min_thickness(&pos, &tris, b, options.thickness_samples);
+        out.min_thickness_mm = min_thickness(
+            &pos,
+            &tris,
+            b,
+            options.thickness_samples,
+            options.min_thickness_mm.unwrap_or(0.0),
+        );
     }
 
     if let Some(plate) = options.build_plate_mm {
@@ -461,178 +463,50 @@ pub fn check_file(
 
 // ---- self-intersections ---------------------------------------------------------------------------------------
 
-/// Number of pairs of triangles that intersect and share no vertex, and the
-/// first few of them. Indices are those of the welded mesh, which keeps the
-/// triangle order of the input.
-fn self_intersections(pos: &[Vec3], tris: &[[u32; 3]], bvh: &Bvh) -> (usize, Vec<[u32; 2]>) {
-    let per_face: Vec<Vec<u32>> = (0..tris.len())
-        .into_par_iter()
-        .map(|i| {
-            let t = tris[i];
-            let c = corners(pos, t);
-            if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || area2(&c) < DEGENERATE_AREA2 {
-                return Vec::new();
-            }
-            let lo = pos[t[0] as usize]
-                .min(pos[t[1] as usize])
-                .min(pos[t[2] as usize]);
-            let hi = pos[t[0] as usize]
-                .max(pos[t[1] as usize])
-                .max(pos[t[2] as usize]);
-            bvh.overlap_aabb(lo, hi)
-                .into_iter()
-                .filter(|&j| j as usize > i)
-                .filter(|&j| {
-                    let u = tris[j as usize];
-                    !t.iter().any(|v| u.contains(v))
-                })
-                .filter(|&j| {
-                    let u = tris[j as usize];
-                    let d = corners(pos, u);
-                    area2(&d) >= DEGENERATE_AREA2 && tri_tri(&c, &d)
-                })
-                .collect()
-        })
+/// Number of pairs of triangles that cross each other and share no vertex,
+/// and the first few of them. Indices are those of the welded mesh, which
+/// keeps the triangle order of the input.
+///
+/// The test is [`crate::shell::crossing_pairs`] (an edge of one triangle
+/// meets the other, edges within a sine of 1e-4 of the plane of the other
+/// left out): two nearly coplanar triangles of a flat wall, which rounding
+/// tilts by about that much, do not count as crossing (the Moller
+/// interval test read them as crossing along the ill-conditioned line of
+/// their planes). Degenerate triangles are counted apart.
+fn self_intersections(pos: &[Vec3], tris: &[[u32; 3]]) -> (usize, Vec<[u32; 2]>) {
+    let bad = |t: [u32; 3]| {
+        t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || area2(&corners(pos, t)) < DEGENERATE_AREA2
+    };
+    let welded = TriMesh::new(pos.to_vec(), tris.to_vec());
+    let pairs: Vec<[u32; 2]> = crate::shell::crossing_pairs(&welded)
+        .into_iter()
+        .filter(|&(i, j)| !bad(tris[i as usize]) && !bad(tris[j as usize]))
+        .map(|(i, j)| [i, j])
         .collect();
-    let count = per_face.iter().map(Vec::len).sum();
-    let pairs = per_face
-        .iter()
-        .enumerate()
-        .flat_map(|(i, js)| js.iter().map(move |&j| [i as u32, j]))
-        .take(MAX_PAIRS)
-        .collect();
-    (count, pairs)
-}
-
-/// Signed distances of the corners of `a` from the plane of `b`, with the
-/// ones within [`PLANE_EPS`] set to zero.
-fn plane_distances(a: &[DVec3; 3], b: &[DVec3; 3]) -> Option<(DVec3, [f64; 3])> {
-    let n = (b[1] - b[0]).cross(b[2] - b[0]);
-    let len = n.length();
-    if len == 0.0 {
-        return None;
-    }
-    let n = n / len;
-    let d = a.map(|p| {
-        let v = n.dot(p - b[0]);
-        if v.abs() < PLANE_EPS { 0.0 } else { v }
-    });
-    Some((n, d))
-}
-
-/// Exact intersection test of two triangles (Moller 1997, with the coplanar
-/// case in 2D). Touching counts as intersecting.
-fn tri_tri(a: &[DVec3; 3], b: &[DVec3; 3]) -> bool {
-    let Some((nb, da)) = plane_distances(a, b) else {
-        return false;
-    };
-    if da.iter().all(|&d| d > 0.0) || da.iter().all(|&d| d < 0.0) {
-        return false;
-    }
-    let Some((na, db)) = plane_distances(b, a) else {
-        return false;
-    };
-    if db.iter().all(|&d| d > 0.0) || db.iter().all(|&d| d < 0.0) {
-        return false;
-    }
-    if da.iter().all(|&d| d == 0.0) {
-        return coplanar(a, b, na);
-    }
-    // both triangles cross the line of the two planes: compare the intervals
-    let dir = na.cross(nb);
-    let axis = if dir.x.abs() >= dir.y.abs() && dir.x.abs() >= dir.z.abs() {
-        0
-    } else if dir.y.abs() >= dir.z.abs() {
-        1
-    } else {
-        2
-    };
-    let (Some(ia), Some(ib)) = (
-        interval(a.map(|p| p[axis]), da),
-        interval(b.map(|p| p[axis]), db),
-    ) else {
-        return false;
-    };
-    ia.0 <= ib.1 && ib.0 <= ia.1
-}
-
-/// Interval of the line covered by a triangle crossing the plane; `p` are
-/// the corners projected on the line, `d` their distances from the plane.
-fn interval(p: [f64; 3], d: [f64; 3]) -> Option<(f64, f64)> {
-    let (i0, i1, i2) = if d[0] * d[1] > 0.0 {
-        (2, 0, 1)
-    } else if d[0] * d[2] > 0.0 {
-        (1, 0, 2)
-    } else if d[1] * d[2] > 0.0 || d[0] != 0.0 {
-        (0, 1, 2)
-    } else if d[1] != 0.0 {
-        (1, 0, 2)
-    } else if d[2] != 0.0 {
-        (2, 0, 1)
-    } else {
-        return None;
-    };
-    let at = |j: usize| p[i0] + (p[j] - p[i0]) * d[i0] / (d[i0] - d[j]);
-    let (t1, t2) = (at(i1), at(i2));
-    Some((t1.min(t2), t1.max(t2)))
-}
-
-/// Two coplanar triangles intersect: an edge crosses an edge, or one holds a
-/// corner of the other.
-fn coplanar(a: &[DVec3; 3], b: &[DVec3; 3], n: DVec3) -> bool {
-    // drop the dominant axis of the normal
-    let drop = if n.x.abs() >= n.y.abs() && n.x.abs() >= n.z.abs() {
-        0
-    } else if n.y.abs() >= n.z.abs() {
-        1
-    } else {
-        2
-    };
-    let flat = |p: DVec3| match drop {
-        0 => DVec2::new(p.y, p.z),
-        1 => DVec2::new(p.x, p.z),
-        _ => DVec2::new(p.x, p.y),
-    };
-    let (a, b) = (a.map(flat), b.map(flat));
-    for i in 0..3 {
-        for j in 0..3 {
-            if segments_cross(a[i], a[(i + 1) % 3], b[j], b[(j + 1) % 3]) {
-                return true;
-            }
-        }
-    }
-    inside(&b, a[0]) || inside(&a, b[0])
-}
-
-fn orient(a: DVec2, b: DVec2, c: DVec2) -> f64 {
-    (b - a).perp_dot(c - a)
-}
-
-fn segments_cross(p: DVec2, q: DVec2, r: DVec2, s: DVec2) -> bool {
-    let (o1, o2, o3, o4) = (
-        orient(p, q, r),
-        orient(p, q, s),
-        orient(r, s, p),
-        orient(r, s, q),
-    );
-    o1 * o2 < 0.0 && o3 * o4 < 0.0
-}
-
-fn inside(t: &[DVec2; 3], p: DVec2) -> bool {
-    let (d1, d2, d3) = (
-        orient(t[0], t[1], p),
-        orient(t[1], t[2], p),
-        orient(t[2], t[0], p),
-    );
-    (d1 > 0.0 && d2 > 0.0 && d3 > 0.0) || (d1 < 0.0 && d2 < 0.0 && d3 < 0.0)
+    let count = pairs.len();
+    (count, pairs.into_iter().take(MAX_PAIRS).collect())
 }
 
 // ---- thickness -----------------------------------------------------------------------------------------------
 
 /// Thinnest wall: from the centre of an even sample of the faces, the
 /// distance to the surface straight into the solid (the normals point out).
-fn min_thickness(pos: &[Vec3], tris: &[[u32; 3]], bvh: &Bvh, samples: usize) -> Option<f64> {
+///
+/// A span thinner than `limit` counts only when its two sides are not joined
+/// along the surface within `2 * limit` of the probe ([`joined_near`]): the
+/// faces of a feature smaller than that (the lands between the strokes of an
+/// engraved text, a sharp crease, the very edge of a rounded rim) face each
+/// other across less than the limit but are no wall.
+fn min_thickness(
+    pos: &[Vec3],
+    tris: &[[u32; 3]],
+    bvh: &Bvh,
+    samples: usize,
+    limit: f64,
+) -> Option<f64> {
     let step = (tris.len() / samples.max(1)).max(1);
+    let around = vertex_faces(pos.len(), tris);
+    let reach = (2.0 * limit) as f32;
     (0..tris.len())
         .step_by(step)
         .collect::<Vec<_>>()
@@ -647,9 +521,110 @@ fn min_thickness(pos: &[Vec3], tris: &[[u32; 3]], bvh: &Bvh, samples: usize) -> 
             let n = n / len;
             let centre = (a + b + c) / 3.0;
             let hit = bvh.ray_cast_range(centre - n * RAY_EPS, -n, 0.0, f32::INFINITY)?;
-            (hit.face as usize != i).then_some(f64::from(hit.t + RAY_EPS))
+            let t = f64::from(hit.t + RAY_EPS);
+            if hit.face as usize == i
+                || (t < limit
+                    && joined_near(pos, tris, &around, i, hit.face as usize, centre, reach))
+            {
+                return None;
+            }
+            Some(t)
         })
         .reduce_with(f64::min)
+}
+
+/// The point of the triangle `a b c` closest to `p` (Ericson, Real-Time
+/// Collision Detection 5.1.5).
+fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return a + ab * (d1 / (d1 - d3));
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return a + ac * (d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    }
+    let denom = va + vb + vc;
+    if denom.abs() < f32::MIN_POSITIVE {
+        return a;
+    }
+    a + ab * (vb / denom) + ac * (vc / denom)
+}
+
+/// The faces around every vertex (compressed rows: `(start, faces)`).
+fn vertex_faces(n: usize, tris: &[[u32; 3]]) -> (Vec<u32>, Vec<u32>) {
+    let mut start = vec![0u32; n + 1];
+    for t in tris {
+        for &v in t {
+            start[v as usize + 1] += 1;
+        }
+    }
+    for k in 0..n {
+        start[k + 1] += start[k];
+    }
+    let mut fill = start.clone();
+    let mut faces = vec![0u32; start[n] as usize];
+    for (f, t) in tris.iter().enumerate() {
+        for &v in t {
+            faces[fill[v as usize] as usize] = f as u32;
+            fill[v as usize] += 1;
+        }
+    }
+    (start, faces)
+}
+
+/// Face `to` is reached from face `from` across faces that share a vertex,
+/// all within `reach` of `centre`.
+fn joined_near(
+    pos: &[Vec3],
+    tris: &[[u32; 3]],
+    (start, faces): &(Vec<u32>, Vec<u32>),
+    from: usize,
+    to: usize,
+    centre: Vec3,
+    reach: f32,
+) -> bool {
+    let r2 = reach * reach;
+    let near = |f: usize| {
+        let [a, b, c] = tris[f].map(|v| pos[v as usize]);
+        closest_on_triangle(centre, a, b, c).distance_squared(centre) <= r2
+    };
+    let mut seen = std::collections::HashSet::from([from]);
+    let mut stack = vec![from];
+    while let Some(f) = stack.pop() {
+        if f == to {
+            return true;
+        }
+        for &v in &tris[f] {
+            let (s, e) = (start[v as usize] as usize, start[v as usize + 1] as usize);
+            for &g in &faces[s..e] {
+                let g = g as usize;
+                if near(g) && seen.insert(g) {
+                    stack.push(g);
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -843,6 +818,81 @@ pub(crate) mod tests {
         assert!((fine.min_thickness_mm.unwrap() - 2.0).abs() < 1e-3);
     }
 
+    /// A closed prism of the plan polygon `xz` (counter-clockwise, its cap
+    /// triangles `cap`) extruded along `y` by `depth`.
+    fn extruded(xz: &[[f32; 2]], cap: &[[u32; 3]], depth: f32) -> TriMesh {
+        let k = xz.len() as u32;
+        let mut positions: Vec<Vec3> = xz.iter().map(|p| Vec3::new(p[0], 0.0, p[1])).collect();
+        positions.extend(xz.iter().map(|p| Vec3::new(p[0], depth, p[1])));
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for t in cap {
+            tris.push(*t);
+            tris.push([t[0] + k, t[2] + k, t[1] + k]);
+        }
+        for i in 0..k {
+            let j = (i + 1) % k;
+            tris.push([i, i + k, j + k]);
+            tris.push([i, j + k, j]);
+        }
+        let m = TriMesh::new(positions, tris);
+        let c = check(&m, &opts());
+        if c.volume_mm3 < 0.0 {
+            TriMesh::new(
+                m.positions,
+                m.tris.iter().map(|t| [t[0], t[2], t[1]]).collect(),
+            )
+        } else {
+            m
+        }
+    }
+
+    #[test]
+    fn a_small_feature_is_no_thin_wall_but_a_thin_slab_is() {
+        let thick = CheckOptions {
+            min_thickness_mm: Some(0.3),
+            ..opts()
+        };
+        // a block with a land 0.1 mm wide and 0.08 mm high on top (as between
+        // the strokes of an engraved text)
+        let xz = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [5.1, 10.0],
+            [5.1, 10.08],
+            [5.0, 10.08],
+            [5.0, 10.0],
+            [0.0, 10.0],
+        ];
+        let cap = [
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 6],
+            [0, 6, 7],
+            [6, 3, 4],
+            [6, 4, 5],
+        ];
+        let land = check(&extruded(&xz, &cap, 10.0), &thick);
+        assert!(land.ok, "{:?}", land.problems);
+        assert!(land.min_thickness_mm.unwrap() > 1.0, "{land:?}");
+        // a slab 0.2 mm thick: its faces are joined only far from the probes
+        let slab = check(
+            &extruded(
+                &[[0.0, 0.0], [10.0, 0.0], [10.0, 0.2], [0.0, 0.2]],
+                &[[0, 1, 2], [0, 2, 3]],
+                10.0,
+            ),
+            &thick,
+        );
+        let t = slab.min_thickness_mm.unwrap();
+        assert!((t - 0.2).abs() < 1e-3, "{t}");
+        assert!(
+            slab.problems
+                .iter()
+                .any(|p| matches!(p, Problem::TooThin { .. }))
+        );
+    }
+
     #[test]
     fn the_build_plate_limits_the_size() {
         let c = check(
@@ -886,35 +936,43 @@ pub(crate) mod tests {
 
     #[test]
     fn the_triangle_test_handles_the_cases() {
-        let t = |a: [f64; 3], b: [f64; 3], c: [f64; 3]| [a, b, c].map(DVec3::from_array);
-        let base = t([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]);
+        let pairs = |a: [[f32; 3]; 3], b: [[f32; 3]; 3]| {
+            let positions = a.iter().chain(&b).map(|p| Vec3::from_array(*p)).collect();
+            let (pos, tris) = weld(&TriMesh::new(positions, vec![[0, 1, 2], [3, 4, 5]]));
+            self_intersections(&pos, &tris).0
+        };
+        let base = [[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]];
         // pierced by a triangle standing on it
-        assert!(tri_tri(
-            &base,
-            &t([1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [2.0, 1.0, 1.0])
-        ));
+        assert_eq!(
+            pairs(base, [[1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [2.0, 1.0, 1.0]]),
+            1
+        );
         // above it
-        assert!(!tri_tri(
-            &base,
-            &t([1.0, 1.0, 1.0], [1.0, 1.0, 2.0], [2.0, 1.0, 2.0])
-        ));
-        // coplanar: overlapping and apart, nested
-        assert!(tri_tri(
-            &base,
-            &t([1.0, 1.0, 0.0], [5.0, 1.0, 0.0], [1.0, 5.0, 0.0])
-        ));
-        assert!(!tri_tri(
-            &base,
-            &t([5.0, 5.0, 0.0], [6.0, 5.0, 0.0], [5.0, 6.0, 0.0])
-        ));
-        assert!(tri_tri(
-            &base,
-            &t([0.5, 0.5, 0.0], [1.0, 0.5, 0.0], [0.5, 1.0, 0.0])
-        ));
+        assert_eq!(
+            pairs(base, [[1.0, 1.0, 1.0], [1.0, 1.0, 2.0], [2.0, 1.0, 2.0]]),
+            0
+        );
         // in the plane of the other but past its edge
-        assert!(!tri_tri(
-            &base,
-            &t([3.0, 3.0, -1.0], [3.0, 3.0, 1.0], [4.0, 3.0, 1.0])
-        ));
+        assert_eq!(
+            pairs(base, [[3.0, 3.0, -1.0], [3.0, 3.0, 1.0], [4.0, 3.0, 1.0]]),
+            0
+        );
+        // two triangles of a flat wall 0.1 mm apart, one tilted by rounding:
+        // not a crossing (the interval test of Moller counted them)
+        assert_eq!(
+            pairs(
+                [[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]],
+                [[4.1, 0.1, 2e-5], [0.1, 4.1, -2e-5], [4.1, 4.1, 1e-5]]
+            ),
+            0
+        );
+        // a thin wedge through the wall is one
+        assert_eq!(
+            pairs(
+                base,
+                [[1.0, 1.0, -0.01], [2.0, 1.0, 0.01], [1.0, 2.0, 0.01]]
+            ),
+            1
+        );
     }
 }
