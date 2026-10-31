@@ -42,7 +42,11 @@ jobs:
             ${{ secrets.DEPLOY_KEY_CORE }}
       - name: Use SSH for private dentalcraft repositories
         if: hashFiles('Cargo.toml') != ''
-        run: git config --global url."git@github.com:dnviti-personal-org/".insteadOf "https://github.com/dnviti-personal-org/"
+        run: |
+          git config --global url."git@github.com:dnviti-personal-org/".insteadOf "https://github.com/dnviti-personal-org/"
+          # The runner image ships no known_hosts: pin GitHub's published ed25519 host key.
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
       - name: Install Rust 1.99.1
         if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
