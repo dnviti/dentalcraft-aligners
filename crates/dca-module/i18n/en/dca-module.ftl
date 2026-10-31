@@ -238,6 +238,8 @@ aligners-cmd-demo-generate-doc = Generates a synthetic dental arch (a typodont, 
 ## ---- commands: segmentation ----
 
 ## ---- commands: teeth ----
+aligners-cmd-teeth-frames = Tooth frames and widths
+aligners-cmd-teeth-frames-doc = Measures every segmented tooth: the local frame (mesio-distal, bucco-lingual and long axis, in case coordinates), the mesio-distal and bucco-lingual widths, the crown height, the cusp tip, the interproximal contacts and the estimated cemento-enamel junction, alveolar crest, root apex and centre of resistance (population estimates, a surface scan has no roots). The long axis comes from the gingival margin and the side walls of the crown, the mesio-distal axis from the contacts, the incisal edge or the symmetry of the crown. The frames are stored in the case and the measures are returned; the scans are not modified. Needs the segmentation. Parameters: arch (all, upper or lower), margin_to_crest_mm, cres_ratio, max_tilt_deg.
 
 ## ---- commands: reconstruct ----
 
