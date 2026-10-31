@@ -10,9 +10,9 @@ use dc_mesh::TriMesh;
 use glam::{DVec2, DVec3, Vec3};
 
 use super::line::{self, MarginMode};
-use super::model;
 use super::survey::{self, circular_smooth, loop_nearest, round_tabs, slope_floor};
 use super::*;
+use super::{model, warp};
 use crate::anatomy::Arch;
 use crate::demo;
 
@@ -180,7 +180,7 @@ fn straight_line_on_the_demo_arch() {
     assert_eq!(out.mode, Mode::Straight);
     // the plugin's rule: every side of a tooth at its gingival zenith less the extension
     for (t, l) in a.teeth.iter().zip(&out.lines) {
-        assert_eq!(t.fdi, l.fdi);
+        assert_eq!(Some(t.fdi), l.fdi);
         assert_eq!(l.points.len(), 2, "{}", t.fdi);
         let step = (t.margin.len() / 60).max(1);
         let m: Vec<DVec3> = t.margin.iter().step_by(step).copied().collect();
@@ -246,6 +246,7 @@ fn equator_line_on_the_demo_arch() {
     let a = demo_arch(Arch::Upper, 0.6, 0.25);
     let p = Params {
         mode: Mode::Equator,
+        insertion_axis: warp::InsertionAxis::Vertical,
         ..Params::default()
     };
     let t0 = std::time::Instant::now();
@@ -260,7 +261,8 @@ fn equator_line_on_the_demo_arch() {
     check_solid(&out);
     let by: BTreeMap<Fdi, &Tooth> = a.teeth.iter().map(|t| (t.fdi, t)).collect();
     for l in &out.lines {
-        let t = by[&l.fdi];
+        let fdi = l.fdi.unwrap();
+        let t = by[&fdi];
         let eq = line::tooth_equator(t, line::EQUATOR_AZIMUTHS).unwrap();
         let top = eq.top;
         let zm = eq.margin.clone().unwrap();
@@ -268,11 +270,10 @@ fn equator_line_on_the_demo_arch() {
         for (k, q) in l.points.iter().enumerate() {
             // the plugin's limits: under the top less 1 mm, over the margin plus 0.1 mm
             let floor = (zm[k] + line::EQUATOR_GUM_GAP_MM).min(top - line::EQUATOR_GUM_GAP_MM);
-            assert!(q.z >= floor - 1e-9, "{} {k}", l.fdi);
+            assert!(q.z >= floor - 1e-9, "{fdi} {k}");
             assert!(
                 q.z <= (top - line::EQUATOR_TOP_MM).max(floor) + 1e-9,
-                "{} {k}",
-                l.fdi
+                "{fdi} {k}"
             );
             // offset 0: the line is the equator where no tab is rounded
             assert!(q.z >= eq.points[k].z - 1e-9);
@@ -302,12 +303,100 @@ fn equator_line_on_the_demo_arch() {
 }
 
 #[test]
-fn smooth_falls_back_to_scalloped() {
-    let a = demo_arch(Arch::Lower, 0.6, 0.3);
-    let out = run(&a.input(), &Params::default()).unwrap();
+fn equator_along_the_insertion_path_of_every_tooth() {
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let p = Params {
+        mode: Mode::Equator,
+        ..Params::default()
+    };
+    assert_eq!(p.insertion_axis, warp::InsertionAxis::PerTooth);
+    let out = run(&a.input(), &p).unwrap();
+    eprintln!(
+        "per tooth: genus {}, dropped {}",
+        out.genus, out.dropped_pieces
+    );
+    check_solid(&out);
+    // the warp takes the points back where they were
+    if let Some(w) = &out.warp {
+        let max_tilt = w
+            .shears
+            .iter()
+            .map(|s| s.length().atan().to_degrees())
+            .fold(0.0, f64::max);
+        eprintln!("largest tilt {max_tilt:.1} deg");
+        assert!(max_tilt <= 30.0 + 1e-6);
+        for t in &a.teeth {
+            for q in t.crown.iter().step_by(37) {
+                assert!((w.from_warp(w.to_warp(*q)) - *q).length() < 1e-6);
+            }
+        }
+    }
+    // every crown keeps its cap
+    let bvh = Bvh::build(&out.mesh).unwrap();
+    for t in &a.teeth {
+        let top = t
+            .crown
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.z > a.z { b } else { a })
+            .unwrap();
+        assert!(
+            bvh.ray_cast((top + DVec3::Z * 10.0).as_vec3(), Vec3::NEG_Z, 20.0)
+                .is_some(),
+            "{}",
+            t.fdi
+        );
+    }
+}
+
+#[test]
+fn smooth_border_on_the_demo_arch() {
+    let mut a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let p = Params::default();
+    let out = run(&a.input(), &p).unwrap();
+    eprintln!(
+        "smooth: {} tris, genus {}, dropped {}",
+        out.mesh.face_count(),
+        out.genus,
+        out.dropped_pieces
+    );
+    assert_eq!(out.mode, Mode::Smooth);
+    assert!(!out.fallback);
+    check_solid(&out);
+    assert_eq!(out.lines.len(), 1);
+    assert_eq!(out.lines[0].fdi, None);
+    // the trim surface passes through the border points, which sit
+    // margin_gap_mm above the margin within the scallops
+    let zmin = a
+        .teeth
+        .iter()
+        .flat_map(|t| t.margin.iter().map(|q| q.z))
+        .fold(f64::INFINITY, f64::min);
+    let zmax = a
+        .teeth
+        .iter()
+        .flat_map(|t| t.margin.iter().map(|q| q.z))
+        .fold(f64::NEG_INFINITY, f64::max);
+    // (but for the last rows round the distal faces, next to the high
+    // points behind them)
+    let pts = &out.lines[0].points;
+    let mut on = 0;
+    for q in pts {
+        assert!(
+            q.z > zmin + p.margin_gap_mm - p.scallop_mm
+                && q.z < zmax + p.margin_gap_mm + p.scallop_mm
+        );
+        on += usize::from((out.surface_at(q.x, q.y) - q.z).abs() < 0.1);
+    }
+    assert!(on as f64 > 0.9 * pts.len() as f64, "{on} of {}", pts.len());
+    // one covered tooth only: the scalloped border instead, as the plugin
+    for t in &mut a.teeth {
+        t.covered = t.fdi.get() == 36;
+    }
+    let out = run(&a.input(), &p).unwrap();
     assert_eq!(out.mode, Mode::Scalloped);
     assert!(out.fallback);
     check_solid(&out);
-    let m = line::margin_points(&a.teeth, MarginMode::Scalloped, 2.0);
+    let m = line::margin_points(&a.teeth, MarginMode::Scalloped, p.extension_mm);
     assert_eq!(out.lines.len(), m.len());
 }
