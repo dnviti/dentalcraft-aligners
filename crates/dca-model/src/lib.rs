@@ -1,0 +1,25 @@
+//! Data model of the Aligners module.
+//!
+//! [`AlignersState`] is the module's part of a case: it is stored in the
+//! case state under the module id [`MODULE_ID`] and written to `.dcprj`
+//! files as JSON (schema version [`SCHEMA_VERSION`]). It holds the results
+//! of the pipeline stages (seeds, tooth labels, tooth frames, diagnosis,
+//! setup, stages) and the user's settings. Meshes are never embedded: they
+//! are referenced by [`dc_case::BlobRef`].
+//!
+//! Units are millimetres and degrees unless a field name says otherwise;
+//! poses are [`dc_case::Pose`] (millimetres, radians in the quaternion).
+
+mod migrate;
+mod settings;
+mod state;
+
+pub use migrate::{ModelError, migrate};
+pub use settings::{PerioStage, Settings, StagingPattern, StagingSettings, TrimMode, TrimParams};
+pub use state::{AlignersState, ArchSpace, Diagnosis, IprStep, Seed, Setup, Stage, ToothFrame};
+
+/// Id of the Aligners module (key of its data in the case state).
+pub const MODULE_ID: &str = "aligners";
+
+/// Newest schema version of [`AlignersState`] (written on save).
+pub const SCHEMA_VERSION: u32 = 1;

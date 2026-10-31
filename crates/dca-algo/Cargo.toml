@@ -1,0 +1,19 @@
+[package]
+name = "dca-algo"
+description = "Aligners pipeline algorithms (one module per stage; skeletons for now)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+dca-model.workspace = true
+dc-case.workspace = true
+dc-mesh.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true
