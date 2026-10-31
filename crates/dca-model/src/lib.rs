@@ -16,7 +16,10 @@ mod state;
 
 pub use migrate::{ModelError, migrate};
 pub use settings::{PerioStage, Settings, StagingPattern, StagingSettings, TrimMode, TrimParams};
-pub use state::{AlignersState, ArchSpace, Diagnosis, IprStep, Seed, Setup, Stage, ToothFrame};
+pub use state::{
+    AlignersState, ArchDetails, ArchSpace, Diagnosis, IprStep, Seed, Setup, Stage, ToothFrame,
+    ToothMeasures,
+};
 
 /// Id of the Aligners module (key of its data in the case state).
 pub const MODULE_ID: &str = "aligners";
