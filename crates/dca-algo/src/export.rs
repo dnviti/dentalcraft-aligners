@@ -217,6 +217,9 @@ pub enum ExportError {
     /// The full export failed for another reason (thread pool, JSON, date).
     #[error("{0}")]
     Package(String),
+    /// The export was stopped by the user.
+    #[error("the export was cancelled")]
+    Cancelled,
     /// A file could not be written.
     #[error("{path}: {message}")]
     Io {

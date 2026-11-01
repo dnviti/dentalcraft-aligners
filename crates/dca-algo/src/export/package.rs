@@ -26,6 +26,12 @@
 //! hashes do not depend on the number of threads (`threads` in the
 //! parameters builds a pool of that size) or of workers.
 //!
+//! The files are written into a hidden staging folder inside the target and
+//! moved to their place only when everything is made, the manifest last: a
+//! cancelled or failed export leaves the target as it was (a folder the
+//! export created is removed), and a folder with a `manifest.json` is a
+//! finished export.
+//!
 //! The meshes come from a [`MeshProvider`](super::provider::MeshProvider);
 //! what it could not do as asked (a stamp without room, a ramp left out)
 //! comes back as notes, listed in the report.
@@ -267,12 +273,40 @@ fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), ExportError> {
     write_atomic(&path, bytes)
 }
 
+/// Name of the staging folder inside the target.
+pub const STAGING_DIR: &str = ".dentalcraft-export";
+
 /// Runs the full export of `input` with the meshes of `provider`.
 pub fn run(
     input: &Input<'_>,
     case: &CaseInfo<'_>,
     provider: &dyn MeshProvider,
     params: &FullParams,
+) -> Result<FullReport, ExportError> {
+    let control = Control {
+        cancelled: &|| false,
+        progress: &|_| {},
+    };
+    run_cancellable(input, case, provider, params, &control)
+}
+
+/// What a caller can ask of a running export.
+pub struct Control<'a> {
+    /// Asked before and after every mesh: `true` stops the export with
+    /// [`ExportError::Cancelled`] (a mesh being built is finished first).
+    /// Nothing is left in the target then.
+    pub cancelled: &'a (dyn Fn() -> bool + Sync),
+    /// Told the fraction done (`0..=1`), as the meshes are made.
+    pub progress: &'a (dyn Fn(f32) + Sync),
+}
+
+/// [`run`] with a [`Control`].
+pub fn run_cancellable(
+    input: &Input<'_>,
+    case: &CaseInfo<'_>,
+    provider: &dyn MeshProvider,
+    params: &FullParams,
+    control: &Control<'_>,
 ) -> Result<FullReport, ExportError> {
     match params.threads {
         Some(n) if n > 0 => {
@@ -281,10 +315,49 @@ pub fn run(
                 .build()
                 .map_err(|e| ExportError::Package(e.to_string()))?;
             // not inside the pool: the workers of the meshes wait for it
-            run_inner(input, case, provider, params, Some(&pool))
+            run_staged(input, case, provider, params, Some(&pool), control)
         }
-        _ => run_inner(input, case, provider, params, None),
+        _ => run_staged(input, case, provider, params, None, control),
     }
+}
+
+/// Builds the export in the staging folder, then moves it into the target.
+fn run_staged(
+    input: &Input<'_>,
+    case: &CaseInfo<'_>,
+    provider: &dyn MeshProvider,
+    params: &FullParams,
+    pool: Option<&rayon::ThreadPool>,
+    control: &Control<'_>,
+) -> Result<FullReport, ExportError> {
+    let target = PathBuf::from(&params.dir);
+    let created = !target.exists();
+    let stage = target.join(STAGING_DIR);
+    let result = run_inner(input, case, provider, params, pool, control, &stage)
+        .and_then(|report| commit(&stage, &target, &report).map(|()| report));
+    let _ = std::fs::remove_dir_all(&stage);
+    if result.is_err() && created {
+        // only an empty folder goes
+        let _ = std::fs::remove_dir(&target);
+    }
+    result
+}
+
+/// Moves the files of the export from `stage` to `target`, the manifest last.
+fn commit(stage: &Path, target: &Path, report: &FullReport) -> Result<(), ExportError> {
+    let names = report
+        .files
+        .iter()
+        .map(|e| e.name.as_str())
+        .chain([MANIFEST_NAME]);
+    for name in names {
+        let to = target.join(name);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+        }
+        std::fs::rename(stage.join(name), &to).map_err(|e| io_err(&to, e))?;
+    }
+    Ok(())
 }
 
 /// `f` of every item, `workers` at a time on threads of their own (each
@@ -348,7 +421,13 @@ fn run_inner(
     provider: &dyn MeshProvider,
     params: &FullParams,
     pool: Option<&rayon::ThreadPool>,
+    control: &Control<'_>,
+    dir: &Path,
 ) -> Result<FullReport, ExportError> {
+    let Control {
+        cancelled,
+        progress,
+    } = *control;
     let t0 = Instant::now();
     check_input(input, &params.dir)?;
     let base = params.base();
@@ -362,8 +441,9 @@ fn run_inner(
     let lang = params.lang;
     let thermo = matches!(params.workflow, Workflow::Both | Workflow::Thermo);
     let direct = matches!(params.workflow, Workflow::Both | Workflow::Direct);
-    let dir = PathBuf::from(&params.dir);
-    std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+    // a staging folder a crashed run left is not part of the new export
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
 
     // ---- the meshes: one task per arch, stage and kind ----
     let mut tasks: Vec<(Arch, u32, Kind)> = Vec::new();
@@ -375,11 +455,19 @@ fn run_inner(
             tasks.extend((1..=n).map(|k| (arch, k, Kind::Aligner)));
         }
     }
+    let made_count = std::sync::atomic::AtomicUsize::new(0);
+    let total_tasks = tasks.len().max(1);
     let make = |&(arch, k, kind): &(Arch, u32, Kind)| -> Result<Option<Made>, ExportError> {
+        if cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let mesh = match kind {
             Kind::Model => provider.model(arch, k)?,
             Kind::Aligner => provider.aligner(arch, k)?,
         };
+        if cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let Some(mesh) = mesh else {
             return Ok(None);
         };
@@ -388,10 +476,13 @@ fn run_inner(
             Kind::Model => model_name(arch, k),
             Kind::Aligner => aligner_name(arch, k, false),
         };
-        write_in(&dir, &name, &bytes)?;
+        write_in(dir, &name, &bytes)?;
         let mut entry = Entry::of(&name, "stl", &bytes);
         entry.arch = Some(arch_name(arch).to_owned());
         entry.stage = Some(k);
+        if cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let check = params.print_check.then(|| {
             let options = CheckOptions {
                 self_intersections: params.self_intersections,
@@ -417,6 +508,9 @@ fn run_inner(
         });
         entry.printable = check.as_ref().map(|c| c.check.ok);
         let keep = (kind == Kind::Aligner && k == plan.active[&arch]).then_some(bytes);
+        // the meshes are nearly all the work: the rest is the last tenth
+        let n = made_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        progress(0.9 * n as f32 / total_tasks as f32);
         Ok(Some(Made { entry, check, keep }))
     };
     let threads = pool.map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
@@ -451,7 +545,7 @@ fn run_inner(
                 for k in n + 1..=total {
                     let name = aligner_name(arch, k, true);
                     let bytes = last.keep.as_deref().unwrap_or_default();
-                    write_in(&dir, &name, bytes)?;
+                    write_in(dir, &name, bytes)?;
                     let mut entry = Entry::of(&name, "stl", bytes);
                     entry.arch = Some(arch_name(arch).to_owned());
                     entry.stage = Some(k);
@@ -479,7 +573,7 @@ fn run_inner(
 
     // ---- tables, calendars, programmes ----
     put(
-        &dir,
+        dir,
         &mut entries,
         "stages.csv",
         "csv",
@@ -508,7 +602,7 @@ fn run_inner(
         .map(|(a, o)| (&plan.calendars[a], o))
         .collect();
     put(
-        &dir,
+        dir,
         &mut entries,
         "visits.ics",
         "ics",
@@ -526,7 +620,7 @@ fn run_inner(
             },
         );
         put(
-            &dir,
+            dir,
             &mut entries,
             &format!("{}_programma_paziente.html", prefix(arch)),
             "html",
@@ -534,7 +628,7 @@ fn run_inner(
         )?;
         let csv = print_manifest_csv(arch, cal, &entries, &checks);
         put(
-            &dir,
+            dir,
             &mut entries,
             &format!("{}_manifest_stampa.csv", prefix(arch)),
             "csv",
@@ -566,7 +660,7 @@ fn run_inner(
         });
         let bytes =
             serde_json::to_vec_pretty(&value).map_err(|e| ExportError::Package(e.to_string()))?;
-        put(&dir, &mut entries, "print_check.json", "json", bytes)?;
+        put(dir, &mut entries, "print_check.json", "json", bytes)?;
     }
 
     // ---- report ----
@@ -594,7 +688,7 @@ fn run_inner(
             workflow: params.workflow,
             notes: &notes,
         });
-        put(&dir, &mut entries, "report.html", "html", page.into_bytes())?;
+        put(dir, &mut entries, "report.html", "html", page.into_bytes())?;
     }
 
     // ---- manifest, last ----
@@ -640,7 +734,7 @@ fn run_inner(
         print_check: summary.clone().unwrap_or_default(),
     };
     let bytes = serde_json::to_vec_pretty(&man).map_err(|e| ExportError::Package(e.to_string()))?;
-    write_in(&dir, MANIFEST_NAME, &bytes)?;
+    write_in(dir, MANIFEST_NAME, &bytes)?;
 
     Ok(FullReport {
         dir: params.dir.clone(),
@@ -918,6 +1012,67 @@ mod tests {
             // the hollow cube is two pieces of surface: a cavity
             ..FullParams::default()
         }
+    }
+
+    #[test]
+    fn a_cancelled_export_leaves_nothing_and_a_finished_one_no_staging_folder() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let f = fixture();
+
+        // the target is new: after the cancel it is not there
+        let dir = temp("cancel-new");
+        let asked = AtomicUsize::new(0);
+        let r = run_cancellable(
+            &f.input(),
+            &f.case(),
+            &Cubes { broken: None },
+            &params(&dir),
+            // the third file in
+            &Control {
+                cancelled: &|| asked.fetch_add(1, Ordering::Relaxed) >= 5,
+                progress: &|_| {},
+            },
+        );
+        assert!(matches!(r, Err(ExportError::Cancelled)), "{r:?}");
+        assert!(
+            asked.load(Ordering::Relaxed) >= 5,
+            "the files were made first"
+        );
+        assert!(!dir.exists(), "the folder the export made is gone");
+
+        // the target is an old folder: its files stay, nothing of the new run
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mine.txt"), b"keep").unwrap();
+        let asked = AtomicUsize::new(0);
+        let r = run_cancellable(
+            &f.input(),
+            &f.case(),
+            &Cubes { broken: None },
+            &params(&dir),
+            &Control {
+                cancelled: &|| asked.fetch_add(1, Ordering::Relaxed) >= 5,
+                progress: &|_| {},
+            },
+        );
+        assert!(matches!(r, Err(ExportError::Cancelled)));
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["mine.txt"], "no staging folder, no half export");
+
+        // a finished export has its manifest and nothing else is left behind
+        let report = run(
+            &f.input(),
+            &f.case(),
+            &Cubes { broken: None },
+            &params(&dir),
+        )
+        .unwrap();
+        assert!(dir.join(MANIFEST_NAME).is_file());
+        assert!(!dir.join(STAGING_DIR).exists());
+        assert!(report.files.iter().all(|e| dir.join(&e.name).is_file()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
