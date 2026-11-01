@@ -3,10 +3,8 @@
 //!
 //! The scans are patient data: they are not in the repository, and neither
 //! their file names nor any coordinate may appear in committed code or in
-//! test output. The folder comes from `DC_REAL_SCANS`; without it the test
-//! looks for `datasets/development/arcate_singole_T10` in the superproject
-//! (gitignored). The tests are skipped, with a line on stderr, when the folder
-//! has no four STL files.
+//! test output. The folder comes from `DC_REAL_SCANS`. The tests are skipped,
+//! with a line on stderr, when it is unset or has no four STL files.
 //!
 //! The files are found by glob and sorted by name, and called `scan_a` to
 //! `scan_d` here. The sorted order is lower, upper, lower, upper. The
@@ -15,9 +13,10 @@
 //! name the arch) are used only in the role-from-name test, and assertion
 //! messages carry the letter only.
 //!
-//! The numbers are the ones of the Blender add-on (the oracle) on the same
-//! files; the detection ones are what `detect_arch` gives on the neutral
-//! copies.
+//! The counts are the ones of the Blender add-on (the oracle) on the same
+//! files, rounded so that the repository does not fingerprint a scan, and the
+//! tests accept 5 % around them; the detection numbers are what `detect_arch`
+//! gives on the neutral copies.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -33,8 +32,9 @@ const IMPORT_SCANS: &str = "aligners.case.import-scans";
 struct Real {
     letter: char,
     path: PathBuf,
-    /// Faces of the file as the plugin counts them.
+    /// Faces of the file as the plugin counts them, rounded.
     faces: usize,
+    /// Vertices, rounded.
     vertices: usize,
     arch: &'static str,
     /// Cue and confidence of the detection on a file with a neutral name.
@@ -42,19 +42,18 @@ struct Real {
     confidence: f64,
 }
 
-/// The dataset folder: `DC_REAL_SCANS`, else the gitignored default.
-fn dataset_dir() -> PathBuf {
-    match std::env::var_os("DC_REAL_SCANS") {
-        Some(dir) => PathBuf::from(dir),
-        None => Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../datasets/development/arcate_singole_T10"),
-    }
+/// True when `count` is within 5 % of the rounded figure `about`.
+fn near(count: usize, about: usize) -> bool {
+    count.abs_diff(about) * 20 <= about
 }
 
 /// The four scans, sorted by file name, or `None` (and a line on stderr)
-/// when the dataset is not there.
+/// when `DC_REAL_SCANS` is unset or the folder has no four STL files.
 fn scans() -> Option<[Real; 4]> {
-    let dir = dataset_dir();
+    let Some(dir) = std::env::var_os("DC_REAL_SCANS").map(PathBuf::from) else {
+        eprintln!("skipped: DC_REAL_SCANS is not set");
+        return None;
+    };
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -74,10 +73,10 @@ fn scans() -> Option<[Real; 4]> {
         return None;
     }
     let spec = [
-        ('a', 855_739, 429_605, "lower", "curve_of_wilson", 0.80),
-        ('b', 802_606, 402_802, "upper", "palate", 1.00),
-        ('c', 215_588, 109_716, "lower", "curve_of_wilson", 0.90),
-        ('d', 197_756, 100_094, "upper", "scanner_orientation", 0.80),
+        ('a', 860_000, 430_000, "lower", "curve_of_wilson", 0.80),
+        ('b', 800_000, 400_000, "upper", "palate", 1.00),
+        ('c', 220_000, 110_000, "lower", "curve_of_wilson", 0.90),
+        ('d', 200_000, 100_000, "upper", "scanner_orientation", 0.80),
     ];
     let mut it = files.into_iter();
     Some(
@@ -189,17 +188,15 @@ fn counts_match_the_plugin_and_the_unit_factor_is_one() {
         let s = imported(&out, &path);
         let gone = removed(&out);
         let l = r.letter;
-        assert_eq!(s["vertices"], r.vertices, "scan_{l}: vertices");
+        // the messages name the letter only, never the count
+        let vertices = s["vertices"].as_u64().unwrap() as usize;
+        assert!(near(vertices, r.vertices), "scan_{l}: vertices");
         // the plugin count is the file's: what stays plus what the cleanup removed
-        assert_eq!(
-            s["faces"].as_u64().unwrap() as usize + gone,
-            r.faces,
-            "scan_{l}: faces plus removed"
-        );
+        let faces = s["faces"].as_u64().unwrap() as usize;
+        assert!(near(faces + gone, r.faces), "scan_{l}: faces plus removed");
         assert_eq!(s["source_units"], "mm", "scan_{l}: unit factor 1 (mm)");
         // a clean scanner export loses no face; anything else is a finding
         assert_eq!(gone, 0, "scan_{l}: the cleanup removed {gone} faces");
-        assert_eq!(s["faces"], r.faces, "scan_{l}: faces");
     }
 }
 

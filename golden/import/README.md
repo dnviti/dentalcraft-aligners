@@ -74,7 +74,7 @@ there. Its extra differences are the role of the files without a name hint (`res
 ## Privacy
 
 Real scans are never committed, copied or named in a committed file. Group R in
-`results.md` keeps counts and verdicts only, with the bounding box redacted.
+`results.md` keeps rounded counts and verdicts only, with the bounding box redacted.
 Do not add real file names or mesh coordinates to any committed file.
 
 ## Known gaps

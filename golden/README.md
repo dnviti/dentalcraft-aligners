@@ -1,8 +1,9 @@
 # Golden tests: the Blender plugin as oracle
 
 The Rust port of the aligners pipeline is checked stage by stage against the
-old Blender add-on, `/home/daniele/Documents/repos/blender-ortho-aligner`
-(path `ortho_aligner/`, called P below). That repository is **read-only**:
+old Blender add-on, the `blender-ortho-aligner` repository, checked out next to
+the superproject or wherever `OA_PLUGIN` points (path `ortho_aligner/`, called P
+below). That repository is **read-only**:
 nothing here writes to it, copies its code or vendors it (the scripts run with
 `python3 -B` / `PYTHONDONTWRITEBYTECODE=1` and Blender with `--factory-startup`,
 so not even `__pycache__` appears there).
