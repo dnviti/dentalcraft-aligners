@@ -29,7 +29,7 @@ aligners-menu-case-import-scans = Import scans
 aligners-desc-case-import-scans = Load the upper and lower arch scans (STL, PLY, OBJ). Importing never starts any processing.
 
 aligners-menu-case-units-orientation = Units & orientation
-aligners-desc-case-units-orientation = Check the unit of the scans (mm, cm, inch) and the orientation of the model in the case.
+aligners-desc-case-units-orientation = Check the unit of the scans (mm, cm) and the orientation of the model in the case.
 
 aligners-menu-case-case-info = Case info
 aligners-desc-case-case-info = Pseudonymised patient code and notes of the case.
@@ -308,7 +308,7 @@ aligners-cmd-manifest-doc = Verifies an export folder against its manifest.json 
 
 ## ---- commands: auto ----
 aligners-cmd-auto = Whole pipeline
-aligners-cmd-auto-doc = Runs the whole automatic pipeline on the scans of the case, with the default parameters, in order: orientation, automatic seeds of the arches that have none, segmentation, closed crowns (with the tooth frames), gingiva, diagnosis, setup, staging and change calendar; with both arches the virtual bite and the contact map; with export_dir the export. The first step that fails stops the pipeline: the error names the step and the case is left as it was. Returns every step with its seconds and its output. Parameters: seeds (missing: only the arches without seeds, all: replace them, keep: never), third_molars, missing (FDI numbers of missing teeth), occlusion (default true), start_date (YYYY-MM-DD, default today), interval_days, export_dir, full_report (the full export package instead of the models, the table and the calendar).
+aligners-cmd-auto-doc = Runs the whole automatic pipeline on the scans of the case, with the default parameters, in order: the arch of the provisional scans, orientation, automatic seeds of the arches that have none, segmentation, closed crowns (with the tooth frames), gingiva, diagnosis, setup, staging and change calendar; with both arches the virtual bite and the contact map; with export_dir the export. The first step that fails stops the pipeline: the error names the step and the case is left as it was. Returns every step with its seconds and its output. Parameters: seeds (missing: only the arches without seeds, all: replace them, keep: never), third_molars, missing (FDI numbers of missing teeth), occlusion (default true), start_date (YYYY-MM-DD, default today), interval_days, export_dir, full_report (the full export package instead of the models, the table and the calendar).
 
 ## ---- commands: visits ----
 aligners-cmd-visits-doc = Analyses a control visit. The progress scan (scan: path of an STL, OBJ or PLY file) is placed on the situation the plan expects after the aligner stage the patient wears (default: the last aligner of the arch; 0 is the initial situation), every tooth of the plan is registered to the scan, and the position it really has is compared with the planned one. A tooth is on track when every component of the difference is within 0.5 mm and 2 degrees; the efficacy is the achieved over the planned movement. If every tooth is on track the plan goes on, otherwise a refinement is suggested and the teeth that are behind get a lower velocity (lag_speed) in the new aligners. The scan, placed on the plan and segmented with seeds on the achieved crowns (segment, on by default), and the figures of every tooth are stored as a visit of the case. The plan is not modified. Needs the teeth stage and, for a stage above 0, the staging. Parameters: scan (required), arch (needed when the case has both), date (YYYY-MM-DD, default today), stage, linear_mm, angular_deg, lag_speed, segment.
@@ -346,3 +346,43 @@ aligners-study-vestibule-clear = Vestibule clearance, European (mm)
 aligners-study-apply = Apply
 aligners-study-reset = Revert
 aligners-study-no-case = Open a case with the Aligners data to edit the settings.
+
+# Scan import and arch step (commands/import.rs).
+# Referenced by the messages below: reads their $role (upper, lower, bite).
+aligners-role = { $role ->
+    [upper] upper arch
+    [lower] lower arch
+   *[bite] bite
+}
+
+aligners-cmd-import-scans-doc = Imports one or more scans (STL, OBJ, PLY) into the case as one undoable change, like case.import, and recognises the arch from the geometry when a file has neither a role nor a name that tells it (scanner orientation, palate, curve of Wilson, tooth widths). An explicit role wins over the name, the name over the geometry; only a role or the name makes a bite. A scan with fewer than 1000 faces, or one that is not recognised, takes a free arch as provisional. Replacing an arch clears its results. Parameters: path, or files with an optional role each; role is auto, upper, lower or bite. The output has the fields of case.import plus detections: arch, source and confidence of each recognised file.
+aligners-cmd-detect-arch = Arch recognition
+aligners-cmd-detect-arch-doc = The arch step of the pipeline. It fails if an arch scan has fewer than 1000 faces. It recognises from the geometry the arch of the scans still provisional and puts them on it, swapping two provisional scans if needed; moving a scan clears its results. When two scans claim one arch the surer one takes it and the other stays provisional on the opposite arch, with a warning. Explicit, file name and detected roles are left alone and reported unchanged. No parameters. The output lists every scan with its outcome (unchanged, resolved, conflict, not_recognised), from, to, role_source and detection, plus moved, warnings, world_frame_reset and module_cleared.
+
+aligners-import-error-path-or-files = Give exactly one of path (one file) or files (a list of files).
+aligners-import-error-no-files = The list of files is empty: give at least one file.
+aligners-import-error-nothing = No scan was imported. { $reasons }
+
+aligners-arch-error-no-scan = The case has no upper or lower scan: import one first.
+aligners-arch-error-not-dental = The selected mesh does not look like a dental scan: { $name } has only { $faces } faces.
+aligners-arch-error-provisional = The role of { $name } is still provisional ({ aligners-role }). Run the arch step (aligners.case.detect-arch) or set the role (case.set-role).
+
+aligners-arch-warn-not-recognised = { $name }: the arch could not be recognised from the geometry. Set the role by hand.
+aligners-arch-warn-to-be-checked = { $name }: recognised as { aligners-role } only from the shape and the tooth widths. To be checked after the segmentation.
+aligners-arch-warn-bite-not-reset = The bite registration was not reset: it stays applied until the arches are registered again.
+
+# The ids of module_cleared (dca_model::CLEARED_IDS), underscores as hyphens.
+aligners-cleared-seeds = tooth seeds
+aligners-cleared-missing = teeth marked missing
+aligners-cleared-labels = segmentation
+aligners-cleared-tooth-frames = tooth frames
+aligners-cleared-tooth-geometry = tooth measures
+aligners-cleared-crowns = closed crowns
+aligners-cleared-gingiva = gingiva
+aligners-cleared-diagnosis = diagnosis
+aligners-cleared-bolton = Bolton ratios
+aligners-cleared-complexity = complexity score
+aligners-cleared-setup = setup
+aligners-cleared-stages = aligner stages
+aligners-cleared-ramps = bite ramps
+aligners-cleared-visits = control visits

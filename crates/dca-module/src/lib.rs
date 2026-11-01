@@ -18,7 +18,7 @@ mod tree_data;
 use dc_case::{CaseState, ModuleState};
 use dc_module_api::{
     CommandDesc, CommandSpec, MenuStatus, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError,
-    ModuleRegistry, NOT_AVAILABLE_KEY, Toast, ToastLevel,
+    ModuleRegistry, NOT_AVAILABLE_KEY, Toast, ToastLevel, is_import_scans_command,
 };
 use dc_scene::SceneItem;
 use dca_model::{AlignersState, StagingSettings};
@@ -115,6 +115,8 @@ impl Module for AlignersModule {
                 ctx.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 Ok(())
             }
+            // the import needs its files: the shell asks for them and runs it
+            MenuStatus::Ready if is_import_scans_command(node.id) => Ok(()),
             // a Ready leaf is a registered command: run it with its defaults
             MenuStatus::Ready => {
                 let spec = commands::find(node.id)

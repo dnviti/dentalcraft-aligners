@@ -4,6 +4,8 @@
 //! `aligners.auto` runs the automatic stages in pipeline order on the scans
 //! of the case, with their default parameters:
 //!
+//! 0. the arch (`aligners.case.detect-arch`): it may move scans and clear
+//!    their results, so the rest of the list is built from its result;
 //! 1. orientation (`aligners.preparation.orientation.automatic`);
 //! 2. numbering (`aligners.preparation.numbering.automatic`): the seeds of
 //!    the arches that have none (parameter `seeds`);
@@ -41,6 +43,8 @@ use dca_model::{AlignersState, MODULE_ID};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+
+use super::import::DETECT_ARCH;
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -221,6 +225,17 @@ fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
     steps
 }
 
+/// The steps after the arch step, for the state that step left.
+fn plan(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandError> {
+    let mut steps = vec![Step::new(
+        "aligners.preparation.orientation.automatic",
+        Value::Null,
+    )];
+    steps.extend(numbering(state, params)?);
+    steps.extend(later_steps(state, params));
+    Ok(steps)
+}
+
 /// Runs one step on `state`; the error names it.
 fn run_step(
     state: &CaseState,
@@ -267,18 +282,15 @@ fn run_auto(
         ));
     }
     let t0 = Instant::now();
-    let mut steps = vec![Step::new(
-        "aligners.preparation.orientation.automatic",
-        Value::Null,
-    )];
-    steps.extend(numbering(state, &params)?);
-    steps.extend(later_steps(state, &params));
+    let arch_step = Step::new(DETECT_ARCH, Value::Null);
+    let (mut current, record) = run_step(state, &arch_step, 0, ctx)?;
+    let steps = plan(&current, &params)?;
 
-    let n = steps.len();
-    let mut current = state.clone();
+    let n = steps.len() + 1;
     let mut records = Vec::with_capacity(n);
+    records.push(record);
     for (i, step) in steps.iter().enumerate() {
-        ctx.set_fraction(i as f32 / n as f32);
+        ctx.set_fraction((i + 1) as f32 / n as f32);
         let (next, record) = run_step(&current, step, i + 1, ctx)?;
         current = next;
         records.push(record);
@@ -334,6 +346,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CommandError::Invalid(m) if m.contains("parameters")));
+    }
+
+    #[test]
+    fn it_plans_after_the_arch_step() {
+        // the two demo arches on the wrong sides, as a guess
+        let mut s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({"arch": "lower"}),
+        )
+        .unwrap()
+        .0;
+        s = exec("aligners.demo", &s, json!({"arch": "upper"}))
+            .unwrap()
+            .0;
+        for scan in &mut s.case.scans {
+            scan.role = if scan.role == ScanRole::Upper {
+                ScanRole::Lower
+            } else {
+                ScanRole::Upper
+            };
+            scan.role_source = dc_case::RoleSource::Provisional;
+        }
+        s.case.scans.sort_by_key(|scan| scan.role);
+        // from this state: nothing to number, the seeds are there
+        let keep = Params {
+            seeds: Seeds::Keep,
+            ..Params::default()
+        };
+        assert!(numbering(&s, &keep).unwrap().is_empty());
+        // the arch step swaps the scans and clears the seeds: the plan sees it
+        let after = exec(DETECT_ARCH, &s, Value::Null).unwrap().0;
+        let ids =
+            |p: &Params| -> Vec<&str> { plan(&after, p).unwrap().iter().map(|s| s.id).collect() };
+        let numberings = ids(&Params::default())
+            .iter()
+            .filter(|id| **id == "aligners.preparation.numbering.automatic")
+            .count();
+        assert_eq!(numberings, 2);
+        assert_eq!(
+            ids(&Params::default())[0],
+            "aligners.preparation.orientation.automatic"
+        );
+        // and so does the command, which stops at the plan and not at the start
+        let err = exec("aligners.auto", &s, json!({"seeds": "keep"})).unwrap_err();
+        assert!(matches!(err, CommandError::Invalid(m) if m.contains("arch has no seeds")));
     }
 
     #[test]
