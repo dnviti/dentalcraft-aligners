@@ -133,7 +133,8 @@ pub(crate) static GROUPS: &[Node] = &[
                 "aligners-menu-planning-movements",
                 "aligners-desc-planning-movements",
                 "arrows-out-cardinal",
-            ),
+            )
+            .not_a_step(),
             Node::leaf(
                 "aligners.planning.aligners",
                 "aligners-menu-planning-aligners",
@@ -155,13 +156,15 @@ pub(crate) static GROUPS: &[Node] = &[
                 "aligners-desc-output-export-all",
                 "file-arrow-down",
             )
-            .input(LeafInput::Folder { param: "dir" }),
+            .input(LeafInput::Folder { param: "dir" })
+            .not_a_step(),
             Node::leaf(
                 "aligners.output.study-models",
                 "aligners-menu-output-study-models",
                 "aligners-desc-output-study-models",
                 "cube",
-            ),
+            )
+            .not_a_step(),
         ],
     ),
     Node::group(
@@ -176,13 +179,15 @@ pub(crate) static GROUPS: &[Node] = &[
                 "aligners-desc-followup-visits",
                 "calendar-check",
             )
-            .input(LeafInput::ScanFile { param: "scan" }),
+            .input(LeafInput::ScanFile { param: "scan" })
+            .not_a_step(),
             Node::leaf(
                 "aligners.followup.tracking",
                 "aligners-menu-followup-tracking",
                 "aligners-desc-followup-tracking",
                 "path",
-            ),
+            )
+            .not_a_step(),
         ],
     ),
 ];

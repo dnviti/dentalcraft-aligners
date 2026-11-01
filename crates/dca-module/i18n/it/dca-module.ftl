@@ -82,9 +82,6 @@ aligners-desc-followup-visits = Confronta una nuova scansione con il piano e ti 
 aligners-menu-followup-tracking = Ripianifica
 aligners-desc-followup-tracking = Prepara una nuova serie di allineatori dall'ultima visita di controllo, tenendo quelli già consegnati.
 
-aligners-notice-bite-scan = Uso la scansione del morso del caso.
-aligners-notice-bite-estimated = Il caso non ha una scansione del morso: il morso è una stima.
-
 ## Comandi: etichetta e documentazione di ogni comando registrato (CommandSpec), una
 ## sezione per fase; aggiungere le chiavi di una fase solo sotto la sua intestazione.
 ## Chiavi: aligners-cmd-<fase>-<nome> (etichetta) e aligners-cmd-<fase>-<nome>-doc (cosa fa

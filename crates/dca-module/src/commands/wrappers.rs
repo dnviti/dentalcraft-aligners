@@ -27,9 +27,9 @@ use super::auto::{Step, run_step};
 
 /// Id of the bite leaf.
 pub(crate) const BITE: &str = "aligners.occlusion.align";
-const REGISTER: &str = "aligners.occlusion.bite-registration.icp";
-const VIRTUAL_BITE: &str = "aligners.occlusion.virtual-bite";
-const CONTACT_MAP: &str = "aligners.occlusion.contact-map";
+pub(super) const REGISTER: &str = "aligners.occlusion.bite-registration.icp";
+pub(super) const VIRTUAL_BITE: &str = "aligners.occlusion.virtual-bite";
+pub(super) const CONTACT_MAP: &str = "aligners.occlusion.contact-map";
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -126,34 +126,34 @@ fn has_bite_scan(state: &CaseState) -> bool {
     state.case.scan(ScanRole::Bite).is_some()
 }
 
-fn run_bite(
-    state: &CaseState,
-    _params: BiteParams,
-    ctx: &JobCtx,
-) -> Result<CommandOutput, CommandError> {
+/// The steps that put the arches in occlusion, and the name of the method
+/// (`bite_scan` or `virtual_bite`): the registration on the bite scans when
+/// the case has one, otherwise the virtual bite; then the contact map. A
+/// refused registration is an error, the estimate never takes its place.
+/// `aligners.auto` takes the same steps.
+pub(super) fn bite_steps(state: &CaseState) -> (&'static str, [Step; 2]) {
     let (method, id) = if has_bite_scan(state) {
         ("bite_scan", REGISTER)
     } else {
         ("virtual_bite", VIRTUAL_BITE)
     };
-    let steps = [
-        Step::new(id, Value::Null),
-        Step::new(CONTACT_MAP, Value::Null),
-    ];
-    let (next, records) = run_steps(state, &steps, ctx)?;
-    Ok((next, json!({ "method": method, "steps": records })))
+    (
+        method,
+        [
+            Step::new(id, Value::Null),
+            Step::new(CONTACT_MAP, Value::Null),
+        ],
+    )
 }
 
-/// The notice a click on leaf `id` shows before it runs: for the bite, what
-/// the result rests on, a scan of the patient or an estimate.
-pub(crate) fn notice(id: &str, state: &CaseState) -> Option<&'static str> {
-    (id == BITE).then(|| {
-        if has_bite_scan(state) {
-            "aligners-notice-bite-scan"
-        } else {
-            "aligners-notice-bite-estimated"
-        }
-    })
+fn run_bite(
+    state: &CaseState,
+    _params: BiteParams,
+    ctx: &JobCtx,
+) -> Result<CommandOutput, CommandError> {
+    let (method, steps) = bite_steps(state);
+    let (next, records) = run_steps(state, &steps, ctx)?;
+    Ok((next, json!({ "method": method, "steps": records })))
 }
 
 /// Parameters of `aligners.planning.aligners`.
@@ -282,11 +282,6 @@ mod tests {
     #[test]
     fn the_bite_without_a_scan_is_the_virtual_bite_then_the_contact_map() {
         let s = two_demo_arches();
-        assert_eq!(
-            notice(BITE, &s),
-            Some("aligners-notice-bite-estimated"),
-            "no bite scan"
-        );
         let (next, out) = exec(BITE, &s, Value::Null).unwrap();
         assert_eq!(out["method"], "virtual_bite");
         assert_eq!(step_ids(&out), [VIRTUAL_BITE, CONTACT_MAP]);
@@ -301,12 +296,10 @@ mod tests {
         let mut bite = lower;
         bite.role = ScanRole::Bite;
         s.case.scans.push(bite);
-        assert_eq!(notice(BITE, &s), Some("aligners-notice-bite-scan"));
         // a bite scan that is a whole arch does not fit: the error is the
         // registration's, the virtual bite does not take over
         let m = exec(BITE, &s, Value::Null).unwrap_err().to_string();
         assert!(m.contains("Stopped at Bite from the bite scans"), "{m}");
-        assert_eq!(notice("aligners.auto", &s), None);
     }
 
     #[test]

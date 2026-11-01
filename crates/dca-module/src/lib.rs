@@ -118,9 +118,6 @@ impl Module for AlignersModule {
             MenuStatus::Ready => {
                 let spec = commands::find(node.id)
                     .ok_or_else(|| ModuleError::UnknownCommand(command_id.to_owned()))?;
-                if let Some(key) = commands::wrappers::notice(node.id, ctx.state()) {
-                    ctx.toast(Toast::new(ToastLevel::Info, key));
-                }
                 ctx.queue(Box::new(spec.command(serde_json::Value::Null)));
                 Ok(())
             }
