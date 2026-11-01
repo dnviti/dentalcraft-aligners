@@ -200,16 +200,25 @@ pub struct AlignersState {
     pub gingiva: BTreeMap<ScanRole, BlobRef>,
     /// Control visits, in order (`dca_algo::visits`).
     pub visits: Vec<Visit>,
-    /// A bite registration moved the arches and no arch was replaced since.
-    /// The move is baked into the meshes: nothing undoes it when an arch is
-    /// replaced, so the import warns about it, once.
+    /// A bite registration (the registration commands and the virtual bite)
+    /// moved the upper arch and no arch was replaced since. The move is baked
+    /// into the mesh: nothing undoes it when an arch is replaced, so
+    /// [`AlignersState::clear_arch`] reports it once, as `bite_registered`.
     pub bite_registered: bool,
 }
 
 /// Ids [`AlignersState::clear_arch`] (and so the `scan_replaced` hook) can
 /// return, in the order it returns them. Each names a group of data and is
 /// returned only when the group held something for the replaced arch.
-pub const CLEARED_IDS: [&str; 14] = [
+///
+/// `bite_registered` is not data that goes: it says that the bite
+/// registration (or the virtual bite) was applied and is now stale, because
+/// the other arch stays where that registration moved it. The flag is reset,
+/// the move is NOT undone, and the registration has to be done again with the
+/// new arch. The workspace shows the ids by the key
+/// `aligners-cleared-<id>` (`_` as `-`).
+pub const CLEARED_IDS: [&str; 15] = [
+    "bite_registered",
     "seeds",
     "missing",
     "labels",
@@ -248,7 +257,10 @@ impl AlignersState {
     /// arch `role`, and returns the ids of the groups that held data, in the
     /// order of [`CLEARED_IDS`]. A bite role clears nothing.
     ///
-    /// Cleared for the arch: the seeds and the teeth marked missing; the
+    /// The `bite_registered` flag is reset and reported when it was set (the
+    /// registration, or the virtual bite, is stale; the move it applied to
+    /// the other arch is kept). Cleared for the arch: the seeds and the teeth
+    /// marked missing; the
     /// labels (and the teeth flagged for a rebuild), tooth frames, measures,
     /// closed crowns and gingiva; its space analysis and details; the setup
     /// (poses, locks, IPR, arch line); its poses and IPR in every stage; its
@@ -276,13 +288,14 @@ impl AlignersState {
             ScanRole::Lower => ScanRole::Upper,
             ScanRole::Bite => return Vec::new(),
         };
-        self.bite_registered = false;
         let mut cleared = Vec::new();
         let mut note = |id: &'static str, held: bool| {
             if held {
                 cleared.push(id);
             }
         };
+
+        note("bite_registered", std::mem::take(&mut self.bite_registered));
 
         let n = self.seeds.len();
         self.seeds.retain(|s| !in_arch(s.fdi, role));

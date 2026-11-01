@@ -45,6 +45,7 @@ fn run_frame(
         .case
         .scan(arch.role())
         .ok_or_else(|| CommandError::Invalid("the reference scan is missing".to_owned()))?;
+    super::import::require_settled(scan)?;
     let mesh = state.blobs.require(&scan.mesh)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let seeds = match state.module(MODULE_ID) {
