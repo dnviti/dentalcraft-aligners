@@ -30,7 +30,7 @@ each case SAME or DIFFERENT.
 
 - Blender (tested with 5.2.2 LTS), run headless.
 - Python 3 with numpy.
-- A built `dentalcraft-cli`: `cd dentalcraft-app && cargo build -p dc-cli`.
+- A built `dentalcraft-cli`: `cd dentalcraft-app && cargo build --release -p dc-cli` (set `DENTALCRAFT_CLI` to the release binary; the default is the debug one).
 - The add-on repository checked out next to this superproject (or set `BLENDER_ORTHO_ALIGNER`).
 
 ## How to run
@@ -45,7 +45,7 @@ python3 gen.py                             # synthetic fixtures + cases.json
 python3 add_real.py /path/to/dataset       # optional: four real .stl scans, read in place
 SCRIPT=plugin_run.py ./runblender.sh op    # plugin, real import operator
 SCRIPT=names_run.py ./runblender.sh        # plugin role-from-name table
-python3 dc_run.py                          # DentalCraft CLI, one process per file
+python3 dc_run.py                          # DentalCraft CLI, one process per file (case.import)
 python3 dc_names.py                        # DentalCraft role-from-name table
 python3 analyze.py                         # -> <work>/out/rows.json and expected.json
 python3 report.py                          # -> <work>/out/results_body.md
@@ -61,8 +61,15 @@ Environment overrides, read by `paths.py` and `runblender.sh`:
 | --- | --- |
 | `IMPORT_DIFF_WORK` | `<system temp dir>/dentalcraft-import-diff` |
 | `DENTALCRAFT_CLI` | `../../../dentalcraft-app/target/debug/dentalcraft-cli` |
+| `DC_IMPORT_CMD` | `case.import`; `aligners.case.import-scans` runs the import with geometric arch detection (the command `--in` uses) |
+| `IMPORT_DIFF_WORK_SCANS` | `report.py` only: work folder of a second `dc_run.py` pass with `DC_IMPORT_CMD=aligners.case.import-scans`, used for the DentalCraft columns of R2 |
 | `BLENDER_ORTHO_ALIGNER` | `../../../../blender-ortho-aligner` |
 | `BLENDER` | `blender` on `PATH` |
+
+A second pass with the Aligners import: copy `cases.json`, `out/pl_op_all.json`, `out/pl_names.json`
+and `out/dc_names.json` to another work folder, link its `fixtures` to the first, and run
+`DC_IMPORT_CMD=aligners.case.import-scans IMPORT_DIFF_WORK=<second> python3 dc_run.py` then `analyze.py`
+there. Its extra differences are the role of the files without a name hint (`results.md`, appendix 12).
 
 ## Privacy
 

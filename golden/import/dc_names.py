@@ -15,7 +15,9 @@ for c in cases:
     for rel in c['files']:
         p = os.path.join(FX, rel)
         a = go([], p); b = go([(filler, 'upper'), (fillerL, 'lower')], p)
-        hint = None if (a == 'upper' and b == 'bite') else b
+        # a name with a hint gets its role in an empty case and in a full one; without a hint the
+        # file takes a free arch as provisional (empty case) and finds no place (full case)
+        hint = a if a == b else None
         out[rel] = {'role_empty': a, 'role_full': b, 'hint': hint}
 json.dump(out, open(os.path.join(OUT, 'dc_names.json'), 'w'), indent=1)
 print('done', len(out))

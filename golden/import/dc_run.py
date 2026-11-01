@@ -2,6 +2,9 @@
 import json, os, subprocess, sys, re
 from concurrent.futures import ThreadPoolExecutor
 from paths import CASES, CLI, FX, OUT
+# command that imports each file: the core `case.import` (default) or the Aligners
+# `aligners.case.import-scans`, which also recognises the arch from the geometry
+IMPORT_CMD = os.environ.get('DC_IMPORT_CMD') or 'case.import'
 os.makedirs(os.path.join(OUT, 'dc'), exist_ok=True)
 cases = json.load(open(CASES))
 only = sys.argv[1:]
@@ -14,7 +17,7 @@ def run_case(c):
         path = os.path.join(FX, rel)
         cmds = ['--cmd', 'project.new={"patient_code":"X"}']
         for p in ok_files + [path]:
-            cmds += ['--cmd', 'case.import=' + json.dumps({'path': p})]
+            cmds += ['--cmd', IMPORT_CMD + '=' + json.dumps({'path': p})]
         out = os.path.join(OUT, 'dc', safe(c['id']) + '.dcprj')
         if os.path.exists(out): os.remove(out)
         r = subprocess.run([CLI, 'run'] + cmds + ['--save', out, '--print'], capture_output=True, text=True, timeout=600)
