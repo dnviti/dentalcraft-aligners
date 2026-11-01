@@ -10,7 +10,6 @@ use dc_i18n::{Lang, parity};
 use dc_jobs::JobSystem;
 use dc_module_api::{
     LeafInput, MenuStatus, Module, ModuleCtx, ModuleError, ModuleRegistry, NOT_AVAILABLE_KEY,
-    Toast, ToastLevel,
 };
 use dca_module::{AlignersModule, MODULE_ID, NAME_KEY, loader, tree};
 
@@ -283,17 +282,39 @@ fn the_shell_is_told_what_to_ask_before_a_leaf_runs() {
     }
 }
 
+/// What the menu shows as the progress of the case: the eight steps of the
+/// workflow, in menu order. Everything else is a shortcut, a correction, an
+/// export or a follow-up.
+const STEPS: [&str; 8] = [
+    "aligners.case.import-scans",
+    "aligners.preparation.numbering.automatic",
+    "aligners.preparation.segmentation.automatic",
+    "aligners.teeth.build",
+    "aligners.diagnosis.space-analysis",
+    "aligners.occlusion.align",
+    "aligners.planning.setup.automatic",
+    "aligners.planning.aligners",
+];
+
 #[test]
-fn run_everything_and_the_corrections_are_not_steps() {
+fn eight_steps_count_and_nothing_else() {
     let menu = AlignersModule::new().menu();
-    let steps = menu.step_ids();
-    assert_eq!(steps.len(), TREE.len() - 6);
-    assert!(!steps.contains(&"aligners.auto"));
-    for (group, id, ..) in TREE {
-        let counted = *group != "aligners.teeth.manual" && *id != "aligners.auto";
-        assert_eq!(steps.contains(id), counted, "{id}");
+    assert_eq!(menu.step_ids(), STEPS);
+    for not_a_step in [
+        "aligners.auto",
+        "aligners.planning.movements",
+        "aligners.output.export-all",
+        "aligners.output.study-models",
+        "aligners.followup.tracking",
+        "aligners.followup.visits",
+    ] {
+        assert!(!menu.step_ids().contains(&not_a_step), "{not_a_step}");
     }
-    assert!(steps.contains(&"aligners.case.import-scans"));
+    for (group, id, ..) in TREE {
+        if *group == "aligners.teeth.manual" {
+            assert!(!STEPS.contains(id), "{id}");
+        }
+    }
 }
 
 #[test]
@@ -480,7 +501,8 @@ fn a_leaf_with_an_input_waits_for_the_shell_and_the_others_run_with_their_defaul
 }
 
 #[test]
-fn a_click_on_the_bite_says_what_it_rests_on() {
+fn a_click_on_the_bite_queues_the_command_and_says_nothing_before_it_runs() {
+    // what the bite rests on is told by its output, after it ran
     let jobs = JobSystem::new(1).unwrap();
     let state = Arc::new(CaseState::default());
     let mut m = AlignersModule::new();
@@ -488,13 +510,7 @@ fn a_click_on_the_bite_says_what_it_rests_on() {
     m.invoke("aligners.occlusion.align", &mut ctx).unwrap();
     let (cmds, toasts) = ctx.finish();
     assert_eq!(cmds.len(), 1);
-    assert_eq!(
-        toasts,
-        vec![Toast::new(
-            ToastLevel::Info,
-            "aligners-notice-bite-estimated"
-        )]
-    );
+    assert!(toasts.is_empty());
 }
 
 #[test]

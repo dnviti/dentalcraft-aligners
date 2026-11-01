@@ -82,9 +82,6 @@ aligners-desc-followup-visits = Compares a new scan with the plan and tells you 
 aligners-menu-followup-tracking = Re-plan
 aligners-desc-followup-tracking = Makes a new series of aligners from the last control visit, keeping the ones already delivered.
 
-aligners-notice-bite-scan = Using the bite scan of the case.
-aligners-notice-bite-estimated = The case has no bite scan: the bite is an estimate.
-
 ## Commands: label and documentation of every registered command (CommandSpec), one
 ## section per stage; append the keys of a stage under its own header only.
 ## Keys: aligners-cmd-<stage>-<name> (label) and aligners-cmd-<stage>-<name>-doc (what it does

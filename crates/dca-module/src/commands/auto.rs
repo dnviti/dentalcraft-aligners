@@ -17,9 +17,12 @@
 //! 7. setup (`aligners.planning.setup.automatic`);
 //! 8. staging (`aligners.planning.staging.automatic`);
 //! 9. schedule (`aligners.planning.schedule`);
-//! 10. with both arches, the virtual bite and the contact map
-//!     (`aligners.occlusion.virtual-bite`, `aligners.occlusion.contact-map`;
-//!     parameter `occlusion`);
+//! 10. with both arches, the bite as the menu leaf "Bite" does it: the
+//!     registration on the bite scan when the case has one
+//!     (`aligners.occlusion.bite-registration.icp`, a refusal stops the run,
+//!     the estimate does not take its place), otherwise the virtual bite
+//!     (`aligners.occlusion.virtual-bite`); then the contact map
+//!     (`aligners.occlusion.contact-map`); parameter `occlusion`;
 //! 11. with `export_dir`, the export (`aligners.output.export-stl`, or the
 //!     full package `aligners.output.report` with `full_report`). With
 //!     `shells` the full package has the print files of the shell stage
@@ -47,6 +50,7 @@ use serde_json::{Map, Value, json};
 
 use super::import::DETECT_ARCH;
 use super::messages;
+use super::wrappers::bite_steps;
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -207,8 +211,7 @@ fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
     let both =
         state.case.scan(ScanRole::Upper).is_some() && state.case.scan(ScanRole::Lower).is_some();
     if params.occlusion && both {
-        steps.push(Step::new("aligners.occlusion.virtual-bite", Value::Null));
-        steps.push(Step::new("aligners.occlusion.contact-map", Value::Null));
+        steps.extend(bite_steps(state).1);
     }
     if let Some(dir) = params.export_dir.as_ref().filter(|d| !d.trim().is_empty()) {
         let mut p = calendar(params);
@@ -249,6 +252,8 @@ pub(super) fn run_step(
     let spec = crate::commands::find(step.id)
         .ok_or_else(|| CommandError::Failed(format!("the step {} is not registered", step.id)))?;
     ctx.check_cancelled()?;
+    // the status bar names the step that runs, keeping the fraction done
+    ctx.set_progress(ctx.progress().fraction, Some(spec.label_key));
     let t0 = Instant::now();
     let (next, out) = spec.execute(state, &step.params, ctx).map_err(|e| {
         let at = |m: String| {
@@ -481,5 +486,46 @@ mod tests {
         let steps = later_steps(&s, &p);
         assert_eq!(steps[6].params["start_date"], "2026-01-05");
         assert_eq!(steps[9].params["dir"], "x");
+    }
+
+    #[test]
+    fn the_bite_is_the_one_of_the_menu_leaf_and_a_refusal_is_not_replaced() {
+        use super::super::occlusion::tests::two_demo_arches;
+        let mut s = two_demo_arches();
+        let ids = |s: &CaseState| -> Vec<&'static str> {
+            later_steps(s, &Params::default())
+                .iter()
+                .map(|s| s.id)
+                .skip_while(|id| !id.starts_with("aligners.occlusion."))
+                .collect()
+        };
+        assert_eq!(
+            ids(&s),
+            [
+                "aligners.occlusion.virtual-bite",
+                "aligners.occlusion.contact-map"
+            ],
+            "no bite scan: the estimate"
+        );
+        let mut bite = s.case.scan(ScanRole::Lower).unwrap().clone();
+        bite.role = ScanRole::Bite;
+        s.case.scans.push(bite);
+        assert_eq!(
+            ids(&s),
+            [
+                "aligners.occlusion.bite-registration.icp",
+                "aligners.occlusion.contact-map"
+            ],
+            "a bite scan: the registration"
+        );
+        let no_bite = Params {
+            occlusion: false,
+            ..Params::default()
+        };
+        assert!(
+            later_steps(&s, &no_bite)
+                .iter()
+                .all(|s| !s.id.starts_with("aligners.occlusion."))
+        );
     }
 }
