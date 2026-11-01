@@ -814,7 +814,19 @@ mod tests {
     #[test]
     #[ignore = "reconstruction, gingiva and the shells of every stage: run with --release --ignored"]
     fn the_shells_of_a_golden_arch_pass_the_print_check() {
-        let mut s = super::super::reconstruct::golden_state("demo_lower_mild");
+        golden_arch_export("demo_lower_mild", "lower");
+    }
+
+    /// The upper arch has the narrowest faces: with the embrasure fills the
+    /// models lost their stamp when the label was wider than the plugin's.
+    #[test]
+    #[ignore = "reconstruction, gingiva and the shells of every stage: run with --release --ignored"]
+    fn the_models_of_an_upper_golden_arch_keep_their_stamps() {
+        golden_arch_export("demo_upper_mild", "upper");
+    }
+
+    fn golden_arch_export(case: &str, arch: &str) {
+        let mut s = super::super::reconstruct::golden_state(case);
         for id in [
             "aligners.teeth.frames",
             "aligners.preparation.reconstruction.automatic",
@@ -826,7 +838,7 @@ mod tests {
             s = exec(id, &s, Value::Null).unwrap().0;
             eprintln!("{id}: {:.1} s", t.elapsed().as_secs_f64());
         }
-        let dir = temp("shells");
+        let dir = temp(&format!("shells-{case}"));
         let quality = std::env::var("DCA_QUALITY").unwrap_or_else(|_| "draft".to_owned());
         let t = std::time::Instant::now();
         let (_, out) = exec(
@@ -845,7 +857,14 @@ mod tests {
         eprintln!("export ({quality}): {:.1} s", t.elapsed().as_secs_f64());
         eprintln!("notes: {:#}", out["notes"]);
         assert_eq!(out["meshes"], "shells");
-        let n = out["aligners"]["lower"].as_u64().unwrap();
+        let dropped: Vec<&Value> = out["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n.as_str().unwrap().contains("no stamp"))
+            .collect();
+        assert!(dropped.is_empty(), "{dropped:#?}");
+        let n = out["aligners"][arch].as_u64().unwrap();
         let files = out["files"].as_array().unwrap();
         let stl = |p: &str| {
             files

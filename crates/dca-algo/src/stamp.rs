@@ -33,7 +33,8 @@
 //! on the surface and cuts them with a Blender boolean (Manifold, then
 //! Exact). Here the characters are the outlines of a bundled font
 //! (B612 Mono Bold subset, SIL OFL 1.1, `assets/`), filled with
-//! `lyon_tessellation`; the stamp is the signed distance field of the ink
+//! `lyon_tessellation` and set by their ink to the width of the plugin's
+//! label (`text`); the stamp is the signed distance field of the ink
 //! (2D, to the outline) extruded along the surface normals. There is no mesh
 //! boolean. Two ways to apply that field:
 //!
