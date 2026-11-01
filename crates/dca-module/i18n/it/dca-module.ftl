@@ -29,7 +29,7 @@ aligners-menu-case-import-scans = Importa scansioni
 aligners-desc-case-import-scans = Carica le scansioni delle arcate superiore e inferiore (STL, PLY, OBJ). L'importazione non avvia nessuna elaborazione.
 
 aligners-menu-case-units-orientation = Unità e orientamento
-aligners-desc-case-units-orientation = Verifica l'unità di misura delle scansioni (mm, cm, pollici) e l'orientamento del modello nel caso.
+aligners-desc-case-units-orientation = Verifica l'unità di misura delle scansioni (mm, cm) e l'orientamento del modello nel caso.
 
 aligners-menu-case-case-info = Dati del caso
 aligners-desc-case-case-info = Codice paziente pseudonimizzato e note del caso.
@@ -308,7 +308,7 @@ aligners-cmd-manifest-doc = Verifica una cartella di esportazione con il suo man
 
 ## ---- commands: auto ----
 aligners-cmd-auto = Pipeline completa
-aligners-cmd-auto-doc = Esegue tutta la pipeline automatica sulle scansioni del caso, con i parametri predefiniti, in ordine: orientamento, semi automatici delle arcate che non ne hanno, segmentazione, corone chiuse (con i sistemi di riferimento dei denti), gengiva, diagnosi, setup, staging e calendario dei cambi; con entrambe le arcate il morso virtuale e la mappa dei contatti; con export_dir l'esportazione. Il primo passo che non riesce ferma la pipeline: l'errore indica il passo e il caso resta com'era. Restituisce ogni passo con i suoi secondi e il suo risultato. Parametri: seeds (missing: solo le arcate senza semi, all: li sostituisce, keep: mai), third_molars, missing (numeri FDI dei denti mancanti), occlusion (predefinito true), start_date (AAAA-MM-GG, predefinita oggi), interval_days, export_dir, full_report (il pacchetto di esportazione completo invece dei modelli, della tabella e del calendario).
+aligners-cmd-auto-doc = Esegue tutta la pipeline automatica sulle scansioni del caso, con i parametri predefiniti, in ordine: l'arcata delle scansioni provvisorie, orientamento, semi automatici delle arcate che non ne hanno, segmentazione, corone chiuse (con i sistemi di riferimento dei denti), gengiva, diagnosi, setup, staging e calendario dei cambi; con entrambe le arcate il morso virtuale e la mappa dei contatti; con export_dir l'esportazione. Il primo passo che non riesce ferma la pipeline: l'errore indica il passo e il caso resta com'era. Restituisce ogni passo con i suoi secondi e il suo risultato. Parametri: seeds (missing: solo le arcate senza semi, all: li sostituisce, keep: mai), third_molars, missing (numeri FDI dei denti mancanti), occlusion (predefinito true), start_date (AAAA-MM-GG, predefinita oggi), interval_days, export_dir, full_report (il pacchetto di esportazione completo invece dei modelli, della tabella e del calendario).
 
 ## ---- commands: visits ----
 aligners-cmd-visits-doc = Analizza una visita di controllo. La scansione di controllo (scan: percorso di un file STL, OBJ o PLY) viene sovrapposta alla situazione prevista dal piano dopo l'allineatore indossato (stage; predefinito l'ultimo allineatore dell'arcata, 0 è la situazione iniziale), ogni dente del piano viene registrato sulla scansione e la posizione reale è confrontata con quella pianificata. Un dente è in pari quando ogni componente della differenza è entro 0,5 mm e 2 gradi; l'efficacia è il movimento ottenuto rispetto a quello pianificato. Se tutti i denti sono in pari il piano prosegue, altrimenti si suggerisce un affinamento e i denti in ritardo hanno una velocità ridotta (lag_speed) nei nuovi allineatori. La scansione, sovrapposta al piano e segmentata con semi sulle corone ottenute (segment, attivo per impostazione predefinita), e le misure di ogni dente sono salvate come visita del caso. Il piano non viene modificato. Richiede la fase dei denti e, per uno stage maggiore di 0, lo staging. Parametri: scan (obbligatorio), arch (necessario se il caso ha entrambe le arcate), date (AAAA-MM-GG, predefinita oggi), stage, linear_mm, angular_deg, lag_speed, segment.
@@ -346,3 +346,43 @@ aligners-study-vestibule-clear = Margine del vestibolo, europeo (mm)
 aligners-study-apply = Applica
 aligners-study-reset = Annulla modifiche
 aligners-study-no-case = Apri un caso con i dati degli Allineatori per modificare le impostazioni.
+
+# Importazione delle scansioni e passo dell'arcata (commands/import.rs).
+# Usato dai messaggi qui sotto: legge il loro $role (upper, lower, bite).
+aligners-role = { $role ->
+    [upper] arcata superiore
+    [lower] arcata inferiore
+   *[bite] morso
+}
+
+aligners-cmd-import-scans-doc = Importa una o più scansioni (STL, OBJ, PLY) nel caso come un'unica modifica annullabile, come case.import, e riconosce l'arcata dalla geometria quando un file non ha né un ruolo né un nome che la indichi (orientamento dello scanner, palato, curva di Wilson, larghezze dei denti). Un ruolo esplicito prevale sul nome, il nome sulla geometria; solo un ruolo o il nome rendono una scansione un morso. Una scansione con meno di 1000 facce, o non riconosciuta, prende un'arcata libera come provvisoria. Sostituire un'arcata cancella i suoi risultati. Parametri: path, oppure files con un ruolo facoltativo per ciascuno; role è auto, upper, lower o bite. L'output ha i campi di case.import più detections: arcata, fonte e confidenza di ogni file riconosciuto.
+aligners-cmd-detect-arch = Riconoscimento dell'arcata
+aligners-cmd-detect-arch-doc = Il passo dell'arcata della pipeline. Fallisce se una scansione d'arcata ha meno di 1000 facce. Riconosce dalla geometria l'arcata delle scansioni ancora provvisorie e le mette al loro posto, scambiando due scansioni provvisorie se serve; spostare una scansione cancella i suoi risultati. Quando due scansioni indicano la stessa arcata, la più sicura la prende e l'altra resta provvisoria sull'arcata opposta, con un avviso. I ruoli espliciti, da nome del file e rilevati non vengono toccati e sono riportati come invariati. Nessun parametro. L'output elenca ogni scansione con il suo esito (unchanged, resolved, conflict, not_recognised), from, to, role_source e detection, più moved, warnings, world_frame_reset e module_cleared.
+
+aligners-import-error-path-or-files = Indica esattamente uno tra path (un file) e files (un elenco di file).
+aligners-import-error-no-files = L'elenco dei file è vuoto: indica almeno un file.
+aligners-import-error-nothing = Nessuna scansione importata. { $reasons }
+
+aligners-arch-error-no-scan = Il caso non ha una scansione superiore o inferiore: importane prima una.
+aligners-arch-error-not-dental = La mesh selezionata non sembra una scansione dentale: { $name } ha solo { $faces } facce.
+aligners-arch-error-provisional = Il ruolo di { $name } è ancora provvisorio ({ aligners-role }). Esegui il passo dell'arcata (aligners.case.detect-arch) o imposta il ruolo (case.set-role).
+
+aligners-arch-warn-not-recognised = { $name }: non è stato possibile riconoscere l'arcata dalla geometria. Imposta il ruolo a mano.
+aligners-arch-warn-to-be-checked = { $name }: riconosciuta come { aligners-role } solo dalla forma e dalle larghezze dei denti. Da verificare dopo la segmentazione.
+aligners-arch-warn-bite-not-reset = La registrazione del morso non è stata azzerata: resta applicata finché le arcate non vengono registrate di nuovo.
+
+# Gli id di module_cleared (dca_model::CLEARED_IDS), con i trattini al posto dei trattini bassi.
+aligners-cleared-seeds = semi dei denti
+aligners-cleared-missing = denti segnati come mancanti
+aligners-cleared-labels = segmentazione
+aligners-cleared-tooth-frames = sistemi di riferimento dei denti
+aligners-cleared-tooth-geometry = misure dei denti
+aligners-cleared-crowns = corone chiuse
+aligners-cleared-gingiva = gengiva
+aligners-cleared-diagnosis = diagnosi
+aligners-cleared-bolton = rapporti di Bolton
+aligners-cleared-complexity = punteggio di complessità
+aligners-cleared-setup = setup
+aligners-cleared-stages = stadi degli allineatori
+aligners-cleared-ramps = rampe di morso
+aligners-cleared-visits = visite di controllo

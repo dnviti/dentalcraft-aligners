@@ -31,7 +31,9 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
+use dc_case::import::{self, ImportError};
 use dc_case::{CaseState, Fdi, ModuleState, Pose, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
@@ -298,6 +300,19 @@ fn tooth_json(t: &ToothTracking) -> Value {
     })
 }
 
+/// Reads the scan of a visit through the import: the same cleanup, units and
+/// axes as the scans of the case.
+fn read_visit_scan(path: &str, ctx: &JobCtx) -> Result<Arc<TriMesh>, CommandError> {
+    let scan = import::prepare(Path::new(path), ctx).map_err(|e| match e {
+        ImportError::Cancelled => CommandError::Cancelled,
+        e => CommandError::Invalid(match e.detail() {
+            Some(detail) => format!("{e} ({detail})"),
+            None => e.to_string(),
+        }),
+    })?;
+    Ok(scan.mesh)
+}
+
 fn run_visit(
     state: &CaseState,
     params: Params,
@@ -348,11 +363,7 @@ fn run_visit(
         )));
     }
 
-    // the scan of the visit
-    let mut scan = dc_mesh::io::read(Path::new(&params.scan))
-        .map_err(|e| CommandError::Invalid(format!("the scan cannot be read: {e}")))?;
-    dc_mesh::io::normalize_units(&mut scan)
-        .map_err(|e| CommandError::Invalid(format!("the scan is not usable: {e}")))?;
+    let scan = read_visit_scan(&params.scan, ctx)?;
     let scan_v: Vec<DVec3> = scan.positions.iter().map(|p| p.as_dvec3()).collect();
 
     // the model the plan expects at that aligner: teeth and gingiva at stage `worn`
@@ -1051,6 +1062,66 @@ mod tests {
         present.sort_unstable();
         present.dedup();
         assert_eq!(present.len(), data.tooth_frames.len());
+    }
+
+    #[test]
+    fn an_obj_visit_scan_gets_the_axes_and_the_cleanup_of_the_import() {
+        // an arch-sized mesh in Z up, the frame of the case
+        let z_up = TriMesh::new(
+            (0..40)
+                .map(|i| {
+                    let a = i as f32 * 0.08;
+                    glam::Vec3::new(30.0 * a.cos(), 30.0 * a.sin(), (i % 3) as f32)
+                })
+                .collect(),
+            (0..38).map(|i| [i, i + 1, i + 2]).collect(),
+        );
+        // the same scan as an OBJ, which is Y up, with a repeated face
+        let mut y_up = z_up.clone();
+        for p in &mut y_up.positions {
+            *p = glam::Vec3::new(p.x, p.z, -p.y);
+        }
+        y_up.tris.push(y_up.tris[0]);
+        let path = std::env::temp_dir().join(format!("dca-visit-{}-axes.obj", std::process::id()));
+        dc_mesh::io::write(&path, &y_up, dc_mesh::MeshFormat::Obj).unwrap();
+        let read = read_visit_scan(&path.display().to_string(), &JobCtx::detached());
+        let _ = std::fs::remove_file(&path);
+        let read = read.unwrap();
+        assert_eq!(read.face_count(), z_up.face_count());
+        for (got, want) in read.positions.iter().zip(&z_up.positions) {
+            assert!((*got - *want).length() < 1e-3, "{got} {want}");
+        }
+    }
+
+    #[test]
+    fn an_obj_visit_gives_the_result_of_the_same_stl() {
+        let s = staged("lower");
+        let data = aligners_data(&s).unwrap();
+        let worn = data.stages.len() as u32;
+        let stl = write_visit_scan(&s, worn, &BTreeMap::new(), "axes-stl");
+        let mut mesh = dc_mesh::io::read(&stl).unwrap();
+        for p in &mut mesh.positions {
+            *p = glam::Vec3::new(p.x, p.z, -p.y);
+        }
+        let obj = stl.with_file_name(format!("dca-visit-{}-result.obj", std::process::id()));
+        dc_mesh::io::write(&obj, &mesh, dc_mesh::MeshFormat::Obj).unwrap();
+
+        let visit = |path: &Path| {
+            let params = json!({
+                "scan": path.display().to_string(),
+                "stage": worn,
+                "segment": false,
+            });
+            exec(ID, &s, params)
+        };
+        let (from_stl, from_obj) = (visit(&stl), visit(&obj));
+        let _ = std::fs::remove_file(&stl);
+        let _ = std::fs::remove_file(&obj);
+        let (_, out) = from_obj.unwrap();
+        let (_, want) = from_stl.unwrap();
+        let rms = |v: &Value| v["registration_rms_mm"].as_f64().unwrap();
+        assert!((rms(&out) - rms(&want)).abs() < 1e-3, "{out}\n{want}");
+        assert_eq!(out["decision"], want["decision"], "{out}");
     }
 
     #[test]

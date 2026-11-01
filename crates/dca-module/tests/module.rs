@@ -267,6 +267,21 @@ fn invoking_a_stub_selects_it_and_shows_the_toast() {
     );
 }
 
+#[test]
+fn invoking_the_import_leaf_runs_nothing_the_shell_asks_for_the_files() {
+    let jobs = JobSystem::new(1).unwrap();
+    let state = Arc::new(CaseState::default());
+    let mut ctx = ModuleCtx::new(&state, &jobs);
+    let mut m = AlignersModule::new();
+    let id = "aligners.case.import-scans";
+    assert_eq!(tree::find(id).unwrap().status(), MenuStatus::Ready);
+    m.invoke(id, &mut ctx).unwrap();
+    assert_eq!(m.selected(), Some(id));
+    let (cmds, toasts) = ctx.finish();
+    assert!(cmds.is_empty());
+    assert!(toasts.is_empty());
+}
+
 /// A leaf whose command is not registered yet, if any.
 fn first_stub_leaf() -> Option<&'static str> {
     tree::leaves()

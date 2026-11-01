@@ -9,6 +9,9 @@
 //!   on each arch scan (`case_auto.auto_seeds` of the plugin) and replaces
 //!   the seeds of those arches in the Aligners data. The proposal must be
 //!   checked by the user.
+//!
+//! Both refuse a scan still marked provisional: its arch is a guess, and what
+//! they compute depends on it (`aligners.case.detect-arch` settles it).
 
 use dc_case::{CaseState, ModuleState, ScanRole};
 use dc_command::{CommandError, JobCtx};
@@ -20,6 +23,8 @@ use dca_model::{AlignersState, MODULE_ID};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use super::import::require_settled;
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -115,6 +120,7 @@ fn run_orientation(
         .case
         .scan(arch.role())
         .ok_or_else(|| CommandError::Invalid("the reference scan is missing".to_owned()))?;
+    require_settled(scan)?;
     let mesh = state.blobs.require(&scan.mesh)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let seeds = aligners_data(state)?.seeds;
@@ -168,6 +174,9 @@ fn run_numbering(
             "the case has no upper or lower scan".to_owned(),
         ));
     }
+    for scan in arches.iter().filter_map(|a| state.case.scan(a.role())) {
+        require_settled(scan)?;
+    }
     let mut data = aligners_data(state)?;
     let mut report = Vec::new();
     for arch in arches {
@@ -205,6 +214,7 @@ fn run_numbering(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dc_case::RoleSource;
     use serde_json::{Value, json};
 
     fn exec(id: &str, state: &CaseState, params: Value) -> Result<CommandOutput, CommandError> {
@@ -250,6 +260,52 @@ mod tests {
             orientation(&empty, Value::Null),
             Err(CommandError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn the_scans_of_the_demo_are_not_provisional() {
+        let state = demo_state("lower", 7);
+        assert_eq!(state.case.scans[0].role_source, RoleSource::Explicit);
+        assert!(numbering(&state, Value::Null).is_ok());
+        assert!(orientation(&state, Value::Null).is_ok());
+    }
+
+    #[test]
+    fn a_provisional_scan_is_refused_with_the_way_out() {
+        let mut state = demo_state("lower", 7);
+        state.case.scans[0].role_source = RoleSource::Provisional;
+        for run in [numbering, orientation] {
+            let Err(CommandError::Invalid(m)) = run(&state, Value::Null) else {
+                panic!("not refused");
+            };
+            assert!(m.contains("demo-lower"), "{m}");
+            assert!(m.contains("aligners.case.detect-arch"), "{m}");
+            assert!(m.contains("case.set-role"), "{m}");
+        }
+        // the arch step settles it, and both run
+        let next = exec("aligners.case.detect-arch", &state, Value::Null)
+            .unwrap()
+            .0;
+        assert_eq!(next.case.scans[0].role_source, RoleSource::Detected);
+        assert!(numbering(&next, Value::Null).is_ok());
+        assert!(orientation(&next, Value::Null).is_ok());
+        // a detected scan is fine, and so is one that is not asked for
+        let both = exec(
+            "aligners.demo",
+            &next,
+            json!({ "arch": "upper", "seed": 3 }),
+        )
+        .unwrap()
+        .0;
+        let mut one = both.clone();
+        let upper = one
+            .case
+            .scans
+            .iter_mut()
+            .find(|s| s.role == ScanRole::Upper);
+        upper.unwrap().role_source = RoleSource::Provisional;
+        assert!(numbering(&one, json!({ "arch": "lower" })).is_ok());
+        assert!(numbering(&one, Value::Null).is_err());
     }
 
     #[test]

@@ -200,6 +200,10 @@ pub struct AlignersState {
     pub gingiva: BTreeMap<ScanRole, BlobRef>,
     /// Control visits, in order (`dca_algo::visits`).
     pub visits: Vec<Visit>,
+    /// A bite registration moved the arches and no arch was replaced since.
+    /// The move is baked into the meshes: nothing undoes it when an arch is
+    /// replaced, so the import warns about it, once.
+    pub bite_registered: bool,
 }
 
 /// Ids [`AlignersState::clear_arch`] (and so the `scan_replaced` hook) can
@@ -272,6 +276,7 @@ impl AlignersState {
             ScanRole::Lower => ScanRole::Upper,
             ScanRole::Bite => return Vec::new(),
         };
+        self.bite_registered = false;
         let mut cleared = Vec::new();
         let mut note = |id: &'static str, held: bool| {
             if held {

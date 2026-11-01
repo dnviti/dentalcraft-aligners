@@ -75,7 +75,7 @@ fn run_registration(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
-    let data = aligners_data(state)?;
+    let mut data = aligners_data(state)?;
     let bites: Vec<BiteScan> = state
         .case
         .scans
@@ -102,6 +102,7 @@ fn run_registration(
     let reg = bite::register(&lower, &upper, &bites, &init)
         .map_err(|e| CommandError::Failed(e.to_string()))?;
     ctx.check_cancelled()?;
+    data.bite_registered = true;
     let next = move_arch(state, data, Arch::Upper, &reg.upper_delta, &reg.bite_deltas);
     let mut out = serde_json::to_value(&reg).map_err(|e| CommandError::Failed(e.to_string()))?;
     out["source"] = json!("bite");
@@ -263,6 +264,8 @@ mod tests {
         let data = next.module_data::<AlignersState>(MODULE_ID).unwrap();
         let labels = next.mesh(&data.labels[&ScanRole::Upper]).unwrap();
         assert_eq!(labels.positions, upper_positions(&next));
+        // and the case remembers it: replacing an arch will say so
+        assert!(data.bite_registered);
         // the bite scans now lie on the arches
         let bites: Vec<_> = next
             .case

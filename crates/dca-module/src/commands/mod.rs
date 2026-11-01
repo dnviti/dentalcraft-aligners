@@ -85,6 +85,7 @@ mod diagnosis;
 mod export;
 mod frame;
 mod gingiva;
+pub mod import;
 mod manual;
 mod occlusion;
 mod ramps;
@@ -103,6 +104,7 @@ mod visits;
 /// Every registered command, stage by stage in pipeline order.
 pub fn all() -> Vec<CommandSpec> {
     [
+        import::specs,
         frame::specs,
         demo::specs,
         autoseed::specs,
