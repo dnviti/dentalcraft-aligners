@@ -18,7 +18,8 @@ import sys
 import numpy as np
 
 REPO = sys.argv[1] if len(sys.argv) > 1 else os.environ.get(
-    "ORTHO_ALIGNER_REPO", "/home/daniele/Documents/repos/blender-ortho-aligner")
+    "ORTHO_ALIGNER_REPO",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 6, "blender-ortho-aligner"))
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(REPO, "tests", "unit"))
 

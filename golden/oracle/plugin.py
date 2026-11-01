@@ -21,7 +21,11 @@ import os
 import sys
 import types
 
-PLUGIN_ROOT = os.environ.get("OA_PLUGIN", "/home/daniele/Documents/repos/blender-ortho-aligner")
+# The plugin checkout: OA_PLUGIN, else a folder next to the superproject.
+PLUGIN_ROOT = os.environ.get(
+    "OA_PLUGIN",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4, "blender-ortho-aligner"),
+)
 PKG = "oa_golden"
 
 sys.dont_write_bytecode = True
