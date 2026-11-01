@@ -874,6 +874,96 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The golden scans of both arches as the app imports them (STL files in
+    /// a new case), through the automatic pipeline up to the bite.
+    fn golden_pipeline() -> CaseState {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/fixtures");
+        let dir = temp("pipeline");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = CaseState::default();
+        for (fixture, name, role, id) in [
+            ("demo_lower_mild", "lower.stl", "lower", 1),
+            ("demo_upper_mild", "upper.stl", "upper", 2),
+        ] {
+            let bytes = std::fs::read(root.join(fixture).join("scan.dcm")).unwrap();
+            let mesh = dc_mesh::dcm::decode(&bytes).unwrap();
+            let path = dir.join(name);
+            dc_mesh::io::write(&path, &mesh, dc_mesh::io::MeshFormat::Stl).unwrap();
+            let mut mesh = dc_mesh::io::read(&path).unwrap();
+            dc_mesh::io::normalize_units(&mut mesh).unwrap();
+            let blob = s.blobs.insert(mesh);
+            let scan: dc_case::Scan = serde_json::from_value(json!({
+                "id": format!("de300000-0000-4000-8000-{id:012x}"),
+                "role": role,
+                "source_name": name,
+                "source_units": "mm",
+                "import_xform": { "t": [0.0, 0.0, 0.0], "q": [0.0, 0.0, 0.0, 1.0] },
+                "mesh": blob,
+            }))
+            .unwrap();
+            s.case.scans.push(scan);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        let t = std::time::Instant::now();
+        let s = exec("aligners.auto", &s, json!({ "start_date": "2026-11-02" }))
+            .unwrap()
+            .0;
+        eprintln!("pipeline: {:.1} s", t.elapsed().as_secs_f64());
+        s
+    }
+
+    /// One aligner of each arch through the provider of the full export, at
+    /// the Standard quality (`DCA_QUALITY` for another one): the upper one
+    /// (`DCA_STAGE`, 1 by default) and the lower 01. The hard cut of the
+    /// occlusal shaping left 3 handles in the first and a crossing in the
+    /// second, on the outer surface of the wall.
+    #[test]
+    #[ignore = "the golden pipeline and two aligners at 0.1 mm: run with --release --ignored"]
+    fn standard_aligners_of_the_golden_arches_print() {
+        let s = golden_pipeline();
+        let data = aligners_data(&s).unwrap();
+        let arches = prepare(&s, &data).unwrap();
+        let input = input(&arches, &data);
+        let quality = std::env::var("DCA_QUALITY").unwrap_or_else(|_| "standard".to_owned());
+        let quality: Quality = serde_json::from_value(json!(quality)).unwrap();
+        let choice = MeshChoice {
+            shells: Some(true),
+            quality,
+            voxel_mm: None,
+            stamp: true,
+            stamp_code: String::new(),
+            date: schedule::Date::parse("2026-11-01").unwrap(),
+        };
+        let (provider, _, _) = mesh_provider(&s, &data, &input, &choice).unwrap();
+        let upper: u32 = std::env::var("DCA_STAGE").map_or(1, |k| k.parse().unwrap());
+        let options = CheckOptions {
+            min_thickness_mm: Some(0.3),
+            ..CheckOptions::default()
+        };
+        let mut failed = Vec::new();
+        for (arch, k) in [(Arch::Upper, upper), (Arch::Lower, 1)] {
+            let t = std::time::Instant::now();
+            let mesh = provider.aligner(arch, k).unwrap().unwrap();
+            let c = printcheck::check(&mesh, &options);
+            eprintln!(
+                "{arch:?} {k}: {:.1} s, {} faces, genus {:?}, {:?} crossings, wall {:?}, {:?}",
+                t.elapsed().as_secs_f64(),
+                c.triangles,
+                c.genus,
+                c.self_intersections,
+                c.min_thickness_mm,
+                c.problem_texts(schedule::Lang::En)
+            );
+            if !c.ok {
+                failed.push((arch, k));
+            }
+        }
+        for n in provider.notes() {
+            eprintln!("note: {n:?}");
+        }
+        assert!(failed.is_empty(), "not printable: {failed:?}");
+    }
+
     #[test]
     fn the_report_needs_aligners_and_a_directory() {
         let err = exec(
