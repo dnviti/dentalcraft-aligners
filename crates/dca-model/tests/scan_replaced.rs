@@ -509,7 +509,8 @@ fn replacing_a_scan_through_the_import_clears_results_and_undo_restores_them() {
             placement(tri(2.0), Lower, None),
         ],
         &[],
-    );
+    )
+    .unwrap();
     // the upper and lower scans are in; everything the module holds is in too
     let held = st.referenced_blobs();
     assert!(held.iter().all(|b| state.blobs.contains(b)));
@@ -520,7 +521,8 @@ fn replacing_a_scan_through_the_import_clears_results_and_undo_restores_them() {
         &mut state,
         &[placement(tri(3.0), Upper, Some(&old_upper))],
         &[],
-    );
+    )
+    .unwrap();
     assert_eq!(report.replaced_roles, [Upper]);
     let mut want: Vec<&str> = CLEARED_IDS.to_vec();
     want.sort_unstable();
@@ -556,8 +558,8 @@ fn replacing_a_scan_through_the_import_clears_results_and_undo_restores_them() {
 fn replacing_a_bite_scan_through_the_import_keeps_the_results() {
     let (mut state, st) = case_with(&[Upper, Lower]);
     state.set_module(MODULE_ID, ModuleState::new(st.clone()));
-    commit(&mut state, &[placement(tri(1.0), Bite, None)], &[]);
-    let report = commit(&mut state, &[placement(tri(2.0), Bite, None)], &[]);
+    commit(&mut state, &[placement(tri(1.0), Bite, None)], &[]).unwrap();
+    let report = commit(&mut state, &[placement(tri(2.0), Bite, None)], &[]).unwrap();
     assert!(report.module_cleared.is_empty());
     assert_eq!(state.module_data::<AlignersState>(MODULE_ID), Some(&st));
 }
