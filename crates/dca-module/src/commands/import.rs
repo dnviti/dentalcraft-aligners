@@ -573,6 +573,7 @@ fn run_detect_arch(
         Vec::new()
     } else {
         roles_changed(&mut next, &touched, &before)
+            .map_err(|e| CommandError::Invalid(e.to_string()))?
     };
     if bite_registered(state) && !touched.is_empty() {
         warnings.push(bite_not_reset());
