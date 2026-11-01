@@ -75,7 +75,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
-use dc_geom::sdf::{SdfGrid, SdfParams};
+use dc_geom::sdf::{CsgOp, SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
 use glam::{DVec3, Vec3};
 use schemars::JsonSchema;
@@ -104,6 +104,8 @@ pub const SHELL_FILL_WIDE_MM: f64 = 0.75;
 pub const SHELL_FILL_MARGIN_MM: f64 = 0.4;
 /// The rounded rim never erodes the wall below this many voxels.
 pub const RIM_MIN_WALL_VOXELS: f64 = 1.5;
+/// [`cut_away`] blends its crease over this many voxels.
+pub const CUT_BLEND_VOXELS: f32 = 2.0;
 /// STRAIGHT, SCALLOPED: grid of the trim surface (mm, `trim_cutter`).
 pub const MARGIN_CELL_MM: f64 = 0.4;
 /// STRAIGHT, SCALLOPED: control points farther than this (plan) from a node
@@ -245,7 +247,7 @@ pub struct Input<'a> {
     /// Material taken away after the rim is rounded (the occlusal shaping of
     /// the bite, [`crate::aligner_bite::occlusal::shape_cutter`]): the
     /// opening of the rim, sized for the full wall, would cut through a
-    /// thinner occlusal wall. `None`: nothing.
+    /// thinner occlusal wall. Taken away by [`cut_away`]. `None`: nothing.
     pub cut: Option<&'a SdfGrid>,
 }
 
@@ -318,6 +320,24 @@ pub fn shell_fills(wall: f64, r: f64) -> Vec<f64> {
     vec![SHELL_FILL_MM, SHELL_FILL_WIDE_MM]
 }
 
+/// `g` without the solid `c`, the crease blended over [`CUT_BLEND_VOXELS`].
+///
+/// On the steep sides of a crown the occlusal cut fades out at a grazing
+/// angle (the ellipsoids of the allowed top are as wide as the wall) and ends
+/// on the steps of its grid of cells, so what it leaves beyond them is a skin
+/// thinner than a voxel. A plain difference samples that skin as lone voxels
+/// and strands one voxel wide on the outer surface: loose specks, handles of
+/// the surface (about a millimetre around, the wall whole under them) and
+/// sheets a ten-thousandth of a millimetre apart, which rounding makes cross.
+/// The plugin lowers the vertices of a mesh, which cannot change its topology
+/// (`case_occlusal.shape_shell`). The blend moves the level by at most a
+/// quarter of its width (half a voxel) and only on the crease: the skin goes
+/// and the wall keeps its thickness.
+fn cut_away(g: &mut SdfGrid, c: &SdfGrid) -> Result<(), TrimError> {
+    let k = CUT_BLEND_VOXELS * g.voxel_size;
+    g.csg(c, CsgOp::SmoothDifference(k)).map_err(geom)
+}
+
 /// The rounded shell `rounded` with its holes and necks closed again
 /// (`_sdf_group`, `shell['fill']`): a closing of it by `rho` intersected
 /// with the sharp cut grown by [`SHELL_FILL_GROW_MM`] inside the wall of the
@@ -337,7 +357,7 @@ fn filled(
     grown.intersect(wall).map_err(geom)?;
     grown.intersect(&g).map_err(geom)?;
     if let Some(c) = cut {
-        grown.subtract(c).map_err(geom)?;
+        cut_away(&mut grown, c)?;
     }
     grown.redistance().map_err(geom)?;
     let mesh = grown.to_mesh().map_err(geom)?;
@@ -660,9 +680,9 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         f.redistance().map_err(geom)?;
     }
     if let Some(c) = input.cut {
-        f.subtract(c).map_err(geom)?;
+        cut_away(&mut f, c)?;
         if let Some(s) = &mut sharp {
-            s.subtract(c).map_err(geom)?;
+            cut_away(s, c)?;
         }
     }
     let mesh = f.to_mesh().map_err(geom)?;

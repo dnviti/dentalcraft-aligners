@@ -15,11 +15,12 @@
 //!   reaching `clearance + wall`, [`shell::closed_grid_for`]), the shell
 //!   field between its levels at `clearance` and `clearance + wall`, the
 //!   ramps united with it on the field and the cavity of their tooth cut
-//!   again ([`dca_algo::ramps::apply_to_grid`]), the occlusal thickness and
-//!   the grinding of the bite with the aligners worn cut from the field
-//!   ([`occlusal::shape_field`], when the case asks for it and both arches
-//!   are there), the trim (cutter, reach of the crowns, rounded rim:
-//!   [`dca_algo::trim::run`]), the reduction within the mesh tolerance
+//!   again ([`dca_algo::ramps::apply_to_grid`]), the trim (cutter, reach of
+//!   the crowns, rounded rim: [`dca_algo::trim::run`]), and in it, after the
+//!   rim is rounded, the occlusal thickness and the grinding of the bite with
+//!   the aligners worn cut from the field, its crease blended
+//!   ([`occlusal::shape_cutter`], when the case asks for it and both arches
+//!   are there), the reduction within the mesh tolerance
 //!   ([`shell::reduce_to`]), then the stamp engraved inside the wall.
 //!
 //! The reduction and the stamp are checked as the print check would, in

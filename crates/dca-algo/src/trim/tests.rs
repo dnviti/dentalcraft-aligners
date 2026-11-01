@@ -13,6 +13,8 @@ use super::line::{self, MarginMode};
 use super::survey::{self, circular_smooth, loop_nearest, round_tabs, slope_floor};
 use super::*;
 use super::{model, warp};
+use crate::aligner_bite::occlusal::{Limit, cut_solid};
+use crate::aligner_bite::{Grid, Raster};
 use crate::anatomy::Arch;
 use crate::demo;
 
@@ -415,4 +417,115 @@ fn fills_only_for_a_thin_wall() {
     assert!(shell_fills(0.5, 0.0).is_empty());
     assert_eq!(rim_round(0.6, None), 0.18);
     assert_eq!(rim_round(1.5, None), 0.3);
+}
+
+/// The wall of a ball between the radii `radius` and `radius + wall` over the
+/// plane `z = -1`, and the solid above an ellipsoid as wide as its outer side
+/// and `lower` less high, on the grid of the occlusal shaping tilted by `tilt`
+/// (rad) and with some nodes without a top (`gaps`, the share of them): the cut
+/// fades out at a grazing angle towards the equator and stops on the steps of
+/// its cells, as the occlusal shaping does on the sides of a crown.
+fn grazing_cut(
+    voxel: f32,
+    radius: f32,
+    wall: f32,
+    lower: f64,
+    tilt: f32,
+    gaps: f64,
+) -> [SdfGrid; 2] {
+    let outer = radius + wall;
+    let (nu, nv) = (240usize, 120usize);
+    let mut positions = vec![Vec3::new(0.0, 0.0, radius), Vec3::new(0.0, 0.0, -radius)];
+    for j in 1..nv {
+        let phi = std::f32::consts::PI * j as f32 / nv as f32;
+        for i in 0..nu {
+            let th = std::f32::consts::TAU * i as f32 / nu as f32;
+            positions
+                .push(radius * Vec3::new(phi.sin() * th.cos(), phi.sin() * th.sin(), phi.cos()));
+        }
+    }
+    let at = |i: usize, j: usize| (2 + (j - 1) * nu + i % nu) as u32;
+    let mut tris = Vec::new();
+    for i in 0..nu {
+        tris.push([0, at(i, 1), at(i + 1, 1)]);
+        tris.push([1, at(i + 1, nv - 1), at(i, nv - 1)]);
+        for j in 1..nv - 1 {
+            tris.push([at(i, j), at(i, j + 1), at(i + 1, j + 1)]);
+            tris.push([at(i, j), at(i + 1, j + 1), at(i + 1, j)]);
+        }
+    }
+    let params = SdfParams {
+        voxel_size: voxel,
+        band: wall + 4.0 * voxel,
+    };
+    let ball = SdfGrid::from_mesh(&TriMesh::new(positions, tris), &params).unwrap();
+    let mut shell = ball.shell(0.0, wall).unwrap();
+    let side = f64::from(outer) + 2.0;
+    let plan = PlanGrid {
+        lo: DVec2::splat(-side),
+        hi: DVec2::splat(side),
+        nx: 2,
+        ny: 2,
+    };
+    let above = grid::slab_solid(&plan, &[-1.0; 4], side);
+    shell
+        .intersect(&SdfGrid::from_mesh(&above, &params).unwrap())
+        .unwrap();
+    shell.redistance().unwrap();
+    let (a, c) = (f64::from(outer), f64::from(outer) - lower);
+    let cell = crate::aligner_bite::occlusal::CELL;
+    let g = Grid::new([-a - 1.0, -a - 1.0], [a + 1.0, a + 1.0], cell);
+    let mut top = Raster::filled(g.n, f64::INFINITY);
+    for i in 0..g.n[0] {
+        for j in 0..g.n[1] {
+            let (x, y) = (g.lo[0] + i as f64 * cell, g.lo[1] + j as f64 * cell);
+            let r2 = (x * x + y * y) / (a * a);
+            if r2 <= 1.0 && ((i * 7 + j * 13) as f64 * 1.37).sin().abs() >= gaps {
+                top.data[i * g.n[1] + j] = (1.0 - r2).sqrt() * c;
+            }
+        }
+    }
+    let limit = Limit {
+        top,
+        grid: g,
+        min_thickness: 0.5,
+    };
+    let mut solid = cut_solid(&limit, 5.0).unwrap();
+    let turn = glam::Quat::from_rotation_y(tilt) * glam::Quat::from_rotation_x(0.6 * tilt);
+    for p in &mut solid.positions {
+        *p = turn * *p;
+    }
+    let cutter = SdfGrid::from_mesh(&solid, &params).unwrap();
+    [shell, cutter]
+}
+
+/// Pieces and handles of the zero level of `g`.
+fn pieces_and_genus(g: &SdfGrid) -> (usize, i64) {
+    let m = g.to_mesh().unwrap();
+    let n = m.connected_components().len() as i64;
+    let chi =
+        m.vertex_count() as i64 - m.edge_adjacency().edge_count() as i64 + m.face_count() as i64;
+    (n as usize, n - chi / 2)
+}
+
+#[test]
+fn a_grazing_cut_leaves_no_specks_and_no_handles() {
+    let [shell, cutter] = grazing_cut(0.1, 5.0, 1.0, 0.25, 0.07, 0.07);
+    assert_eq!(pieces_and_genus(&shell), (1, 0));
+    // the plain difference leaves the skin as specks and a tunnel in it
+    let mut plain = shell.clone();
+    plain.subtract(&cutter).unwrap();
+    let (pieces, handles) = pieces_and_genus(&plain);
+    assert!(
+        pieces > 1 && handles > 0,
+        "{pieces} pieces, {handles} handles"
+    );
+    let mut cut = shell.clone();
+    cut_away(&mut cut, &cutter).unwrap();
+    assert_eq!(pieces_and_genus(&cut), (1, 0));
+    // and takes the skin and half a voxel, nothing else
+    let (a, _) = largest_piece(plain.to_mesh().unwrap());
+    let (b, _) = largest_piece(cut.to_mesh().unwrap());
+    let d = crate::shell::deviation(&a, &b).unwrap();
+    assert!(d <= 0.15, "{d}");
 }
