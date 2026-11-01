@@ -234,7 +234,7 @@ fn run_virtual_bite(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
-    let data = aligners_data(state)?;
+    let mut data = aligners_data(state)?;
     let lower = arch_model(state, &data, Arch::Lower)?;
     let upper = arch_model(state, &data, Arch::Upper)?;
     ctx.check_cancelled()?;
@@ -242,6 +242,9 @@ fn run_virtual_bite(
     let vb = occlusion::align(&lower, &upper, &params)
         .map_err(|e| CommandError::Failed(e.to_string()))?;
     ctx.check_cancelled()?;
+    // like the registration: the move is baked into the upper mesh, so replacing
+    // an arch later has to say that the registration is stale
+    data.bite_registered = true;
     let next = move_arch(state, data, Arch::Upper, &vb.delta, &[]);
     let mut out = serde_json::to_value(&vb).map_err(|e| CommandError::Failed(e.to_string()))?;
     out["source"] = json!("virtual");
@@ -339,6 +342,12 @@ pub(crate) mod tests {
         let (next, out) = exec("aligners.occlusion.virtual-bite", &state, Value::Null);
         assert_eq!(out["source"], "virtual");
         assert_eq!(out["was_in_occlusion"], false);
+        // the move is baked into the upper mesh: replacing an arch has to report
+        // the stale registration, as for the registration commands
+        let before = state.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert!(!before.bite_registered);
+        let after = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert!(after.bite_registered);
         assert!(out["contacts"].as_u64().unwrap() > 50, "{out}");
         // the lower scan is untouched, the upper scan, labels and seeds moved together
         let data0 = state.module_data::<AlignersState>(MODULE_ID).unwrap();

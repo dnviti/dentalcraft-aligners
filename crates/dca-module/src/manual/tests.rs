@@ -589,6 +589,31 @@ fn marking_missing_drops_the_movements_of_the_tooth() {
 // ---- seeds ----------------------------------------------------------------------------------------------------
 
 #[test]
+fn seeds_are_refused_on_a_scan_whose_arch_is_a_guess() {
+    let mut state = demo();
+    state.case.scans[0].role_source = dc_case::RoleSource::Provisional;
+    for op in [
+        json!({ "op": "delete", "fdi": 36 }),
+        json!({ "op": "add", "fdi": 36, "position": [0.0, 0.0, 0.0] }),
+        json!({ "op": "move", "fdi": 36, "position": [0.0, 0.0, 0.0] }),
+    ] {
+        assert!(
+            invalid(exec(SEEDS, &state, op)).contains("Import scans panel"),
+            "a provisional scan took a seed"
+        );
+    }
+    // the other sources of a role let it pass, the guess made by the geometry too
+    for source in [
+        dc_case::RoleSource::Explicit,
+        dc_case::RoleSource::Detected,
+        dc_case::RoleSource::DetectedUnsure,
+    ] {
+        state.case.scans[0].role_source = source;
+        ok(SEEDS, &state, json!({ "op": "delete", "fdi": 36 }));
+    }
+}
+
+#[test]
 fn seeds_are_added_moved_and_deleted() {
     let state = demo();
     let n = al(&state).seeds.len();

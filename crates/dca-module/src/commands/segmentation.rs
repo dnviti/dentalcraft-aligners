@@ -19,6 +19,8 @@ use dca_algo::segmentation::{self, SegmentationError};
 use dca_model::{AlignersState, MODULE_ID};
 use serde_json::{Map, Value, json};
 
+use super::import::require_settled;
+
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
@@ -73,6 +75,12 @@ fn run_automatic(
         return Err(CommandError::Invalid(
             "no arch has a scan with tooth seeds: place or propose the seeds first".to_owned(),
         ));
+    }
+
+    // the gate of every later stage: nothing is computed on a scan whose arch
+    // is still a guess
+    for scan in arches.iter().filter_map(|a| state.case.scan(a.role())) {
+        require_settled(scan)?;
     }
 
     let mut next = state.clone();
@@ -230,6 +238,18 @@ mod tests {
             run(&lower, json!({ "arch": "sideways" })),
             Err(CommandError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_provisional_scan_is_refused_whatever_arch_is_asked() {
+        let mut state = demo_state("lower");
+        state.case.scans[0].role_source = dc_case::RoleSource::Provisional;
+        for params in [json!({ "arch": "lower" }), Value::Null] {
+            let Err(CommandError::Invalid(m)) = run(&state, params) else {
+                panic!("a provisional scan was segmented");
+            };
+            assert!(m.contains("Import scans panel"), "{m}");
+        }
     }
 
     #[test]

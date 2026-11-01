@@ -13,7 +13,11 @@
 //!   It is not a menu leaf.
 //!
 //! The roles are never decided here for a scan with a surer source: explicit,
-//! file name and detected roles stay as they are.
+//! file name, detected and detected-unsure roles stay as they are. A
+//! detection from a cue the plugin marks "da verificare"
+//! ([`ArchSource::to_be_checked`]) is stored as
+//! [`RoleSource::DetectedUnsure`]: settled, with a warning; `case.set-role`
+//! with the same role on both sides confirms it.
 //!
 //! Detection runs on the thread of the job and needs no decimation: about
 //! 0.3 s in a release build on a real scan of 855k faces.
@@ -30,7 +34,6 @@ use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::autoseed::{self, ArchDetection, ArchSource};
-use dca_model::{AlignersState, MODULE_ID};
 use glam::DVec3;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -142,7 +145,8 @@ pub struct ScanDetection {
 pub struct ScanImport {
     /// The report of the import. Its `warnings` also hold the warnings of
     /// this module, in the same form: failed recognition, arch to check after
-    /// segmentation, bite registration not reset.
+    /// segmentation. A bite registration that an arch replacement leaves
+    /// applied is reported in `module_cleared` (`bite_registered`).
     pub report: ImportReport,
     /// The recognised files, in request order.
     pub detections: Vec<ScanDetection>,
@@ -213,13 +217,25 @@ pub(crate) fn require_settled(scan: &Scan) -> Result<(), CommandError> {
 
 /// The arch of a mesh, or the technical cause of the failure.
 ///
-/// With no confidence at all the two width hypotheses cost the same and
-/// [`autoseed::detect_arch`] still has to answer something: that is no
-/// recognition, so it counts as a failure and the scan stays provisional.
+/// [`autoseed::detect_arch`] keeps the plugin's arithmetic and always answers
+/// once the geometry could be analysed. Two answers are no recognition, so
+/// they count as a failure and the scan stays provisional:
+/// * the proposal failed for both arches (both costs infinite): the
+///   comparison of the widths is NaN and the plugin's answer, an upper arch
+///   at 0.6, rests on nothing ([`ArchDetection::widths_failed`]);
+/// * no confidence at all: the two width hypotheses cost the same.
 fn detect(mesh: &TriMesh, name: &str) -> Result<ArchDetection, String> {
     let vertices: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let detection =
         autoseed::detect_arch(&vertices, &mesh.tris, Some(name)).map_err(|e| e.to_string())?;
+    recognised(detection)
+}
+
+/// `detection` as a recognition, or the reason it is none (see [`detect`]).
+fn recognised(detection: ArchDetection) -> Result<ArchDetection, String> {
+    if detection.widths_failed() {
+        return Err("the tooth widths could not be compared for either arch".to_owned());
+    }
     if detection.confidence > 0.0 {
         Ok(detection)
     } else {
@@ -236,17 +252,25 @@ fn detection_failed(name: &str, detail: &str) -> ImportWarning {
     )
 }
 
-/// `true` when the arch rests only on the shape and the tooth widths.
+/// The role source of a scan placed on the arch `detection` recognised:
+/// [`RoleSource::DetectedUnsure`] when the cue is one the plugin marks "da
+/// verificare" (`autoseed.py`, `detect_arch`: the palate that disagrees with
+/// the molar cusps, the Wilson cusps over a closed model base, and the shape
+/// and widths of the teeth alone), otherwise [`RoleSource::Detected`].
 ///
-/// The plugin does not trust this path (`case_auto.auto_steps`, the sources
-/// starting with "forma"): it treats the scan as a lower arch, then after the
-/// segmentation compares the crown widths and restarts as an upper arch when
-/// they fit better. That verification loop is NOT ported: it needs the
-/// segmentation and the teeth stage. For now the guess of
-/// [`autoseed::detect_arch`] is kept and the user is told to check it. When
-/// the loop lands, this warning goes.
-fn needs_width_check(source: ArchSource) -> bool {
-    source == ArchSource::ShapeAndWidths
+/// The plugin does not trust the first and the last path
+/// (`case_auto.auto_steps`, the sources starting with "forma"): it treats the
+/// scan as a lower arch, then after the segmentation compares the crown
+/// widths and restarts as an upper arch when they fit better. That
+/// verification loop is NOT ported: it needs the segmentation and the teeth
+/// stage. For now the guess of [`autoseed::detect_arch`] is kept, settled,
+/// and the user is told to check it. When the loop lands, this goes.
+fn detected_source(source: ArchSource) -> RoleSource {
+    if source.to_be_checked() {
+        RoleSource::DetectedUnsure
+    } else {
+        RoleSource::Detected
+    }
 }
 
 fn width_check(name: &str, role: ScanRole) -> ImportWarning {
@@ -257,18 +281,29 @@ fn width_check(name: &str, role: ScanRole) -> ImportWarning {
     )
 }
 
-fn bite_registered(state: &CaseState) -> bool {
-    state
-        .module_data::<AlignersState>(MODULE_ID)
-        .is_some_and(|d| d.bite_registered)
-}
-
-fn bite_not_reset() -> ImportWarning {
-    warning(
-        WarningCode::Replaced,
-        "aligners-arch-warn-bite-not-reset",
-        &[],
-    )
+/// Turns into [`RoleSource::DetectedUnsure`], in `state` and in the report,
+/// the imported scans that the import placed on the arch the geometry said
+/// (`Detected`) from a cue to be checked, and warns about each. A scan that
+/// went to the other arch (arch conflict) is provisional and not touched.
+fn mark_unsure(state: &mut CaseState, report: &mut ImportReport, detections: &[ScanDetection]) {
+    for d in detections {
+        if detected_source(d.detection.source) != RoleSource::DetectedUnsure {
+            continue;
+        }
+        let settled = report
+            .imported
+            .iter_mut()
+            .find(|s| s.path == d.path && s.role_source == RoleSource::Detected);
+        if let Some(scan) = settled {
+            scan.role_source = RoleSource::DetectedUnsure;
+            if let Some(held) = state.case.scans.iter_mut().find(|s| s.id == scan.scan_id) {
+                held.role_source = RoleSource::DetectedUnsure;
+            }
+            report
+                .warnings
+                .push(width_check(&scan.source_name, scan.role));
+        }
+    }
 }
 
 /// Imports a batch into `state`, recognising the arch of the files with
@@ -282,7 +317,6 @@ fn bite_not_reset() -> ImportWarning {
 /// Callers holding a shared state clone it first and keep the old one for
 /// undo: the whole batch is one change.
 pub fn import_scans(state: &mut CaseState, request: &ImportRequest, ctx: &JobCtx) -> ScanImport {
-    let registered = bite_registered(state);
     let mut detections = Vec::new();
     let mut failures = Vec::new();
     let mut resolve = |scan: &PreparedScan| -> Option<Detection> {
@@ -316,22 +350,7 @@ pub fn import_scans(state: &mut CaseState, request: &ImportRequest, ctx: &JobCtx
         };
     }
     report.warnings.extend(failures);
-    for d in detections.iter() {
-        let settled = report
-            .imported
-            .iter()
-            .find(|s| s.path == d.path && s.role_source == RoleSource::Detected);
-        if let Some(scan) = settled
-            && needs_width_check(d.detection.source)
-        {
-            report
-                .warnings
-                .push(width_check(&scan.source_name, scan.role));
-        }
-    }
-    if registered && report.replaced_roles.iter().any(|r| *r != ScanRole::Bite) {
-        report.warnings.push(bite_not_reset());
-    }
+    mark_unsure(state, &mut report, &detections);
     ScanImport { report, detections }
 }
 
@@ -358,7 +377,7 @@ fn import_request(p: &ImportParams) -> Result<ImportRequest, CommandError> {
 
 /// The reasons of the failed files, one sentence each.
 fn failure_text(report: &ImportReport) -> String {
-    let reasons: Vec<String> = report
+    let mut reasons: Vec<String> = report
         .failed
         .iter()
         .map(|f| match &f.detail {
@@ -366,6 +385,7 @@ fn failure_text(report: &ImportReport) -> String {
             None => f.reason.clone(),
         })
         .collect();
+    reasons.dedup(); // a reason about the project is the same for every file
     tr(
         "aligners-import-error-nothing",
         &[("reasons", &reasons.join(" "))],
@@ -432,7 +452,9 @@ fn run_import(
 enum Outcome {
     /// The scan was not provisional: left alone.
     Unchanged,
-    /// The arch was recognised: the scan is on it, marked detected.
+    /// The arch was recognised: the scan is on it, marked detected (or
+    /// detected unsure, with a warning, for a cue the plugin marks to be
+    /// checked).
     Resolved,
     /// The arch recognised is taken: the scan stays provisional on the other.
     Conflict,
@@ -478,10 +500,11 @@ fn place_provisional<'a>(
             ));
             (to, RoleSource::Provisional, Outcome::Conflict)
         } else {
-            if needs_width_check(detection.source) {
+            let source = detected_source(detection.source);
+            if source == RoleSource::DetectedUnsure {
                 warnings.push(width_check(&scan.source_name, want));
             }
-            (want, RoleSource::Detected, Outcome::Resolved)
+            (want, source, Outcome::Resolved)
         };
         taken.insert(to);
         out.push(Placement {
@@ -575,9 +598,6 @@ fn run_detect_arch(
         roles_changed(&mut next, &touched, &before)
             .map_err(|e| CommandError::Invalid(e.to_string()))?
     };
-    if bite_registered(state) && !touched.is_empty() {
-        warnings.push(bite_not_reset());
-    }
 
     let scans: Vec<Value> = state
         .case
@@ -615,7 +635,7 @@ mod tests {
     use dc_command::UndoStack;
     use dca_algo::anatomy::Arch;
     use dca_algo::demo;
-    use dca_model::CLEARED_IDS;
+    use dca_model::{AlignersState, CLEARED_IDS, MODULE_ID};
     use glam::Vec3;
 
     const LOWER: Arch = Arch::Lower;
@@ -1074,8 +1094,8 @@ mod tests {
         assert_eq!(undo.current().case.scans, state.case.scans);
     }
 
-    #[test]
-    fn replacing_an_arch_after_a_bite_registration_says_it_is_not_reset() {
+    /// The demo arches with the bite registration flag set.
+    fn registered_state() -> CaseState {
         let mut state = exec("aligners.demo", &CaseState::default(), json!({}))
             .unwrap()
             .0;
@@ -1085,92 +1105,411 @@ mod tests {
             .clone();
         data.bite_registered = true;
         state.set_module(MODULE_ID, ModuleState::new(data));
+        state
+    }
+
+    fn flag(state: &CaseState) -> bool {
+        state
+            .module_data::<AlignersState>(MODULE_ID)
+            .unwrap()
+            .bite_registered
+    }
+
+    fn cleared_ids(out: &Value) -> Vec<String> {
+        let ids = out["module_cleared"].as_array().unwrap();
+        ids.iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+    }
+
+    #[test]
+    fn replacing_an_arch_after_a_bite_registration_reports_it_as_cleared() {
+        let state = registered_state();
         let files = Files::new("registered");
         let bite = files.stl("scan_a.stl", &demo_mesh(LOWER, 1));
-        let key = "aligners-arch-warn-bite-not-reset";
+        let id = "bite_registered";
 
-        // a new bite scan leaves the arches as they are
+        // a new bite scan leaves the arches as they are: the registration holds
         let params = json!({ "path": bite, "role": "bite" });
         let (with_bite, out) = import(&state, params).unwrap();
-        assert!(!keys(&out).iter().any(|k| k == key), "{out}");
+        assert!(!cleared_ids(&out).iter().any(|c| c == id), "{out}");
+        assert!(flag(&with_bite));
 
+        // an arch replaced: reported as a cleared id, no warning of its own
         let params = json!({ "path": bite, "role": "lower" });
         let (next, out) = import(&with_bite, params).unwrap();
-        assert!(keys(&out).iter().any(|k| k == key), "{out}");
-        let warning = out["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|w| w["key"] == key)
-            .unwrap();
-        assert_ne!(warning["message"], key, "the text is translated");
+        assert!(cleared_ids(&out).iter().any(|c| c == id), "{out}");
+        assert!(
+            keys(&out).iter().all(|k| !k.contains("bite-not-reset")),
+            "{out}"
+        );
+        assert!(!flag(&next));
+        // the text of the id is translated, and says what to do
+        let text = cleared_list(&[id]);
+        assert!(!text.contains('_') && text.contains("redone"), "{text}");
         // said once: the next replacement has nothing new to say
-        let data = next.module_data::<AlignersState>(MODULE_ID).unwrap();
-        assert!(!data.bite_registered);
         let (_, out) = import(&next, json!({ "path": bite, "role": "lower" })).unwrap();
-        assert!(!keys(&out).iter().any(|k| k == key), "{out}");
+        assert!(!cleared_ids(&out).iter().any(|c| c == id), "{out}");
 
-        // nothing replaced, no warning, with or without a registration
-        let mut state = CaseState::default();
-        state.set_module(
+        // nothing replaced, nothing reported, with or without a registration
+        let mut empty = CaseState::default();
+        empty.set_module(
             MODULE_ID,
             ModuleState::new(AlignersState {
                 bite_registered: true,
                 ..AlignersState::default()
             }),
         );
-        let (_, out) = import(&state, json!({ "path": bite, "role": "upper" })).unwrap();
-        assert!(!keys(&out).iter().any(|k| k == key), "{out}");
+        let (_, out) = import(&empty, json!({ "path": bite, "role": "upper" })).unwrap();
+        assert!(!cleared_ids(&out).iter().any(|c| c == id), "{out}");
 
-        // the arch step warns the same way when it moves a scan
-        add(&mut state, demo_mesh(LOWER, 1), "upper", "provisional", 1);
-        let (_, out) = detect_step(&state).unwrap();
-        assert!(keys(&out).iter().any(|k| k == key), "{out}");
+        // the arch step reports it when it moves a scan
+        let mut moved = empty.clone();
+        add(&mut moved, demo_mesh(LOWER, 1), "upper", "provisional", 1);
+        let (done, out) = detect_step(&moved).unwrap();
+        assert!(cleared_ids(&out).iter().any(|c| c == id), "{out}");
+        assert!(!flag(&done));
     }
 
     #[test]
-    fn only_the_shape_and_widths_path_is_to_be_checked() {
-        for source in [
-            ArchSource::FileName,
-            ArchSource::ScannerOrientation,
-            ArchSource::WilsonOverPalate,
-            ArchSource::Palate,
-            ArchSource::PalateDisagreesWithMolars,
-            ArchSource::CurveOfWilson,
-            ArchSource::WilsonAndWidths,
-        ] {
-            assert!(!needs_width_check(source), "{source:?}");
-        }
-        assert!(needs_width_check(ArchSource::ShapeAndWidths));
-        let w = width_check("scan_a.stl", ScanRole::Lower);
-        assert_eq!(w.code, WarningCode::Provisional);
-        assert!(w.message().contains("scan_a.stl"));
-        assert!(!w.message().contains("aligners-"));
+    fn case_import_and_set_role_report_the_registration_too() {
+        use dc_case::import::{ImportFile, ImportRequest, import_files, roles_changed};
 
-        // the arch step gives the warning when the widths place the scan
-        let mut state = CaseState::default();
-        let scan = add(&mut state, strip(1000), "lower", "provisional", 1);
-        let detection = ArchDetection {
-            arch: Arch::Upper,
-            confidence: 0.3,
-            source: ArchSource::ShapeAndWidths,
+        // the shared pipeline behind case.import: no module command involved
+        let mut state = registered_state();
+        let files = Files::new("shared");
+        let path = files.stl("scan_a.stl", &demo_mesh(LOWER, 1));
+        let request = ImportRequest {
+            files: vec![ImportFile {
+                path: path.into(),
+                role: Some(ScanRole::Lower),
+            }],
+        };
+        let report = import_files(&mut state, &request, None, &JobCtx::detached());
+        assert!(report.module_cleared.contains(&"bite_registered"));
+        assert!(!flag(&state));
+
+        // what case.set-role ends with: the arches swapped
+        let mut state = registered_state();
+        let before = state.referenced_blobs();
+        for scan in &mut state.case.scans {
+            scan.role = opposite(scan.role);
+        }
+        state.case.scans.sort_by_key(|s| s.role);
+        let touched = [ScanRole::Lower, ScanRole::Upper].into();
+        let cleared = roles_changed(&mut state, &touched, &before).unwrap();
+        assert!(cleared.contains(&"bite_registered"), "{cleared:?}");
+        assert!(!flag(&state));
+        // a bite scan moving does not touch the registration
+        let mut state = registered_state();
+        let before = state.referenced_blobs();
+        let touched = [ScanRole::Bite].into();
+        let cleared = roles_changed(&mut state, &touched, &before).unwrap();
+        assert!(cleared.is_empty(), "{cleared:?}");
+        assert!(flag(&state));
+    }
+
+    fn detection(arch: Arch, confidence: f64, source: ArchSource) -> ArchDetection {
+        ArchDetection {
+            arch,
+            confidence,
+            source,
             palate_coverage: None,
             occlusal_z: None,
             molar_cusps_mm: None,
             cost_upper: None,
             cost_lower: None,
-        };
-        let mut warnings = Vec::new();
-        let placed = place_provisional(
-            vec![(&state.case.scans[0], detection)],
-            Vec::new(),
-            BTreeSet::new(),
-            &mut warnings,
+        }
+    }
+
+    const CHECKED: [ArchSource; 3] = [
+        ArchSource::WilsonOverPalate,
+        ArchSource::PalateDisagreesWithMolars,
+        ArchSource::ShapeAndWidths,
+    ];
+    const SURE: [ArchSource; 5] = [
+        ArchSource::FileName,
+        ArchSource::ScannerOrientation,
+        ArchSource::Palate,
+        ArchSource::CurveOfWilson,
+        ArchSource::WilsonAndWidths,
+    ];
+
+    #[test]
+    fn the_cues_the_plugin_marks_to_be_checked_give_detected_unsure() {
+        for source in CHECKED {
+            assert_eq!(detected_source(source), RoleSource::DetectedUnsure);
+        }
+        for source in SURE {
+            assert_eq!(detected_source(source), RoleSource::Detected);
+        }
+        let w = width_check("scan_a.stl", ScanRole::Lower);
+        assert_eq!(w.code, WarningCode::Provisional);
+        assert!(w.message().contains("scan_a.stl"));
+        assert!(!w.message().contains("aligners-"));
+    }
+
+    #[test]
+    fn the_arch_step_stores_detected_unsure_and_warns_for_each_cue_to_check() {
+        let mut state = CaseState::default();
+        add(&mut state, strip(1000), "lower", "provisional", 1);
+        for source in CHECKED.into_iter().chain(SURE) {
+            let mut warnings = Vec::new();
+            let placed = place_provisional(
+                vec![(&state.case.scans[0], detection(Arch::Upper, 0.3, source))],
+                Vec::new(),
+                BTreeSet::new(),
+                &mut warnings,
+            );
+            assert_eq!(placed[0].to, ScanRole::Upper);
+            assert_eq!(placed[0].outcome, Outcome::Resolved);
+            if CHECKED.contains(&source) {
+                assert_eq!(placed[0].source, RoleSource::DetectedUnsure, "{source:?}");
+                assert_eq!(warnings.len(), 1, "{source:?}");
+                assert_eq!(warnings[0].key, "aligners-arch-warn-to-be-checked");
+            } else {
+                assert_eq!(placed[0].source, RoleSource::Detected, "{source:?}");
+                assert!(warnings.is_empty(), "{source:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_arch_command_keeps_a_detected_unsure_scan_settled() {
+        let mut state = CaseState::default();
+        let scan = add(
+            &mut state,
+            demo_mesh(UPPER, 1),
+            "lower",
+            "detected_unsure",
+            1,
         );
-        assert_eq!(placed[0].scan.id, scan.id);
-        assert_eq!(placed[0].to, ScanRole::Upper);
-        assert_eq!(placed[0].source, RoleSource::Detected);
-        assert_eq!(warnings[0].key, "aligners-arch-warn-to-be-checked");
+        let other = add(&mut state, demo_mesh(LOWER, 1), "upper", "provisional", 2);
+        let (next, out) = detect_step(&state).unwrap();
+        // not an arch to settle: it is reported unchanged, and the provisional
+        // scan, which also looks like a lower arch, cannot take its place
+        assert_eq!(
+            role_of(&next, &scan),
+            (ScanRole::Lower, RoleSource::DetectedUnsure)
+        );
+        let report = |name: &str| {
+            let scans = out["scans"].as_array().unwrap();
+            scans.iter().find(|s| s["source_name"] == name).unwrap()
+        };
+        assert_eq!(report("scan-1.stl")["outcome"], "unchanged", "{out}");
+        assert_eq!(
+            report("scan-1.stl")["role_source"],
+            "detected_unsure",
+            "{out}"
+        );
+        assert_eq!(report("scan-2.stl")["outcome"], "conflict", "{out}");
+        assert_eq!(
+            role_of(&next, &other),
+            (ScanRole::Upper, RoleSource::Provisional)
+        );
+        // the guards let it pass: only a provisional scan is refused
+        let held = next.case.scan_by_id(scan.id).unwrap();
+        assert!(require_settled(held).is_ok());
+        // while the provisional scan next to it is refused
+        assert!(require_settled(next.case.scan_by_id(other.id).unwrap()).is_err());
+    }
+
+    /// The lower demo arch with a closed base inside the arch, as a model
+    /// has: the buccal molar cusps are highest over a closed region, which
+    /// the plugin flags as "to be checked" ([`ArchSource::WilsonOverPalate`]).
+    fn lower_on_a_model_base() -> TriMesh {
+        let mut mesh = demo_mesh(LOWER, 1);
+        let bb = mesh.aabb().unwrap();
+        let (lo, hi) = (bb.min, bb.max);
+        let n = 40u32;
+        let first = mesh.positions.len() as u32;
+        let z = lo.z + 0.2 * (hi.z - lo.z);
+        for i in 0..n {
+            for j in 0..n {
+                let x = lo.x + (hi.x - lo.x) * (0.15 + 0.7 * i as f32 / (n - 1) as f32);
+                let y = lo.y + (hi.y - lo.y) * (0.05 + 0.9 * j as f32 / (n - 1) as f32);
+                mesh.positions.push(Vec3::new(x, y, z));
+            }
+        }
+        for i in 0..n - 1 {
+            for j in 0..n - 1 {
+                let a = first + i * n + j;
+                mesh.tris.push([a, a + 1, a + n]);
+                mesh.tris.push([a + 1, a + n + 1, a + n]);
+            }
+        }
+        mesh
+    }
+
+    #[test]
+    fn a_cue_to_check_is_detected_unsure_with_a_warning_and_stays_settled() {
+        let files = Files::new("unsure-real");
+        let path = files.stl("scan_a.stl", &lower_on_a_model_base());
+        let (next, out) = import(&CaseState::default(), json!({ "path": path })).unwrap();
+        assert_eq!(
+            out["detections"][0]["source"], "wilson_over_palate",
+            "{out}"
+        );
+        assert_eq!(out["role"], "lower", "{out}");
+        assert_eq!(out["role_source"], "detected_unsure", "{out}");
+        assert_eq!(
+            out["imported"][0]["role_source"], "detected_unsure",
+            "{out}"
+        );
+        assert_eq!(next.case.scans[0].role_source, RoleSource::DetectedUnsure);
+        assert_eq!(keys(&out), ["aligners-arch-warn-to-be-checked"], "{out}");
+        assert_eq!(codes(&out), ["provisional"], "{out}");
+        // the guards let it pass: the plugin warns and does not stop
+        assert!(require_settled(&next.case.scans[0]).is_ok());
+
+        // a later unhinted file that wants the same arch does not displace it
+        let other = files.stl("scan_b.stl", &demo_mesh(LOWER, 2));
+        let (after, out) = import(&next, json!({ "path": other })).unwrap();
+        assert_eq!(
+            role_of(&after, &next.case.scans[0]),
+            (ScanRole::Lower, RoleSource::DetectedUnsure),
+            "{out}"
+        );
+        assert_eq!(out["role"], "upper", "{out}");
+        assert_eq!(out["role_source"], "provisional", "{out}");
+        assert_eq!(out["moved"], json!([]), "{out}");
+        assert_eq!(codes(&out), ["arch_conflict"], "{out}");
+
+        // the arch step is the second call site: same source, same warning
+        let mut state = CaseState::default();
+        let mesh = lower_on_a_model_base();
+        let scan = add(&mut state, mesh, "upper", "provisional", 1);
+        let (done, out) = detect_step(&state).unwrap();
+        assert_eq!(
+            role_of(&done, &scan),
+            (ScanRole::Lower, RoleSource::DetectedUnsure)
+        );
+        assert_eq!(out["scans"][0]["role_source"], "detected_unsure", "{out}");
+        assert_eq!(out["scans"][0]["outcome"], "resolved", "{out}");
+        assert_eq!(keys(&out), ["aligners-arch-warn-to-be-checked"], "{out}");
+    }
+
+    #[test]
+    fn the_sure_cues_of_the_real_scans_stay_detected_without_a_warning() {
+        let files = Files::new("sure");
+        let path = files.stl("scan_a.stl", &demo_mesh(UPPER, 1));
+        let (next, out) = import(&CaseState::default(), json!({ "path": path })).unwrap();
+        assert_eq!(out["detections"][0]["source"], "curve_of_wilson", "{out}");
+        assert_eq!(out["role_source"], "detected", "{out}");
+        assert_eq!(next.case.scans[0].role_source, RoleSource::Detected);
+        assert!(keys(&out).is_empty(), "{out}");
+        // the scanner orientation (teeth pointing down) is a sure cue too
+        let mut turned = demo_mesh(UPPER, 2);
+        for p in &mut turned.positions {
+            *p = Vec3::new(p.x, -p.y, -p.z);
+        }
+        let path = files.stl("scan_b.stl", &turned);
+        let (_, out) = import(&CaseState::default(), json!({ "path": path })).unwrap();
+        assert_eq!(
+            out["detections"][0]["source"], "scanner_orientation",
+            "{out}"
+        );
+        assert_eq!(out["role_source"], "detected", "{out}");
+        assert!(keys(&out).is_empty(), "{out}");
+    }
+
+    #[test]
+    fn a_failed_width_comparison_is_no_recognition() {
+        let inf = f64::INFINITY;
+        let widths = |cu, cl, confidence| ArchDetection {
+            cost_upper: Some(cu),
+            cost_lower: Some(cl),
+            ..detection(Arch::Upper, confidence, ArchSource::ShapeAndWidths)
+        };
+        // the proposal failed for both arches: NaN difference, an upper arch at
+        // 0.6 in the plugin's arithmetic, but nothing was recognised
+        for d in [widths(inf, inf, 0.6), widths(f64::NAN, inf, 0.6)] {
+            let reason = recognised(d).unwrap_err();
+            assert!(reason.contains("widths"), "{reason}");
+        }
+        // no confidence at all: the same
+        assert!(recognised(widths(1e18, 1e18, 0.0)).is_err());
+        // one hypothesis failed, the other has a cost: that is an answer
+        assert!(recognised(widths(3.0, inf, 0.6)).is_ok());
+        assert!(recognised(widths(3.0, 5.0, 0.4)).is_ok());
+        // not the widths that decided: costs are not looked at
+        let by_palate = detection(Arch::Upper, 0.9, ArchSource::Palate);
+        assert!(recognised(by_palate).is_ok());
+    }
+
+    #[test]
+    fn a_mesh_with_no_cue_at_all_stays_provisional() {
+        // flat, and turned so that no other cue answers: both hypotheses cost
+        // the same (not reachable with infinite costs on a real mesh: once the
+        // arch data exist, `propose` does not fail)
+        let mut mesh = demo_mesh(UPPER, 1);
+        for p in &mut mesh.positions {
+            p.z *= -0.7;
+        }
+        let files = Files::new("nocue");
+        let path = files.stl("scan_a.stl", &mesh);
+        let (next, out) = import(&CaseState::default(), json!({ "path": path })).unwrap();
+        assert_eq!(out["role_source"], "provisional", "{out}");
+        assert_eq!(out["detections"], json!([]), "{out}");
+        assert!(
+            keys(&out)
+                .iter()
+                .any(|k| k == "aligners-arch-warn-not-recognised"),
+            "{out}"
+        );
+        assert_eq!(next.case.scans[0].role_source, RoleSource::Provisional);
+    }
+
+    #[test]
+    fn the_pipeline_stops_on_a_provisional_scan_with_a_clear_message() {
+        let files = Files::new("stops");
+        let path = files.stl("scan_a.stl", &strip(1200));
+        let (next, _) = import(&CaseState::default(), json!({ "path": path })).unwrap();
+        assert_eq!(next.case.scans[0].role_source, RoleSource::Provisional);
+        let m = message(exec("aligners.auto", &next, Value::Null).unwrap_err());
+        assert!(m.contains("stopped at step 1"), "{m}");
+        assert!(m.contains("scan_a.stl"), "{m}");
+        assert!(m.contains("Import scans panel"), "{m}");
+        assert!(
+            m.contains(DETECT_ARCH) && m.contains("case.set-role"),
+            "{m}"
+        );
+        assert!(!m.contains("aligners-"), "{m}");
+        // the other gates of the pipeline say the same
+        for id in [
+            "aligners.preparation.orientation.automatic",
+            "aligners.preparation.numbering.automatic",
+            "aligners.frame",
+        ] {
+            let m = message(exec(id, &next, json!({})).unwrap_err());
+            assert!(m.contains("Import scans panel"), "{id}: {m}");
+        }
+    }
+
+    #[test]
+    fn repeated_reasons_of_the_failed_files_are_said_once() {
+        use dc_case::OpaqueModuleData;
+        let mut state = exec("aligners.demo", &CaseState::default(), json!({}))
+            .unwrap()
+            .0;
+        state = exec("aligners.demo", &state, json!({"arch": "upper"}))
+            .unwrap()
+            .0;
+        state.set_module(
+            "future",
+            ModuleState::new(OpaqueModuleData {
+                schema_version: 9,
+                value: json!({}),
+            }),
+        );
+        let files = Files::new("dedup");
+        let a = files.stl("scan_a.stl", &demo_mesh(LOWER, 1));
+        let b = files.stl("scan_b.stl", &demo_mesh(UPPER, 1));
+        let params = json!({"files": [{"path": a, "role": "lower"}, {"path": b, "role": "upper"}]});
+        let m = message(import(&state, params).unwrap_err());
+        // two files fail with the same reason, which a module of the project
+        // caused: one sentence, not two
+        let sentence = m.trim_start_matches("No scan was imported. ");
+        let first = sentence.split(". ").next().unwrap();
+        assert_eq!(m.matches(first).count(), 1, "{m}");
     }
 
     #[test]

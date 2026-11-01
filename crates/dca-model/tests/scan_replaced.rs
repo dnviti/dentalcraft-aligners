@@ -167,6 +167,7 @@ fn fill_shared(st: &mut AlignersState) {
     st.diagnosis.bolton_anterior = Some(77.5);
     st.diagnosis.bolton_overall = Some(91.0);
     st.diagnosis.complexity_score = Some(12.0);
+    st.bite_registered = true;
 }
 
 /// A case with both scans and the state of the module filled for the arches
@@ -238,6 +239,7 @@ fn only_group(id: &str, role: ScanRole) -> AlignersState {
     let (_, full) = case_with(&[role]);
     let mut st = AlignersState::default();
     match id {
+        "bite_registered" => st.bite_registered = true,
         "seeds" => st.seeds = full.seeds,
         "missing" => st.missing = full.missing,
         "labels" => st.labels = full.labels,
@@ -273,7 +275,7 @@ fn only_the_groups_that_held_data_are_returned() {
             // except for the results that need both arches
             let mut untouched = st.clone();
             let ids = untouched.scan_replaced(other(role));
-            if matches!(id, "bolton" | "complexity") {
+            if matches!(id, "bolton" | "complexity" | "bite_registered") {
                 assert_eq!(ids, [id], "{id}");
             } else {
                 assert!(ids.is_empty(), "{id} {role:?}: {ids:?}");
@@ -316,6 +318,8 @@ fn an_empty_state_gives_nothing() {
 fn a_bite_scan_clears_nothing() {
     let (_, mut st) = case_with(&[Upper, Lower]);
     let before = st.clone();
+    // the arches keep the registered position: the registration stays valid
+    assert!(before.bite_registered);
     assert!(st.scan_replaced(Bite).is_empty());
     assert_eq!(st, before);
 }

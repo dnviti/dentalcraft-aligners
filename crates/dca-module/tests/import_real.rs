@@ -243,6 +243,10 @@ fn detection_on_neutral_names_finds_each_arch() {
         let s = imported(&out, &path);
         assert_eq!(s["role"], r.arch, "scan_{l}: role");
         assert_eq!(s["role_source"], "detected", "scan_{l}");
+        // a cue the plugin trusts: no `detected_unsure`, no warning to check it
+        let to_check = out["warnings"].as_array().unwrap().iter();
+        let to_check = to_check.filter(|w| w["key"] == "aligners-arch-warn-to-be-checked");
+        assert_eq!(to_check.count(), 0, "scan_{l}");
     }
 }
 

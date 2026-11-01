@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::common::{arch_labels, arch_name, data_of, fdi_of, finish, invalid, point};
+use crate::commands::import::require_settled;
 
 /// What to do with the seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -54,6 +55,10 @@ pub(crate) fn run_seed(
     ctx.check_cancelled()?;
     let f = fdi_of(p.fdi)?;
     let arch = Arch::of(f);
+    // seeds on a scan whose arch is still a guess would be thrown away with it
+    if let Some(scan) = state.case.scan(arch.role()) {
+        require_settled(scan)?;
+    }
     let mut data = data_of(state)?;
     let had = data.seeds.iter().position(|s| s.fdi == f);
     let mut position = None;

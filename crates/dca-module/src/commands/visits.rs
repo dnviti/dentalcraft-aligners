@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use dc_case::import::{self, ImportError};
+use dc_case::import::{self, ImportError, ImportWarning, PrepareOptions};
 use dc_case::{CaseState, Fdi, ModuleState, Pose, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
@@ -300,17 +300,26 @@ fn tooth_json(t: &ToothTracking) -> Value {
     })
 }
 
-/// Reads the scan of a visit through the import: the same cleanup, units and
-/// axes as the scans of the case.
-fn read_visit_scan(path: &str, ctx: &JobCtx) -> Result<Arc<TriMesh>, CommandError> {
-    let scan = import::prepare(Path::new(path), ctx).map_err(|e| match e {
-        ImportError::Cancelled => CommandError::Cancelled,
-        e => CommandError::Invalid(match e.detail() {
-            Some(detail) => format!("{e} ({detail})"),
-            None => e.to_string(),
-        }),
-    })?;
-    Ok(scan.mesh)
+/// Reads the scan of a visit through the import: the same cleanup and axes
+/// as the scans of the case. Like the plugin with a bite scan, the units are
+/// left alone ([`PrepareOptions::KEEP_UNITS`]): a progress scan may be a
+/// partial one that a guessed unit would grow. A size that fits another unit
+/// gives the `units_suspect` warning, returned with the mesh together with the
+/// other warnings of the file.
+fn read_visit_scan(
+    path: &str,
+    ctx: &JobCtx,
+) -> Result<(Arc<TriMesh>, Vec<ImportWarning>), CommandError> {
+    let scan = import::prepare_with(Path::new(path), &PrepareOptions::KEEP_UNITS, ctx).map_err(
+        |e| match e {
+            ImportError::Cancelled => CommandError::Cancelled,
+            e => CommandError::Invalid(match e.detail() {
+                Some(detail) => format!("{e} ({detail})"),
+                None => e.to_string(),
+            }),
+        },
+    )?;
+    Ok((scan.mesh, scan.warnings))
 }
 
 fn run_visit(
@@ -363,7 +372,7 @@ fn run_visit(
         )));
     }
 
-    let scan = read_visit_scan(&params.scan, ctx)?;
+    let (scan, warnings) = read_visit_scan(&params.scan, ctx)?;
     let scan_v: Vec<DVec3> = scan.positions.iter().map(|p| p.as_dvec3()).collect();
 
     // the model the plan expects at that aligner: teeth and gingiva at stage `worn`
@@ -509,6 +518,7 @@ fn run_visit(
         "detail": visit.teeth.iter().map(|(f, t)| (f.to_string(), tooth_json(t))).collect::<Map<_, _>>(),
         "segmented": segmented,
         "segmentation_note": note,
+        "warnings": warnings,
         "scan_blob": blob.to_hex(),
         "summary": format!(
             "{}/{} teeth on track at aligner {worn}{}",
@@ -852,6 +862,7 @@ fn run_replan(
 mod tests {
     use super::*;
     use dc_case::Fdi;
+    use dc_case::import::WarningCode;
     use dca_algo::demo::{Draws, SeededDraws};
     use dca_algo::staging;
     use glam::DQuat;
@@ -1035,6 +1046,66 @@ mod tests {
     }
 
     #[test]
+    fn a_visit_scan_keeps_its_units_and_returns_the_warnings() {
+        // an arch-sized scan written in metres: it stays as it is and the
+        // import says that its size fits another unit
+        let tiny = TriMesh::new(
+            (0..40)
+                .map(|i| {
+                    let a = i as f32 * 0.08;
+                    glam::Vec3::new(0.03 * a.cos(), 0.03 * a.sin(), 0.001 * (i % 3) as f32)
+                })
+                .collect(),
+            (0..38).map(|i| [i, i + 1, i + 2]).collect(),
+        );
+        let path =
+            std::env::temp_dir().join(format!("dca-visit-{}-metres.stl", std::process::id()));
+        dc_mesh::io::write(&path, &tiny, dc_mesh::MeshFormat::Stl).unwrap();
+        let read = read_visit_scan(&path.display().to_string(), &JobCtx::detached());
+        let _ = std::fs::remove_file(&path);
+        let (mesh, warnings) = read.unwrap();
+        let extent = mesh.aabb().unwrap().size().max_element();
+        assert!(extent < 0.1, "the units were rescaled: {extent}");
+        let codes: Vec<WarningCode> = warnings.iter().map(|w| w.code).collect();
+        assert!(codes.contains(&WarningCode::UnitsSuspect), "{codes:?}");
+        assert!(!codes.contains(&WarningCode::Rescaled), "{codes:?}");
+    }
+
+    #[test]
+    fn a_visit_reports_the_warnings_of_its_scan() {
+        let s = staged("lower");
+        let path = write_visit_scan(&s, 1, &BTreeMap::new(), "warned");
+        // the file repeats a face: the import drops it and says so
+        let mut mesh = dc_mesh::io::read(&path).unwrap();
+        mesh.tris.push(mesh.tris[0]);
+        dc_mesh::io::write(&path, &mesh, dc_mesh::MeshFormat::Stl).unwrap();
+        let result = exec(
+            ID,
+            &s,
+            json!({ "scan": path.display().to_string(), "stage": 1 }),
+        );
+        let _ = std::fs::remove_file(&path);
+        let (_, out) = result.unwrap();
+        let codes: Vec<&str> = out["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["bad_faces_removed"], "{out}");
+        assert!(out["warnings"][0]["message"].as_str().unwrap().len() > 10);
+        // a clean scan has none
+        let path = write_visit_scan(&s, 1, &BTreeMap::new(), "clean");
+        let result = exec(
+            ID,
+            &s,
+            json!({ "scan": path.display().to_string(), "stage": 1 }),
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap().1["warnings"], json!([]));
+    }
+
+    #[test]
     fn a_visit_on_track_and_segmented() {
         let s = staged("lower");
         let data = aligners_data(&s).unwrap();
@@ -1086,7 +1157,12 @@ mod tests {
         dc_mesh::io::write(&path, &y_up, dc_mesh::MeshFormat::Obj).unwrap();
         let read = read_visit_scan(&path.display().to_string(), &JobCtx::detached());
         let _ = std::fs::remove_file(&path);
-        let read = read.unwrap();
+        let (read, warnings) = read.unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == WarningCode::BadFacesRemoved)
+        );
         assert_eq!(read.face_count(), z_up.face_count());
         for (got, want) in read.positions.iter().zip(&z_up.positions) {
             assert!((*got - *want).length() < 1e-3, "{got} {want}");

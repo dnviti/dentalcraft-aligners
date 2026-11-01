@@ -1310,6 +1310,21 @@ pub enum ArchSource {
     ShapeAndWidths,
 }
 
+impl ArchSource {
+    /// `true` for the cues the plugin marks "da verificare" in `detect_arch`
+    /// (`autoseed.py`: the sources of [`ArchSource::WilsonOverPalate`],
+    /// [`ArchSource::PalateDisagreesWithMolars`] and
+    /// [`ArchSource::ShapeAndWidths`]): the arch is chosen, but a person should
+    /// look at it. The others (file name, scanner orientation, palate, curve
+    /// of Wilson, two weak cues that agree) are not flagged.
+    pub fn to_be_checked(self) -> bool {
+        matches!(
+            self,
+            Self::WilsonOverPalate | Self::PalateDisagreesWithMolars | Self::ShapeAndWidths
+        )
+    }
+}
+
 /// Result of [`detect_arch`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchDetection {
@@ -1329,6 +1344,19 @@ pub struct ArchDetection {
     pub cost_upper: Option<f64>,
     /// Proposal cost as a lower arch (only when the widths decided).
     pub cost_lower: Option<f64>,
+}
+
+impl ArchDetection {
+    /// `true` when the tooth-width comparison itself failed: the proposal
+    /// could not be built for either arch, so both costs are infinite (or
+    /// not a number). [`detect_arch`] keeps the plugin's arithmetic and still
+    /// answers (an upper arch at confidence 0.6, as the plugin does, because
+    /// the difference of the costs is NaN), but that answer rests on nothing:
+    /// a caller should not take it as a recognition.
+    pub fn widths_failed(&self) -> bool {
+        matches!((self.cost_upper, self.cost_lower), (Some(u), Some(l))
+            if !u.is_finite() && !l.is_finite())
+    }
 }
 
 /// Upper or lower arch.
@@ -1596,6 +1624,49 @@ mod tests {
 
     fn fdi(n: u8) -> Fdi {
         Fdi::new(n).unwrap()
+    }
+
+    #[test]
+    fn the_cues_the_plugin_marks_to_be_checked() {
+        use ArchSource::*;
+        let flagged: Vec<ArchSource> = [
+            FileName,
+            ScannerOrientation,
+            WilsonOverPalate,
+            Palate,
+            PalateDisagreesWithMolars,
+            CurveOfWilson,
+            WilsonAndWidths,
+            ShapeAndWidths,
+        ]
+        .into_iter()
+        .filter(|s| s.to_be_checked())
+        .collect();
+        assert_eq!(
+            flagged,
+            [WilsonOverPalate, PalateDisagreesWithMolars, ShapeAndWidths]
+        );
+    }
+
+    #[test]
+    fn widths_failed_needs_both_costs_to_be_unusable() {
+        let det = |cu, cl| ArchDetection {
+            arch: Arch::Upper,
+            confidence: 0.6,
+            source: ArchSource::ShapeAndWidths,
+            palate_coverage: Some(0.0),
+            occlusal_z: Some(1.0),
+            molar_cusps_mm: None,
+            cost_upper: cu,
+            cost_lower: cl,
+        };
+        let inf = Some(f64::INFINITY);
+        assert!(det(inf, inf).widths_failed());
+        assert!(det(Some(f64::NAN), inf).widths_failed());
+        assert!(!det(Some(3.0), inf).widths_failed());
+        assert!(!det(inf, Some(3.0)).widths_failed());
+        assert!(!det(Some(3.0), Some(4.0)).widths_failed());
+        assert!(!det(None, None).widths_failed());
     }
 
     #[test]
