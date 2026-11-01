@@ -6,7 +6,7 @@ use dc_case::{BlobRef, Fdi, Pose, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{AlignerBite, SCHEMA_VERSION, Settings, TrimParams, Visit};
+use crate::{AlignerBite, RampKind, SCHEMA_VERSION, Settings, TrimParams, Visit};
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
 /// number. Seeds tell the segmentation which teeth exist and where.
@@ -202,6 +202,150 @@ pub struct AlignersState {
     pub visits: Vec<Visit>,
 }
 
+/// Ids [`AlignersState::clear_arch`] (and so the `scan_replaced` hook) can
+/// return, in the order it returns them. Each names a group of data and is
+/// returned only when the group held something for the replaced arch.
+pub const CLEARED_IDS: [&str; 14] = [
+    "seeds",
+    "missing",
+    "labels",
+    "tooth_frames",
+    "tooth_geometry",
+    "crowns",
+    "gingiva",
+    "diagnosis",
+    "bolton",
+    "complexity",
+    "setup",
+    "stages",
+    "ramps",
+    "visits",
+];
+
+/// `fdi` belongs to the arch of `role` (`false` for a bite role).
+fn in_arch(fdi: Fdi, role: ScanRole) -> bool {
+    match role {
+        ScanRole::Upper => fdi.is_upper(),
+        ScanRole::Lower => !fdi.is_upper(),
+        ScanRole::Bite => false,
+    }
+}
+
+/// Removes the entries of `map` whose tooth is in the arch; `true` when some
+/// were there.
+fn drop_teeth<V>(map: &mut BTreeMap<Fdi, V>, role: ScanRole) -> bool {
+    let n = map.len();
+    map.retain(|f, _| !in_arch(*f, role));
+    map.len() != n
+}
+
+impl AlignersState {
+    /// Drops everything computed from, or entered about, the scan of the
+    /// arch `role`, and returns the ids of the groups that held data, in the
+    /// order of [`CLEARED_IDS`]. A bite role clears nothing.
+    ///
+    /// Cleared for the arch: the seeds and the teeth marked missing; the
+    /// labels (and the teeth flagged for a rebuild), tooth frames, measures,
+    /// closed crowns and gingiva; its space analysis and details; the setup
+    /// (poses, locks, IPR, arch line); its poses and IPR in every stage; its
+    /// ramps; its control visits, with their scan blobs.
+    ///
+    /// Results that need both arches go when either one is replaced: the
+    /// Bolton ratios, the complexity score (unless it can only come from the
+    /// other arch's details, which stay), and the automatic ramps of the
+    /// other arch, which the deep-bite rule derives from the overbite
+    /// between the two. The manual ramps, the other arch's own data and the
+    /// settings (staging, trim, occlusal, ramp sizes) are kept as they are.
+    ///
+    /// Stages: as `merge_arch` of the staging command does with an empty
+    /// series, the arch's poses and IPR leave every stage and a stage left
+    /// with neither is dropped. The other arch is not touched: it keeps the
+    /// poses it has in every stage, so a case staged with `merge_arch` keeps
+    /// its aligner count (the arch that finished first repeats its last
+    /// pose), while stages that only the cleared arch filled disappear. The
+    /// stage `index` values are not renumbered, as in `merge_arch`. Control
+    /// visits are not renumbered either; the remaining ones keep their
+    /// `number`.
+    pub fn clear_arch(&mut self, role: ScanRole) -> Vec<&'static str> {
+        let other = match role {
+            ScanRole::Upper => ScanRole::Lower,
+            ScanRole::Lower => ScanRole::Upper,
+            ScanRole::Bite => return Vec::new(),
+        };
+        let mut cleared = Vec::new();
+        let mut note = |id: &'static str, held: bool| {
+            if held {
+                cleared.push(id);
+            }
+        };
+
+        let n = self.seeds.len();
+        self.seeds.retain(|s| !in_arch(s.fdi, role));
+        note("seeds", self.seeds.len() != n);
+
+        let n = self.missing.len();
+        self.missing.retain(|f| !in_arch(*f, role));
+        note("missing", self.missing.len() != n);
+
+        let n = self.dirty.len();
+        self.dirty.retain(|f| !in_arch(*f, role));
+        let labels = self.labels.remove(&role).is_some();
+        note("labels", labels || self.dirty.len() != n);
+
+        note("tooth_frames", drop_teeth(&mut self.tooth_frames, role));
+        note("tooth_geometry", drop_teeth(&mut self.tooth_geometry, role));
+        note("crowns", drop_teeth(&mut self.crowns, role));
+        note("gingiva", self.gingiva.remove(&role).is_some());
+
+        // the score is the largest CAT-CAT score of the arches: it survives
+        // only when the other arch's details can account for it
+        let score_uses_arch = self.diagnosis.details.contains_key(&role)
+            || !self.diagnosis.details.contains_key(&other);
+        let space = self.diagnosis.arches.remove(&role).is_some();
+        let details = self.diagnosis.details.remove(&role).is_some();
+        note("diagnosis", space || details);
+        let bolton = self.diagnosis.bolton_anterior.take().is_some()
+            | self.diagnosis.bolton_overall.take().is_some();
+        note("bolton", bolton);
+        let score = score_uses_arch && self.diagnosis.complexity_score.take().is_some();
+        note("complexity", score);
+
+        let setup = &mut self.setup;
+        let n = (setup.locked.len(), setup.ipr.len());
+        setup.locked.retain(|f| !in_arch(*f, role));
+        setup
+            .ipr
+            .retain(|r| !r.between.iter().any(|f| in_arch(*f, role)));
+        let held = drop_teeth(&mut setup.poses, role)
+            | (n != (setup.locked.len(), setup.ipr.len()))
+            | setup.lines.remove(&role).is_some();
+        note("setup", held);
+
+        let mut held = false;
+        for s in &mut self.stages {
+            let n = s.ipr.len();
+            held |= drop_teeth(&mut s.poses, role);
+            s.ipr
+                .retain(|r| !r.between.iter().any(|f| in_arch(*f, role)));
+            held |= n != s.ipr.len();
+        }
+        self.stages
+            .retain(|s| !s.poses.is_empty() || !s.ipr.is_empty());
+        note("stages", held);
+
+        let ramps = &mut self.aligner_bite.ramps.ramps;
+        let n = ramps.len();
+        ramps.retain(|r| !in_arch(r.fdi, role) && r.kind != RampKind::Auto);
+        note("ramps", ramps.len() != n);
+
+        let n = self.visits.len();
+        self.visits.retain(|v| v.arch != role);
+        note("visits", self.visits.len() != n);
+
+        cleared
+    }
+}
+
 impl dc_case::ModuleData for AlignersState {
     fn schema_version(&self) -> u32 {
         SCHEMA_VERSION
@@ -229,6 +373,19 @@ impl dc_case::ModuleData for AlignersState {
             .chain(self.visits.iter().filter_map(|v| v.scan.as_ref()))
             .copied()
             .collect()
+    }
+
+    /// Clears what was computed from the replaced scan, see
+    /// [`AlignersState::clear_arch`] for the ids and what is kept.
+    ///
+    /// A replaced bite scan clears nothing and returns no id. Bite
+    /// registration moves an arch and bakes the move into that arch's scan
+    /// mesh (`move_arch`), so replacing the bite or an arch does not undo the
+    /// move already applied to the other arch: the other arch stays exactly
+    /// as it is, and the ids returned are only the groups that were really
+    /// cleared. This is not a reset to the imported situation.
+    fn scan_replaced(&mut self, role: ScanRole) -> Vec<&'static str> {
+        self.clear_arch(role)
     }
 }
 
