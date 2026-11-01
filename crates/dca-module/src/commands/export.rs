@@ -177,6 +177,8 @@ struct MeshChoice {
     stamp: bool,
     stamp_code: String,
     date: schedule::Date,
+    /// Stops the building of the meshes between their steps.
+    cancel: dc_command::CancelToken,
 }
 
 /// The source of the printable meshes of every stage, its name for the
@@ -217,6 +219,7 @@ fn mesh_provider<'a>(
         stamp: choice.stamp,
         stamp_code: choice.stamp_code.clone(),
         date: choice.date,
+        cancel: choice.cancel.clone(),
     };
     match shells::ShellProvider::new(state, data, input, options)? {
         Ok(p) => {
@@ -248,6 +251,7 @@ fn export_date(generated: Option<&str>) -> Result<schedule::Date, CommandError> 
 
 fn export_error(e: export::ExportError) -> CommandError {
     match e {
+        export::ExportError::Cancelled => CommandError::Cancelled,
         export::ExportError::Io { .. }
         | export::ExportError::Mesh(_)
         | export::ExportError::Package(_) => CommandError::Failed(e.to_string()),
@@ -348,6 +352,7 @@ fn run_report(
         stamp: params.stamp,
         stamp_code: params.stamp_code.clone(),
         date: export_date(params.generated.as_deref())?,
+        cancel: ctx.cancel_token().clone(),
     };
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
     let case = CaseInfo {
@@ -355,7 +360,12 @@ fn run_report(
         notes,
         ..case
     };
-    let report = package::run(&input, &case, provider.as_ref(), &params).map_err(export_error)?;
+    let control = package::Control {
+        cancelled: &|| ctx.is_cancelled(),
+        progress: &|f| ctx.set_fraction(f),
+    };
+    let report = package::run_cancellable(&input, &case, provider.as_ref(), &params, &control)
+        .map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
     Ok((state.clone(), out))
 }
@@ -414,6 +424,7 @@ fn run_print_check(
         stamp: false,
         stamp_code: String::new(),
         date: schedule::Date::today(),
+        cancel: ctx.cancel_token().clone(),
     };
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
     let options = CheckOptions {

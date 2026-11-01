@@ -78,6 +78,8 @@ pub(crate) struct Options {
     pub stamp_code: String,
     /// Date of the stamp (the day of the export).
     pub date: Date,
+    /// Stops the build of a mesh at the end of its current step.
+    pub cancel: dc_command::CancelToken,
 }
 
 /// The models and the aligners of every stage from the shell stage.
@@ -421,11 +423,24 @@ fn ramp_boxes(ramps: &[TriMesh], reach: f64) -> Vec<(DVec3, DVec3)> {
         .collect()
 }
 
+impl ShellProvider<'_> {
+    /// `Err(Cancelled)` once the export was stopped: asked between the steps
+    /// of a mesh, so a stop does not wait for the whole mesh.
+    fn stop(&self) -> Result<(), ExportError> {
+        if self.options.cancel.is_cancelled() {
+            Err(ExportError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl MeshProvider for ShellProvider<'_> {
     fn model(&self, arch: Arch, k: u32) -> Result<Option<TriMesh>, ExportError> {
         let Some(print) = self.prints.get(&arch) else {
             return Ok(None);
         };
+        self.stop()?;
         let g = print.stage(&self.data.stages, k);
         let outputs = Outputs {
             model: true,
@@ -436,6 +451,7 @@ impl MeshProvider for ShellProvider<'_> {
         // coordinates, the deviation rule of the plugin)
         let out = shell::run(&print.input(&g), &self.params, &self.design, outputs)
             .map_err(|e| package("model", arch, k, e))?;
+        self.stop()?;
         let Some(model) = out.model else {
             return Ok(None);
         };
@@ -468,6 +484,7 @@ impl MeshProvider for ShellProvider<'_> {
         let Some(print) = self.prints.get(&arch) else {
             return Ok(None);
         };
+        self.stop()?;
         let g = print.stage(&self.data.stages, k);
         let to_arch = print.to_arch();
         let from_arch = dca_algo::frame::rigid_inverse(&to_arch);
@@ -489,7 +506,9 @@ impl MeshProvider for ShellProvider<'_> {
         )
         .map_err(|e| err("shell", &e))?;
         drop(parts);
+        self.stop()?;
         let mut field = shell::shell_grid(&closed, &self.design).map_err(|e| err("shell", &e))?;
+        self.stop()?;
         let teeth: Vec<TriMesh> = g.teeth.iter().map(|t| rigid(&to_arch, t)).collect();
 
         // the ramps, on the field (arch coordinates of the bite → of the shell)
@@ -545,6 +564,7 @@ impl MeshProvider for ShellProvider<'_> {
             .map(|(c, _)| c);
         }
         drop(closed);
+        self.stop()?;
 
         // the trim
         let Some(tp) = self.trim_parts(arch, &g, &to_arch, &teeth) else {
@@ -563,6 +583,7 @@ impl MeshProvider for ShellProvider<'_> {
         };
         let done = trim::run(&input, &self.trim).map_err(|e| err("trim", &e))?;
         drop(field);
+        self.stop()?;
         if done.fallback {
             self.note(
                 arch,
