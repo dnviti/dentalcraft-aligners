@@ -46,7 +46,7 @@ def plugin_step(pl, i):
 def dc_step(dc, i):
     s = dc['steps'][i]
     if not s['ok']:
-        e = s['stderr']; e = re.sub(r'^error: --cmd \d+ \(case.import\): case.import: failed: ', '', e)
+        e = s['stderr']; e = re.sub(r'^error: --cmd \d+ \([a-z.-]+\): [a-z.-]+: failed: ', '', e)
         return {'ok': False, 'text': f'ERR [{e[:170]}]'}
     o = s['output']
     sc = [x for x in dc['scans'] if x['id'] == o['scan_id']]
@@ -58,6 +58,8 @@ def dc_step(dc, i):
     else:
         d = {'ok': True, 'text': t + f" (scan replaced later) {o['role']}", 'o': o, 'role': o['role'], 'aabb': None, 'f': UNIT_F[o['source_units']]}
     if o.get('replaced'): d['text'] += ' REPLACED-existing'
+    d['warn'] = [w['code'] for w in o.get('warnings', [])]
+    if d['warn']: d['text'] += ' | warn: ' + ','.join(d['warn'])
     return d
 
 rows = []
@@ -91,6 +93,7 @@ for c in cases:
                 else:
                     diffs.append(f"step{i+1}: world bbox differs")
             if abs(p['f'] - d['f']) > 1e-9: diffs.append(f"step{i+1}: unit factor {p['f']:g} vs {d['f']:g}")
+            if abs(p['f'] - d['f']) <= 1e-9 and ('rescaled' in d['warn']) != (p['f'] != 1.0): diffs.append(f"step{i+1}: rescaled warning {'rescaled' in d['warn']} vs INFO riscalato {p['f'] != 1.0}")
         want = {'UPPER': 'upper', 'LOWER': 'lower'}[o['arch']]
         if g in ('C', 'E', 'R') and want != d['role']: diffs.append(f"step{i+1}: role/arch {o['arch']} vs {d['role']}")
         if len(p['objs']) > 1: diffs.append(f"step{i+1}: plugin leaves {len(p['objs'])-1} extra unprocessed mesh object(s)")
