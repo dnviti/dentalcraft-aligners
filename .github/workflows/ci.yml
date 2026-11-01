@@ -18,6 +18,8 @@ jobs:
     # Every step after checkout is skipped until the workspace has a
     # Cargo.toml, so the first pushes of the empty scaffold are green.
     runs-on: golgari-dev
+    # The runner is shared by every repository: a stuck job must not hold it.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - name: Install C toolchain
@@ -62,6 +64,11 @@ jobs:
       - name: Clippy
         if: hashFiles('Cargo.toml') != ''
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The geometry tests are too slow unoptimised on two CPUs: the release profile,
+      # with the checks of the dev profile kept on.
       - name: Tests
         if: hashFiles('Cargo.toml') != ''
-        run: cargo test --workspace
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
+        run: cargo test --workspace --release
