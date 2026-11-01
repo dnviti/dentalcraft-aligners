@@ -40,7 +40,7 @@ mod dp;
 mod nearest;
 mod numpy;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use dc_case::{Fdi, Pose};
 use dca_model::Seed;
@@ -116,33 +116,6 @@ pub const WILSON_MIN: f64 = 0.3;
 /// mm: buccal molar cusps this much higher overrule an apparent palate (the
 /// closed base of a lower plaster model).
 pub const WILSON_OVER_PALATE: f64 = 0.6;
-/// Arch names written by the scanner software in the file name.
-pub const UPPER_WORDS: [&str; 11] = [
-    "upper",
-    "maxilla",
-    "maxillary",
-    "maxillare",
-    "mascellare",
-    "superiore",
-    "superior",
-    "sup",
-    "oberkiefer",
-    "upperjaw",
-    "arcatasuperiore",
-];
-/// See [`UPPER_WORDS`].
-pub const LOWER_WORDS: [&str; 10] = [
-    "lower",
-    "mandible",
-    "mandibular",
-    "mandibolare",
-    "inferiore",
-    "inferior",
-    "inf",
-    "unterkiefer",
-    "lowerjaw",
-    "arcatainferiore",
-];
 /// Depth of the band of crown tops below the highest point (mm).
 pub const BAND_DEPTH: f64 = 6.0;
 /// Bin size of the profiles along the arch (mm).
@@ -1197,31 +1170,9 @@ pub fn palate_coverage(
 /// Arch written in the file name (`..._UpperJaw.stl`, `mandibular`,
 /// `arcata_superiore`...), as exported by the intraoral scanners.
 pub fn arch_from_name(name: &str) -> Option<Arch> {
-    // camelCase boundaries become separators
-    let mut s = String::with_capacity(name.len() + 8);
-    let mut prev: Option<char> = None;
-    for ch in name.chars() {
-        if prev.is_some_and(|p| p.is_ascii_lowercase()) && ch.is_ascii_uppercase() {
-            s.push(' ');
-        }
-        s.push(ch);
-        prev = Some(ch);
-    }
-    let lower = s.to_lowercase();
-    let toks: BTreeSet<&str> = lower
-        .split(|c: char| !c.is_ascii_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let joined: String = lower.chars().filter(|c| c.is_ascii_lowercase()).collect();
-    let up = UPPER_WORDS.iter().any(|w| toks.contains(w))
-        || joined.contains("upperjaw")
-        || joined.contains("maxill");
-    let lo = LOWER_WORDS.iter().any(|w| toks.contains(w))
-        || joined.contains("lowerjaw")
-        || joined.contains("mandib");
-    match (up, lo) {
-        (true, false) => Some(Arch::Upper),
-        (false, true) => Some(Arch::Lower),
+    match dc_case::arch_hint(name) {
+        Some(dc_case::ScanRole::Upper) => Some(Arch::Upper),
+        Some(dc_case::ScanRole::Lower) => Some(Arch::Lower),
         _ => None,
     }
 }
