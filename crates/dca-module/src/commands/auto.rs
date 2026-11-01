@@ -30,7 +30,8 @@
 //! and the case is left as it was (the command is one undoable change). The
 //! output lists every step with its seconds and its output.
 //!
-//! It is not a menu leaf: the app runs the stages one by one.
+//! The menu leaf "Run everything automatically" runs it with no parameters.
+//! The other leaves run the stages one at a time.
 
 use std::time::Instant;
 
@@ -45,12 +46,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::import::DETECT_ARCH;
+use super::messages;
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.auto",
-        label: "aligners-cmd-auto",
+        label: "aligners-menu-auto",
         doc: "aligners-cmd-auto-doc",
         params: Params,
         run: run_auto,
@@ -94,7 +96,7 @@ pub struct Params {
     /// Put the print files of the shell stage in the export (printable
     /// models and trimmed aligners; implies `full_report`).
     pub shells: bool,
-    /// Quality of those files (voxel and mesh tolerance).
+    /// Quality of those files (detail and surface tolerance).
     pub quality: Quality,
 }
 
@@ -116,13 +118,13 @@ impl Default for Params {
 }
 
 /// One step of the pipeline: a command and its parameters.
-struct Step {
-    id: &'static str,
+pub(super) struct Step {
+    pub(super) id: &'static str,
     params: Value,
 }
 
 impl Step {
-    fn new(id: &'static str, params: Value) -> Self {
+    pub(super) fn new(id: &'static str, params: Value) -> Self {
         Self { id, params }
     }
 }
@@ -155,10 +157,10 @@ fn numbering(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandErr
             Seeds::All => true,
             Seeds::Missing => !has,
             Seeds::Keep if !has => {
-                return Err(CommandError::Invalid(format!(
-                    "aligners.auto: the {} arch has no seeds (seeds: keep): place them or use seeds: missing",
-                    arch_name(arch)
-                )));
+                return Err(messages::invalid(
+                    "aligners-err-auto-keep-seeds",
+                    &[("arch", &messages::arch_word(arch))],
+                ));
             }
             Seeds::Keep => false,
         };
@@ -236,23 +238,25 @@ fn plan(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandError> {
     Ok(steps)
 }
 
-/// Runs one step on `state`; the error names it.
-fn run_step(
+/// Runs one step on `state`; the error names it by its label, in the words
+/// the user sees.
+pub(super) fn run_step(
     state: &CaseState,
     step: &Step,
     k: usize,
     ctx: &JobCtx,
 ) -> Result<(CaseState, Value), CommandError> {
-    let spec = crate::commands::find(step.id).ok_or_else(|| {
-        CommandError::Failed(format!(
-            "aligners.auto: the step {} is not registered",
-            step.id
-        ))
-    })?;
+    let spec = crate::commands::find(step.id)
+        .ok_or_else(|| CommandError::Failed(format!("the step {} is not registered", step.id)))?;
     ctx.check_cancelled()?;
     let t0 = Instant::now();
     let (next, out) = spec.execute(state, &step.params, ctx).map_err(|e| {
-        let at = |m: String| format!("aligners.auto stopped at step {k} ({}): {m}", step.id);
+        let at = |m: String| {
+            messages::tr(
+                "aligners-err-stopped-at",
+                &[("step", &messages::tr(spec.label_key, &[])), ("reason", &m)],
+            )
+        };
         match e {
             CommandError::Cancelled => CommandError::Cancelled,
             CommandError::Invalid(m) => CommandError::Invalid(at(m)),
@@ -277,9 +281,7 @@ fn run_auto(
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
     if arches(state).is_empty() {
-        return Err(CommandError::Invalid(
-            "aligners.auto: the case has no upper or lower scan: import one (case.import) or run aligners.demo".to_owned(),
-        ));
+        return Err(messages::invalid("aligners-arch-error-no-scan", &[]));
     }
     let t0 = Instant::now();
     let arch_step = Step::new(DETECT_ARCH, Value::Null);
@@ -314,11 +316,44 @@ mod tests {
     }
 
     #[test]
-    fn it_is_registered_and_not_a_menu_leaf() {
+    fn it_is_registered_and_a_menu_leaf_that_is_not_a_step() {
         let spec = crate::commands::find("aligners.auto").unwrap();
         let schema = spec.schema();
         assert!(schema["properties"]["export_dir"].is_object(), "{schema}");
-        assert!(crate::tree::find("aligners.auto").is_none());
+        let leaf = crate::tree::find("aligners.auto").unwrap();
+        assert!(leaf.is_leaf() && !leaf.counts_as_step);
+    }
+
+    #[test]
+    fn a_click_on_a_guessed_arch_stops_with_the_advice_and_no_command_id() {
+        // a scan the geometry cannot place: it stays a guess, and from a click
+        // (no parameters) the run stops at it and says what to do
+        let mut s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({"arch": "lower"}),
+        )
+        .unwrap()
+        .0;
+        s.case.scans[0].role_source = dc_case::RoleSource::Provisional;
+        s.case.scans[0].source_name = "scan.stl".to_owned();
+        let tiny = dc_mesh::TriMesh::new(
+            vec![
+                glam::Vec3::ZERO,
+                glam::Vec3::X,
+                glam::Vec3::Y,
+                glam::Vec3::Z,
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        );
+        let blob = s.blobs.insert(tiny);
+        s.case.scans[0].mesh = blob;
+        let m = exec("aligners.auto", &s, Value::Null)
+            .unwrap_err()
+            .to_string();
+        assert!(m.contains("Stopped at Arch recognition"), "{m}");
+        assert!(m.contains("scan.stl"), "{m}");
+        assert!(!m.contains("aligners."), "{m}");
     }
 
     #[test]
@@ -337,7 +372,9 @@ mod tests {
         data.seeds.clear();
         s.set_module(MODULE_ID, dc_case::ModuleState::new(data));
         let err = exec("aligners.auto", &s, json!({"seeds": "keep"})).unwrap_err();
-        assert!(matches!(err, CommandError::Invalid(m) if m.contains("lower arch has no seeds")));
+        assert!(
+            matches!(err, CommandError::Invalid(m) if m.contains("lower arch has no tooth marks"))
+        );
         // unknown parameter values are refused
         let err = exec(
             "aligners.auto",
@@ -391,7 +428,7 @@ mod tests {
         );
         // and so does the command, which stops at the plan and not at the start
         let err = exec("aligners.auto", &s, json!({"seeds": "keep"})).unwrap_err();
-        assert!(matches!(err, CommandError::Invalid(m) if m.contains("arch has no seeds")));
+        assert!(matches!(err, CommandError::Invalid(m) if m.contains("arch has no tooth marks")));
     }
 
     #[test]

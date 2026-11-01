@@ -171,10 +171,7 @@ fn run_study_models(
         let role = arch.role();
         let (Some(scan), Some(lab)) = (state.case.scan(role), data.labels.get(&role)) else {
             if explicit {
-                return Err(CommandError::Invalid(format!(
-                    "the {} arch has no scan or no tooth labels: import it and run the segmentation first",
-                    if arch.is_upper() { "upper" } else { "lower" }
-                )));
+                return Err(super::messages::not_segmented(arch));
             }
             continue;
         };
@@ -184,7 +181,7 @@ fn run_study_models(
             .require(lab)?
             .vertex_labels
             .clone()
-            .ok_or_else(|| CommandError::Invalid("the label blob has no vertex labels".into()))?;
+            .ok_or_else(super::messages::tooth_labels_missing)?;
         let v: Vec<_> = mesh.positions.iter().map(|q| q.as_dvec3()).collect();
         let framed = frame::run(
             &frame::Input {
@@ -203,10 +200,7 @@ fn run_study_models(
         });
     }
     if loaded.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has a scan with tooth labels: import the scans and run the segmentation first"
-                .to_owned(),
-        ));
+        return Err(super::messages::none_segmented());
     }
     let arch_input = |want: Arch| {
         loaded.iter().find(|l| l.arch == want).map(|l| ArchInput {

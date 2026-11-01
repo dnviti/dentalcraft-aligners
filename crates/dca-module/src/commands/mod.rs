@@ -8,8 +8,10 @@
 //!
 //! The registry also drives the menu: a menu leaf is `Ready` if and only if
 //! a command with the leaf's id is registered here, `Stub` otherwise (see
-//! [`crate::tree::Node::status`]). Commands that are not menu leaves (e.g. a
-//! whole-pipeline `aligners.auto`) are allowed.
+//! [`crate::tree::Node::status`]). Most commands are not menu leaves: the
+//! menu holds what the end user needs, and every command stays here, listed
+//! and run by the CLI and the MCP server. A command that is not a leaf has
+//! its own `aligners-cmd-<stage>-<name>` label.
 //!
 //! Adding a command to a stage:
 //!
@@ -87,7 +89,7 @@ mod frame;
 mod gingiva;
 pub mod import;
 mod manual;
-mod messages;
+pub(crate) mod messages;
 mod occlusion;
 mod ramps;
 mod reconstruct;
@@ -101,6 +103,7 @@ pub(crate) mod study_base;
 mod teeth;
 mod trim;
 mod visits;
+pub(crate) mod wrappers;
 
 /// Every registered command, stage by stage in pipeline order.
 pub fn all() -> Vec<CommandSpec> {
@@ -127,6 +130,7 @@ pub fn all() -> Vec<CommandSpec> {
         study_base::specs,
         visits::specs,
         manual::specs,
+        wrappers::specs,
         auto::specs,
     ]
     .iter()

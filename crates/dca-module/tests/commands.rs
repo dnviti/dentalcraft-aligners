@@ -65,6 +65,70 @@ fn descendants(node: &'static tree::Node) -> impl Iterator<Item = &'static tree:
     })
 }
 
+/// The commands that left the menu: CLI and MCP only, ids unchanged.
+const OUT_OF_THE_MENU: &[&str] = &[
+    "aligners.frame",
+    "aligners.demo",
+    "aligners.case.detect-arch",
+    "aligners.preparation.orientation.automatic",
+    "aligners.teeth.frames",
+    "aligners.preparation.reconstruction.automatic",
+    "aligners.preparation.reconstruction.rebuild-tooth",
+    "aligners.manual.rebuild-tooth",
+    "aligners.preparation.gingiva",
+    "aligners.diagnosis.little-index",
+    "aligners.diagnosis.bolton",
+    "aligners.diagnosis.complexity",
+    "aligners.planning.staging.automatic",
+    "aligners.planning.schedule",
+    "aligners.occlusion.virtual-bite",
+    "aligners.occlusion.bite-registration.icp",
+    "aligners.occlusion.bite-registration.three-points",
+    "aligners.occlusion.contact-map",
+    "aligners.occlusion.bite-with-aligners",
+    "aligners.occlusion.bite-ramps",
+    "aligners.production.base-labels",
+    "aligners.production.shell.automatic",
+    "aligners.production.blockout",
+    "aligners.production.trim-line",
+    "aligners.production.stamp",
+    "aligners.output.export-stl",
+    "aligners.output.print-check",
+    "aligners.output.manifest",
+    "aligners.output.report",
+    "aligners.settings.study-models",
+];
+
+#[test]
+fn what_left_the_menu_stays_registered_with_its_own_label() {
+    let en = ftl_ids(Lang::En);
+    for id in OUT_OF_THE_MENU {
+        let spec = commands::find(id).unwrap_or_else(|| panic!("{id} is not registered"));
+        assert!(tree::find(id).is_none(), "{id} is in the menu");
+        assert!(
+            spec.label_key.starts_with("aligners-cmd-"),
+            "{id}: {}",
+            spec.label_key
+        );
+        assert!(en.contains(spec.label_key), "{id}");
+    }
+    // every command is a leaf of the menu or one of these: nothing is lost
+    let leaves = tree::leaves();
+    assert_eq!(
+        commands::all().len(),
+        leaves.len() + OUT_OF_THE_MENU.len(),
+        "a command is neither in the menu nor in OUT_OF_THE_MENU"
+    );
+}
+
+#[test]
+fn a_leaf_and_its_command_have_the_same_label() {
+    for leaf in tree::leaves() {
+        let spec = commands::find(leaf.id).unwrap_or_else(|| panic!("{} has no command", leaf.id));
+        assert_eq!(spec.label_key, leaf.label_key, "{}", leaf.id);
+    }
+}
+
 #[test]
 fn registered_commands_are_unique_documented_and_have_a_schema() {
     let en = ftl_ids(Lang::En);

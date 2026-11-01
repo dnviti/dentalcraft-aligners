@@ -147,15 +147,15 @@ pub struct Params {
     /// Internal clearance between model and shell (mm); default the case
     /// setting.
     pub clearance_mm: Option<f64>,
-    /// Voxel of the model and blockout fields (mm).
+    /// Detail of the model and of the blockout (mm).
     pub model_voxel_mm: f64,
-    /// Voxel of the shell field (mm).
+    /// Detail of the shell (mm).
     pub shell_voxel_mm: f64,
     /// Crevices narrower than twice this are filled (mm).
     pub blockout_mm: f64,
     /// Height of the flat base below the lowest gingiva (mm).
     pub base_height_mm: f64,
-    /// Mesh tolerance of the outputs (mm); `0` keeps the full resolution.
+    /// Surface tolerance of the outputs (mm); `0` keeps the full resolution.
     pub tolerance_mm: f64,
     /// Insertion direction of the aligner in arch coordinates (the blockout
     /// fills what is hidden from it); default occlusal `+Z`.

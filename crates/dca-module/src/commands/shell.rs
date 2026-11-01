@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use super::messages;
 use dc_case::{CaseState, Fdi, Pose, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
@@ -34,14 +35,14 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.production.shell.automatic",
-            label: "aligners-menu-production-shell-automatic",
+            label: "aligners-cmd-shell-automatic",
             doc: "aligners-cmd-shell-automatic-doc",
             params: dca_algo::shell::Params,
             run: run_shell,
         },
         stage_command! {
             id: "aligners.production.base-labels",
-            label: "aligners-menu-production-base-labels",
+            label: "aligners-cmd-shell-model",
             doc: "aligners-cmd-shell-model-doc",
             params: dca_algo::shell::Params,
             run: run_model,
@@ -317,19 +318,16 @@ fn run_print(
                 work.push((p, ks));
             }
             None if explicit => {
-                return Err(CommandError::Invalid(format!(
-                    "the {} arch has no closed teeth or gingiva: run the reconstruction and the gingiva first",
-                    arch_name(arch)
-                )));
+                return Err(messages::invalid(
+                    "aligners-err-no-3d-teeth",
+                    &[("arch", &messages::arch_word(arch))],
+                ));
             }
             None => {}
         }
     }
     if work.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has closed teeth and gingiva: run the reconstruction and the gingiva first"
-                .to_owned(),
-        ));
+        return Err(messages::invalid("aligners-err-none-3d-teeth", &[]));
     }
     let total: usize = work.iter().map(|(_, ks)| ks.len()).sum();
     let mut done = 0usize;
@@ -404,13 +402,13 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_are_registered_and_two_are_menu_leaves() {
+    fn the_commands_are_registered() {
         for id in [
             "aligners.production.shell.automatic",
             "aligners.production.base-labels",
         ] {
             assert!(crate::commands::is_registered(id));
-            assert!(crate::tree::find(id).is_some(), "{id} is a menu leaf");
+            assert!(crate::commands::is_registered(id), "{id}");
         }
         assert!(crate::commands::is_registered(
             "aligners.production.blockout"
@@ -440,7 +438,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, CommandError::Invalid(ref m) if m.contains("reconstruction")),
+            matches!(err, CommandError::Invalid(ref m) if m.contains("3D teeth")),
             "{err:?}"
         );
         assert!(matches!(

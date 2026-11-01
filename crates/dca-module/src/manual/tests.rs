@@ -395,7 +395,7 @@ fn cleaning_removes_islands_and_the_hole_in_a_crown() {
     let (same, out) = ok(CLEAN, &state, json!({ "rings": 0 }));
     assert_eq!(out["lower"]["changed_vertices"], 0);
     assert_eq!(al(&same).labels, al(&state).labels);
-    assert!(invalid(exec(CLEAN, &CaseState::default(), Value::Null)).contains("segment"));
+    assert!(invalid(exec(CLEAN, &CaseState::default(), Value::Null)).contains("tooth colours"));
 }
 
 // ---- tooth numbers ------------------------------------------------------------------------------------------
@@ -657,10 +657,11 @@ fn seeds_are_added_moved_and_deleted() {
             &deleted,
             json!({ "op": "move", "fdi": 36, "position": [0.0, 0.0, 0.0] })
         ))
-        .contains("no seed")
+        .contains("no tooth mark")
     );
     assert!(
-        invalid(exec(SEEDS, &deleted, json!({ "op": "delete", "fdi": 36 }))).contains("no seed")
+        invalid(exec(SEEDS, &deleted, json!({ "op": "delete", "fdi": 36 })))
+            .contains("no tooth mark")
     );
     assert!(invalid(exec(SEEDS, &state, json!({ "op": "move", "fdi": 36 }))).contains("position"));
     assert!(
@@ -801,7 +802,7 @@ fn adjusting_a_tooth_updates_its_pose_in_the_clinical_frame() {
             &demo(),
             json!({ "fdi": 33, "mesial_mm": 1.0 })
         ))
-        .contains("no frame")
+        .contains("is not measured")
     );
     assert!(
         invalid(exec(

@@ -40,7 +40,7 @@ use super::staging::{aligners_data, arch_name, labelled_scan};
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.production.trim-line",
-        label: "aligners-menu-production-trim-line",
+        label: "aligners-cmd-trim-line",
         doc: "aligners-cmd-trim-line-doc",
         params: TrimLineParams,
         run: run_trim_line,
@@ -77,7 +77,7 @@ pub(crate) struct TrimLineParams {
     thickness_mm: Option<f64>,
     /// Internal clearance (mm).
     clearance_mm: Option<f64>,
-    /// Voxel of the shell field (mm).
+    /// Detail of the shell (mm).
     voxel_mm: f64,
     /// Crevices narrower than twice this are filled before the shell (mm).
     blockout_mm: f64,
@@ -320,13 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn the_trim_line_leaf_is_registered() {
+    fn the_trim_line_is_registered_for_the_cli() {
         let spec = crate::commands::find("aligners.production.trim-line").unwrap();
         assert!(spec.schema()["properties"]["mode"].is_object());
-        assert!(crate::tree::find("aligners.production.trim-line").is_some());
+        assert!(crate::tree::find("aligners.production.trim-line").is_none());
         assert!(matches!(
             exec("aligners.production.trim-line", &CaseState::default(), Value::Null),
-            Err(CommandError::Invalid(m)) if m.contains("segmented")
+            Err(CommandError::Invalid(m)) if m.contains("tooth colours")
         ));
     }
 

@@ -52,6 +52,7 @@ use dca_model::AlignersState;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use super::messages;
 use super::staging::{LabelledScan, aligners_data, labelled_scan, md_sign};
 
 /// The registered commands of this stage, built with `stage_command!`.
@@ -59,28 +60,28 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.output.export-stl",
-            label: "aligners-menu-output-export-stl",
+            label: "aligners-cmd-export",
             doc: "aligners-cmd-export-doc",
             params: dca_algo::export::Params,
             run: run_export,
         },
         stage_command! {
             id: "aligners.output.print-check",
-            label: "aligners-menu-output-print-check",
+            label: "aligners-cmd-print-check",
             doc: "aligners-cmd-print-check-doc",
             params: PrintCheckParams,
             run: run_print_check,
         },
         stage_command! {
             id: "aligners.output.manifest",
-            label: "aligners-menu-output-manifest",
+            label: "aligners-cmd-manifest",
             doc: "aligners-cmd-manifest-doc",
             params: ManifestParams,
             run: run_manifest,
         },
         stage_command! {
             id: "aligners.output.report",
-            label: "aligners-menu-output-report",
+            label: "aligners-cmd-report",
             doc: "aligners-cmd-report-doc",
             params: FullParams,
             run: run_report,
@@ -101,9 +102,7 @@ struct ArchData {
 /// are none.
 fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, CommandError> {
     if data.stages.is_empty() {
-        return Err(CommandError::Invalid(
-            "there are no aligners yet: run the staging first".to_owned(),
-        ));
+        return Err(messages::invalid("aligners-err-no-aligners", &[]));
     }
     let mut out = Vec::new();
     for arch in [Arch::Upper, Arch::Lower] {
@@ -147,9 +146,7 @@ fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, Com
         }
     }
     if out.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch with aligners has a segmented scan".to_owned(),
-        ));
+        return Err(messages::none_segmented());
     }
     Ok(out)
 }
@@ -229,15 +226,13 @@ fn mesh_provider<'a>(
                 aligner: false,
                 key: "rpt-note-shells",
                 detail: format!(
-                    "voxel {voxel} mm, tolerance {} mm",
+                    "resolution {voxel} mm, tolerance {} mm",
                     choice.quality.tolerance_mm()
                 ),
             };
             Ok((Box::new(p), "shells", vec![note]))
         }
-        Err(why) if choice.shells == Some(true) => {
-            Err(CommandError::Invalid(format!("shells: true, but {why}")))
-        }
+        Err(why) if choice.shells == Some(true) => Err(CommandError::Invalid(why)),
         Err(why) => Ok(scans(why)),
     }
 }
@@ -268,9 +263,7 @@ fn run_export(
     ctx.check_cancelled()?;
     let data = aligners_data(state)?;
     if data.stages.is_empty() {
-        return Err(CommandError::Invalid(
-            "there are no aligners yet: run the staging first".to_owned(),
-        ));
+        return Err(messages::invalid("aligners-err-no-aligners", &[]));
     }
     if params.dir.trim().is_empty() {
         return Err(CommandError::Invalid(
@@ -380,12 +373,12 @@ pub struct PrintCheckParams {
     pub self_intersections: bool,
     /// Build volume of the printer `[x, y, z]` (mm); `null` skips the fit.
     pub build_plate_mm: Option<[f64; 3]>,
-    /// Meshes from the shell stage (models and aligners): `null` when the
+    /// Files from the shell stage (models and aligners): `null` when the
     /// case has the closed teeth and the gingiva, `false` the scans.
     pub shells: Option<bool>,
-    /// Quality of the shell-stage meshes.
+    /// Quality of the shell-stage files.
     pub quality: Quality,
-    /// Voxel of the fields (mm), instead of the quality's.
+    /// Detail of the models and shells (mm), instead of the quality's.
     pub voxel_mm: Option<f64>,
     /// Thinnest wall allowed in an aligner (mm); `null` skips the thickness.
     pub min_thickness_mm: Option<f64>,
@@ -563,10 +556,10 @@ mod tests {
     }
 
     #[test]
-    fn the_command_is_registered_as_the_menu_leaf() {
+    fn the_command_is_registered_for_the_cli_and_not_in_the_menu() {
         let spec = crate::commands::find("aligners.output.export-stl").unwrap();
         assert!(spec.schema()["properties"]["dir"].is_object());
-        assert!(crate::tree::find("aligners.output.export-stl").is_some());
+        assert!(crate::tree::find("aligners.output.export-stl").is_none());
     }
 
     #[test]
@@ -577,7 +570,7 @@ mod tests {
             json!({"dir": "x"}),
         )
         .unwrap_err();
-        assert!(matches!(err, CommandError::Invalid(m) if m.contains("staging")));
+        assert!(matches!(err, CommandError::Invalid(m) if m.contains("no aligners")));
         let s = super::super::staging::tests::staged_input("lower", &CaseState::default());
         let (s, _) = exec("aligners.planning.staging.automatic", &s, Value::Null).unwrap();
         let err = exec("aligners.output.export-stl", &s, Value::Null).unwrap_err();
@@ -678,14 +671,13 @@ mod tests {
     }
 
     #[test]
-    fn the_export_leaves_are_registered() {
+    fn the_export_commands_are_registered() {
         for id in [
             "aligners.output.report",
             "aligners.output.print-check",
             "aligners.output.manifest",
         ] {
             assert!(crate::commands::find(id).is_some(), "{id}");
-            assert!(crate::tree::find(id).is_some(), "{id}");
         }
         let schema = crate::commands::find("aligners.output.report")
             .unwrap()
@@ -795,7 +787,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, CommandError::Invalid(ref m) if m.contains("reconstruction")),
+            matches!(err, CommandError::Invalid(ref m) if m.contains("3D teeth")),
             "{err:?}"
         );
         let err = exec(
@@ -882,7 +874,7 @@ mod tests {
             json!({"dir": "x"}),
         )
         .unwrap_err();
-        assert!(matches!(err, CommandError::Invalid(m) if m.contains("staging")));
+        assert!(matches!(err, CommandError::Invalid(m) if m.contains("no aligners")));
         let s = staged_both();
         let err = exec("aligners.output.report", &s, Value::Null).unwrap_err();
         assert!(matches!(err, CommandError::Invalid(m) if m.contains("dir")));

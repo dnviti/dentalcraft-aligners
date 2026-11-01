@@ -148,9 +148,9 @@ impl<'a> ShellProvider<'a> {
                     prints.insert(s.arch, p);
                 }
                 None => {
-                    let a = if s.arch.is_upper() { "upper" } else { "lower" };
-                    return Ok(Err(format!(
-                        "the {a} arch has no closed teeth or no gingiva (run the reconstruction and the gingiva)"
+                    return Ok(Err(super::messages::tr(
+                        "aligners-err-no-3d-teeth",
+                        &[("arch", &super::messages::arch_word(s.arch))],
                     )));
                 }
             }

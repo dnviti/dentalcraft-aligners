@@ -136,9 +136,9 @@ pub struct Params {
     pub eu_heels: bool,
     /// Reach of the protected gingiva around the teeth, plan (mm).
     pub sulcus_reach_mm: f64,
-    /// Voxel of the solid (mm).
+    /// Detail of the solid (mm).
     pub voxel_mm: f64,
-    /// Mesh tolerance of the output (mm); `0` keeps the full resolution.
+    /// Surface tolerance of the output (mm); `0` keeps the full resolution.
     pub tolerance_mm: f64,
 }
 

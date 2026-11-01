@@ -12,12 +12,12 @@ use crate::schedule::Lang;
 /// `(key, English, Italian)`.
 static TABLE: &[(&str, &str, &str)] = &[
     // ---- print check ----
-    ("chk-empty", "empty mesh", "mesh vuota"),
+    ("chk-empty", "empty file", "file vuoto"),
     ("chk-boundary", "{0} open edges", "{0} spigoli aperti"),
     (
         "chk-nonmanifold",
-        "{0} non-manifold edges",
-        "{0} spigoli non-manifold",
+        "{0} edges not joined properly",
+        "{0} spigoli non uniti correttamente",
     ),
     (
         "chk-flipped",
@@ -369,7 +369,11 @@ static TABLE: &[(&str, &str, &str)] = &[
     ("rpt-file", "File", "File"),
     ("rpt-kind", "Type", "Tipo"),
     ("rpt-bytes", "Bytes", "Byte"),
-    ("rpt-hash", "BLAKE3 (first 16)", "BLAKE3 (primi 16)"),
+    (
+        "rpt-hash",
+        "Checksum (first 16)",
+        "Codice di controllo (primi 16)",
+    ),
     ("rpt-printcheck", "Print check", "Controllo di stampabilita"),
     (
         "rpt-no-printcheck",
@@ -393,8 +397,8 @@ static TABLE: &[(&str, &str, &str)] = &[
     ("rpt-methods", "Calculation methods", "Metodi di calcolo"),
     (
         "rpt-methods-text",
-        "Print check: closed manifold surface, consistent orientation, one piece, no self-intersections (BVH), no hole through the wall, positive volume, minimum wall by rays into the solid, fit to the build plate.",
-        "Controllo di stampabilita: superficie chiusa e manifold, orientamento coerente, un solo pezzo, nessuna auto-intersezione (BVH), nessun foro passante, volume positivo, parete minima con raggi nel solido, ingombro entro il piano di stampa.",
+        "Print check: closed surface with every edge properly joined, consistent orientation, one piece, no self-intersections, no hole through the wall, positive volume, minimum wall measured inside the solid, fit to the build plate.",
+        "Controllo di stampabilità: superficie chiusa con ogni spigolo unito correttamente, orientamento coerente, un solo pezzo, nessuna auto-intersezione, nessun foro passante, volume positivo, parete minima misurata dentro il solido, ingombro entro il piano di stampa.",
     ),
     ("rpt-references", "References", "Bibliografia"),
     // ---- notes on the print files ----

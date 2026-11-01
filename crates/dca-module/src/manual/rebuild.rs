@@ -24,6 +24,7 @@ use super::common::{
     arch_labels, arch_name, arch_to_case, data_of, fdi_of, finish, invalid, run_command,
     store_labels,
 };
+use crate::commands::messages;
 use dca_algo::anatomy::Arch;
 use dca_algo::frame;
 
@@ -64,10 +65,7 @@ pub(crate) fn run_rebuild(
     }
     let al = arch_labels(state, &data, arch)?;
     if !al.had_labels && p.vertices.is_none() && !p.resegment {
-        return Err(invalid(format!(
-            "the {} scan is not segmented: paint or segment the teeth first",
-            arch_name(arch)
-        )));
+        return Err(messages::not_segmented(arch));
     }
     let vertices = al.vertices();
     let n = vertices.len();
@@ -76,20 +74,19 @@ pub(crate) fn run_rebuild(
     // the labels the tooth is built from
     let mut labels = al.labels.clone();
     if p.resegment {
-        let seed = data
-            .seeds
-            .iter()
-            .find(|s| s.fdi == f)
-            .ok_or_else(|| invalid(format!("tooth {f} has no seed to find its region from")))?;
+        let seed = data.seeds.iter().find(|s| s.fdi == f).ok_or_else(|| {
+            messages::invalid("aligners-err-tooth-no-mark", &[("fdi", &f.to_string())])
+        })?;
         let v = scan
             .nearest(seed.position)
             .ok_or_else(|| invalid("the scan has no vertices"))?;
         let up = arch_to_case(&data, arch, &vertices)?.z_axis.truncate();
         let region = manual::fill_region(&scan, &labels, v, want, up, &FillParams::default());
         if region.is_empty() {
-            return Err(invalid(format!(
-                "no crown found around the seed of tooth {f}: move the seed or paint the tooth"
-            )));
+            return Err(messages::invalid(
+                "aligners-err-no-crown-at-mark",
+                &[("fdi", &f.to_string())],
+            ));
         }
         for l in &mut labels {
             if *l == want {

@@ -29,14 +29,14 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.occlusion.bite-registration.icp",
-            label: "aligners-menu-occlusion-bite-registration-icp",
+            label: "aligners-cmd-bite-icp",
             doc: "aligners-cmd-bite-icp-doc",
             params: IcpParams,
             run: run_icp,
         },
         stage_command! {
             id: "aligners.occlusion.bite-registration.three-points",
-            label: "aligners-menu-occlusion-bite-registration-three-points",
+            label: "aligners-cmd-bite-three-points",
             doc: "aligners-cmd-bite-three-points-doc",
             params: ThreePointsParams,
             run: run_three_points,
@@ -215,14 +215,14 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_are_menu_leaves_and_documented() {
+    fn the_commands_are_registered_and_documented() {
         for id in [
             "aligners.occlusion.bite-registration.icp",
             "aligners.occlusion.bite-registration.three-points",
         ] {
             let spec = crate::commands::find(id).unwrap();
             assert_eq!(spec.schema()["type"], "object");
-            assert!(crate::tree::find(id).is_some(), "{id}");
+            assert!(crate::commands::is_registered(id), "{id}");
         }
     }
 
@@ -239,6 +239,32 @@ mod tests {
             matches!(&err, CommandError::Invalid(m) if m.contains("bite scan")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn the_bite_leaf_uses_the_bite_scans_when_the_case_has_them() {
+        let x = DMat4::from_translation(DVec3::new(10.0, -4.0, 18.0))
+            * DMat4::from_axis_angle(DVec3::new(0.2, 1.0, -0.3).normalize(), 0.7);
+        let y = DMat4::from_translation(DVec3::new(2.0, -3.0, 5.0))
+            * DMat4::from_axis_angle(DVec3::new(1.0, 0.0, 0.3).normalize(), 0.2);
+        let (closed, moved) = bite_case(x, y);
+        let (next, out) = exec("aligners.occlusion.align", &moved, Value::Null);
+        assert_eq!(out["method"], "bite_scan");
+        let ids: Vec<_> = out["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "aligners.occlusion.bite-registration.icp",
+                "aligners.occlusion.contact-map"
+            ]
+        );
+        let gap = max_gap(&upper_positions(&closed), &upper_positions(&next));
+        assert!(gap < 0.05, "{gap}");
     }
 
     #[test]

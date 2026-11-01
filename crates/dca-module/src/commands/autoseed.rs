@@ -31,7 +31,7 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.preparation.orientation.automatic",
-            label: "aligners-menu-preparation-orientation-automatic",
+            label: "aligners-cmd-autoseed-orientation",
             doc: "aligners-cmd-autoseed-orientation-doc",
             params: frame::Params,
             run: run_orientation,
@@ -273,8 +273,8 @@ mod tests {
                 panic!("not refused");
             };
             assert!(m.contains("demo-lower"), "{m}");
-            assert!(m.contains("aligners.case.detect-arch"), "{m}");
-            assert!(m.contains("case.set-role"), "{m}");
+            assert!(m.contains("press Confirm"), "{m}");
+            assert!(!m.contains("aligners.") && !m.contains("case."), "{m}");
         }
         // the arch step settles it, and both run
         let next = exec("aligners.case.detect-arch", &state, Value::Null)

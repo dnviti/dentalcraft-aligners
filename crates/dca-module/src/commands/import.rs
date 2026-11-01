@@ -224,7 +224,7 @@ pub(crate) fn require_settled(scan: &Scan) -> Result<(), CommandError> {
 ///   comparison of the widths is NaN and the plugin's answer, an upper arch
 ///   at 0.6, rests on nothing ([`ArchDetection::widths_failed`]);
 /// * no confidence at all: the two width hypotheses cost the same.
-fn detect(mesh: &TriMesh, name: &str) -> Result<ArchDetection, String> {
+pub(crate) fn detect(mesh: &TriMesh, name: &str) -> Result<ArchDetection, String> {
     let vertices: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let detection =
         autoseed::detect_arch(&vertices, &mesh.tris, Some(name)).map_err(|e| e.to_string())?;
@@ -915,7 +915,8 @@ mod tests {
         assert!(!m.contains("aligners-"), "{m}");
         // the first step of the pipeline, by name
         let m = message(exec("aligners.auto", &next, Value::Null).unwrap_err());
-        assert!(m.contains("step 0") && m.contains(DETECT_ARCH), "{m}");
+        assert!(m.contains("Stopped at Arch recognition"), "{m}");
+        assert!(!m.contains("aligners."), "{m}");
 
         // the rule holds whatever the source of the role, as in the plugin
         let mut state = CaseState::default();
@@ -1465,14 +1466,11 @@ mod tests {
         let (next, _) = import(&CaseState::default(), json!({ "path": path })).unwrap();
         assert_eq!(next.case.scans[0].role_source, RoleSource::Provisional);
         let m = message(exec("aligners.auto", &next, Value::Null).unwrap_err());
-        assert!(m.contains("stopped at step 1"), "{m}");
+        assert!(m.contains("Stopped at Automatic orientation"), "{m}");
         assert!(m.contains("scan_a.stl"), "{m}");
         assert!(m.contains("Import scans panel"), "{m}");
-        assert!(
-            m.contains(DETECT_ARCH) && m.contains("case.set-role"),
-            "{m}"
-        );
-        assert!(!m.contains("aligners-"), "{m}");
+        assert!(m.contains("press Confirm"), "{m}");
+        assert!(!m.contains("aligners") && !m.contains("case."), "{m}");
         // the other gates of the pipeline say the same
         for id in [
             "aligners.preparation.orientation.automatic",

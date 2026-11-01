@@ -17,13 +17,14 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::messages;
 use super::staging::{aligners_data, arch_name};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.planning.schedule",
-        label: "aligners-menu-planning-schedule",
+        label: "aligners-cmd-schedule",
         doc: "aligners-cmd-schedule-doc",
         params: Params,
         run: run_schedule,
@@ -66,9 +67,7 @@ fn run_schedule(
     let data = aligners_data(state)?;
     let arches = arches_with_stages(params.arch, &data.stages);
     if arches.is_empty() {
-        return Err(CommandError::Invalid(
-            "there are no aligners yet: run the staging first".to_owned(),
-        ));
+        return Err(messages::invalid("aligners-err-no-aligners", &[]));
     }
     let total = arches
         .iter()
@@ -112,10 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn the_command_is_registered_as_the_menu_leaf() {
+    fn the_command_is_registered_for_the_cli_and_not_in_the_menu() {
         let spec = crate::commands::find("aligners.planning.schedule").unwrap();
         assert!(spec.schema()["properties"]["start_date"].is_object());
-        assert!(crate::tree::find("aligners.planning.schedule").is_some());
+        assert!(crate::tree::find("aligners.planning.schedule").is_none());
     }
 
     #[test]
@@ -188,6 +187,6 @@ mod tests {
             Value::Null,
         )
         .unwrap_err();
-        assert!(matches!(err, CommandError::Invalid(m) if m.contains("staging")));
+        assert!(matches!(err, CommandError::Invalid(m) if m.contains("no aligners")));
     }
 }

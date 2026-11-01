@@ -13,6 +13,8 @@ use dca_model::{AlignersState, MODULE_ID};
 use glam::{DMat4, DVec3};
 use serde_json::{Value, json};
 
+use crate::commands::messages;
+
 pub(crate) fn invalid(msg: impl Into<String>) -> CommandError {
     CommandError::Invalid(msg.into())
 }
@@ -116,14 +118,13 @@ pub(crate) fn arch_labels(
             let labels = labelled
                 .vertex_labels
                 .clone()
-                .ok_or_else(|| invalid(format!("the {} labels are missing", arch_name(arch))))?;
+                .ok_or_else(|| messages::labels_missing(arch))?;
             if labels.len() != mesh.vertex_count() {
-                return Err(invalid(format!(
-                    "the {} labels do not match the scan ({} labels, {} vertices)",
-                    arch_name(arch),
+                return Err(messages::labels_mismatch(
+                    arch,
                     labels.len(),
-                    mesh.vertex_count()
-                )));
+                    mesh.vertex_count(),
+                ));
             }
             Ok(ArchLabels {
                 scan: mesh,

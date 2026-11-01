@@ -216,17 +216,16 @@ impl ToothChoice {
     }
 }
 
-/// How the text is put on the mesh.
+/// How the text is put on the surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Method {
-    /// Refine the surface under the text and move its vertices (fast, keeps
-    /// the topology, the labels and the rest of the mesh).
+    /// Refine the surface under the text and move its points (fast, keeps
+    /// the rest of the surface as it is).
     #[default]
     Local,
-    /// Sample the mesh and the text as distance fields on a voxel grid,
-    /// subtract or add, and mesh the whole result again (slow, resamples
-    /// the whole mesh).
+    /// Rebuild the whole surface with the text in it (slow, changes every
+    /// point of the surface).
     Sdf,
 }
 
@@ -252,7 +251,7 @@ pub enum Placement {
     /// the surface. The text is not moved if it does not fit well: it fails
     /// when the surface under it is not continuous.
     Manual {
-        /// Centre of the text on the surface (mesh coordinates, mm).
+        /// Centre of the text on the surface (coordinates of the scan, mm).
         point: [f64; 3],
         /// Outward normal of the surface there.
         normal: [f64; 3],
@@ -318,9 +317,9 @@ pub struct Params {
     pub kind: Kind,
     /// Where the text goes.
     pub placement: Placement,
-    /// How the text is put on the mesh.
+    /// How the text is put on the surface.
     pub method: Method,
-    /// Longest edge of the refined surface under the text, or voxel size of
+    /// Longest edge of the refined surface under the text, or grid size of
     /// the SDF method (mm, 0.01 to 0.2; default character height / 24, between
     /// 0.02 and 0.05). It is also the width of the wall of an engraving.
     pub resolution_mm: Option<f64>,

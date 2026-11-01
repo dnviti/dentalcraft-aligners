@@ -51,7 +51,7 @@ pub enum TeethError {
     #[error("{0}")]
     Invalid(String),
     /// The scan has no labelled tooth.
-    #[error("the scan has no labelled tooth")]
+    #[error("the scan has no tooth separated from the gum")]
     NoTeeth,
 }
 

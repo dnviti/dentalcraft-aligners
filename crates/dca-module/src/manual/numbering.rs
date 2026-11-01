@@ -27,6 +27,7 @@ use super::common::{
     Forgotten, arch_labels, arch_name, data_of, fdi_of, finish, forget_tooth, invalid, run_command,
     store_labels,
 };
+use crate::commands::messages;
 
 /// Parameters of the renumbering.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -96,9 +97,10 @@ pub(crate) fn run_renumber(
         || seed_of(&data, src)
         || data.tooth_frames.contains_key(&src);
     if !has_src {
-        return Err(invalid(format!(
-            "tooth {src} does not exist (no seed, labels or frame)"
-        )));
+        return Err(messages::invalid(
+            "aligners-err-tooth-unknown",
+            &[("fdi", &src.to_string())],
+        ));
     }
     let swap = labels.as_ref().is_some_and(|l| has_label(&l.labels, dst))
         || seed_of(&data, dst)

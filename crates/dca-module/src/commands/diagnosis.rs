@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use super::messages;
 use dc_case::{CaseState, Fdi, ModuleState, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
@@ -42,21 +43,21 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
         },
         stage_command! {
             id: "aligners.diagnosis.little-index",
-            label: "aligners-menu-diagnosis-little-index",
+            label: "aligners-cmd-diagnosis-little-index",
             doc: "aligners-cmd-diagnosis-little-index-doc",
             params: dca_algo::diagnosis::Params,
             run: run_diagnosis,
         },
         stage_command! {
             id: "aligners.diagnosis.bolton",
-            label: "aligners-menu-diagnosis-bolton",
+            label: "aligners-cmd-diagnosis-bolton",
             doc: "aligners-cmd-diagnosis-bolton-doc",
             params: dca_algo::diagnosis::Params,
             run: run_diagnosis,
         },
         stage_command! {
             id: "aligners.diagnosis.complexity",
-            label: "aligners-menu-diagnosis-complexity",
+            label: "aligners-cmd-diagnosis-complexity",
             doc: "aligners-cmd-diagnosis-complexity-doc",
             params: dca_algo::diagnosis::Params,
             run: run_diagnosis,
@@ -194,10 +195,7 @@ fn run_diagnosis(
         ctx.check_cancelled()?;
     }
     if teeth.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has measured teeth: run the segmentation and the teeth frames first"
-                .to_owned(),
-        ));
+        return Err(messages::invalid("aligners-err-no-measured-teeth", &[]));
     }
 
     let input = Input {
@@ -211,9 +209,7 @@ fn run_diagnosis(
             .collect(),
     };
     let out = diagnosis::run(&input, &params).map_err(|e| {
-        CommandError::Invalid(format!(
-            "{e}: run the segmentation and the teeth frames first"
-        ))
+        messages::invalid("aligners-err-then-measure", &[("reason", &e.to_string())])
     })?;
     ctx.check_cancelled()?;
 
@@ -305,12 +301,12 @@ mod tests {
     }
 
     #[test]
-    fn the_four_computing_leaves_are_registered_and_ready() {
+    fn the_four_computing_commands_are_registered() {
         for id in IDS {
             let spec = crate::commands::find(id).unwrap();
             assert_eq!(spec.schema()["type"], "object", "{id}");
             assert!(spec.schema()["properties"]["arch"].is_object(), "{id}");
-            assert!(crate::tree::find(id).is_some(), "{id} is a menu leaf");
+            assert!(crate::commands::is_registered(id), "{id}");
         }
         // correcting the values by hand is a later command
         assert!(crate::commands::find("aligners.diagnosis.edit-values").is_none());

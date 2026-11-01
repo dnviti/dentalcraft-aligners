@@ -9,8 +9,8 @@ use dc_case::CaseState;
 use dc_i18n::{Lang, parity};
 use dc_jobs::JobSystem;
 use dc_module_api::{
-    MenuStatus, Module, ModuleCtx, ModuleError, ModuleRegistry, NOT_AVAILABLE_KEY, Toast,
-    ToastLevel,
+    LeafInput, MenuStatus, Module, ModuleCtx, ModuleError, ModuleRegistry, NOT_AVAILABLE_KEY,
+    Toast, ToastLevel,
 };
 use dca_module::{AlignersModule, MODULE_ID, NAME_KEY, loader, tree};
 
@@ -59,7 +59,7 @@ fn ids_are_unique_and_follow_the_naming_scheme() {
 fn every_leaf_is_a_unique_command() {
     let module = AlignersModule::new();
     let leaves = tree::leaves();
-    assert!(leaves.len() >= 40, "only {} leaves", leaves.len());
+    assert_eq!(leaves.len(), TREE.len(), "the agreed tree");
 
     let command_ids: Vec<_> = module.commands().iter().map(|c| c.id).collect();
     let unique: BTreeSet<_> = command_ids.iter().collect();
@@ -91,14 +91,11 @@ fn no_empty_groups_and_the_spec_groups_exist() {
         ids,
         [
             "aligners.case",
-            "aligners.preparation",
+            "aligners.teeth",
             "aligners.diagnosis",
             "aligners.planning",
-            "aligners.occlusion",
             "aligners.production",
             "aligners.followup",
-            "aligners.output",
-            "aligners.tools",
         ]
     );
     for n in tree::all_nodes() {
@@ -122,28 +119,200 @@ fn module_depth() -> usize {
         .unwrap()
 }
 
-#[test]
-fn spec_items_are_present() {
-    for id in [
+/// The menu, in order: group, leaf, English and Italian label.
+const TREE: &[(&str, &str, &str, &str)] = &[
+    (
+        "aligners.case",
         "aligners.case.import-scans",
+        "Import scans",
+        "Importa scansioni",
+    ),
+    (
+        "aligners.case",
+        "aligners.auto",
+        "Run everything automatically",
+        "Esegui tutto in automatico",
+    ),
+    (
+        "aligners.teeth",
+        "aligners.preparation.numbering.automatic",
+        "Find the teeth",
+        "Trova i denti",
+    ),
+    (
+        "aligners.teeth",
         "aligners.preparation.segmentation.automatic",
+        "Separate teeth and gum",
+        "Separa denti e gengiva",
+    ),
+    (
+        "aligners.teeth",
+        "aligners.teeth.build",
+        "3D teeth",
+        "Denti 3D",
+    ),
+    (
+        "aligners.teeth.manual",
+        "aligners.preparation.numbering.place-seeds",
+        "Mark a tooth",
+        "Segna un dente",
+    ),
+    (
+        "aligners.teeth.manual",
+        "aligners.preparation.numbering.renumber",
+        "Change a tooth number",
+        "Cambia il numero di un dente",
+    ),
+    (
+        "aligners.teeth.manual",
+        "aligners.preparation.numbering.mark-missing",
+        "Missing tooth",
+        "Dente assente",
+    ),
+    (
+        "aligners.teeth.manual",
         "aligners.preparation.segmentation.manual-brush",
-        "aligners.diagnosis.little-index",
-        "aligners.diagnosis.bolton",
-        "aligners.planning.staging",
-        "aligners.planning.ipr",
-        "aligners.planning.attachments",
-        "aligners.occlusion.bite-registration.icp",
-        "aligners.occlusion.contact-map",
-        "aligners.production.trim-line",
-        "aligners.production.stamp",
+        "Tooth brush",
+        "Pennello dei denti",
+    ),
+    (
+        "aligners.teeth.manual",
+        "aligners.preparation.segmentation.clean-borders",
+        "Clean borders",
+        "Pulisci i bordi",
+    ),
+    (
+        "aligners.diagnosis",
+        "aligners.diagnosis.space-analysis",
+        "Case analysis",
+        "Analisi del caso",
+    ),
+    (
+        "aligners.planning",
+        "aligners.occlusion.align",
+        "Bite",
+        "Morso",
+    ),
+    (
+        "aligners.planning",
+        "aligners.planning.setup.automatic",
+        "Final position",
+        "Posizione finale",
+    ),
+    (
+        "aligners.planning",
+        "aligners.planning.movements",
+        "Move a tooth",
+        "Sposta un dente",
+    ),
+    (
+        "aligners.planning",
+        "aligners.planning.aligners",
+        "Aligners",
+        "Allineatori",
+    ),
+    (
+        "aligners.production",
+        "aligners.output.export-all",
+        "Export for printing",
+        "Esporta per la stampa",
+    ),
+    (
+        "aligners.production",
+        "aligners.output.study-models",
+        "Study models",
+        "Modelli da studio",
+    ),
+    (
+        "aligners.followup",
         "aligners.followup.visits",
-        "aligners.output.export-stl",
-        "aligners.tools.manual-tools",
-        "aligners.tools.history",
-    ] {
-        assert!(tree::find(id).is_some(), "missing {id}");
+        "Control visit",
+        "Visita di controllo",
+    ),
+    (
+        "aligners.followup",
+        "aligners.followup.tracking",
+        "Re-plan",
+        "Ripianifica",
+    ),
+];
+
+#[test]
+fn the_menu_is_the_agreed_tree() {
+    let leaves: Vec<_> = tree::leaves().iter().map(|n| n.id).collect();
+    let agreed: Vec<_> = TREE.iter().map(|(_, id, ..)| *id).collect();
+    assert_eq!(leaves, agreed);
+    let menu = AlignersModule::new().menu();
+    for (group, id, ..) in TREE {
+        let path = menu.path_to(id).unwrap();
+        assert_eq!(path[path.len() - 2], *group, "{id}");
     }
+    // the corrections are one level down, under Teeth
+    assert_eq!(
+        menu.path_to("aligners.teeth.manual").unwrap(),
+        ["aligners.teeth", "aligners.teeth.manual"]
+    );
+    assert_eq!(module_depth(), 2);
+}
+
+#[test]
+fn the_shell_is_told_what_to_ask_before_a_leaf_runs() {
+    let menu = AlignersModule::new().menu();
+    let asking: Vec<_> = menu
+        .iter()
+        .filter(|(_, i)| i.input.is_some())
+        .map(|(_, i)| (i.id, i.input.unwrap()))
+        .collect();
+    assert_eq!(
+        asking,
+        [
+            (
+                "aligners.output.export-all",
+                LeafInput::Folder { param: "dir" }
+            ),
+            (
+                "aligners.followup.visits",
+                LeafInput::ScanFile { param: "scan" }
+            ),
+        ]
+    );
+    for (id, input) in asking {
+        let (LeafInput::Folder { param } | LeafInput::ScanFile { param }) = input;
+        let schema = dca_module::commands::find(id).unwrap().schema();
+        assert!(schema["properties"][param].is_object(), "{id}: {schema}");
+    }
+}
+
+#[test]
+fn run_everything_and_the_corrections_are_not_steps() {
+    let menu = AlignersModule::new().menu();
+    let steps = menu.step_ids();
+    assert_eq!(steps.len(), TREE.len() - 6);
+    assert!(!steps.contains(&"aligners.auto"));
+    for (group, id, ..) in TREE {
+        let counted = *group != "aligners.teeth.manual" && *id != "aligners.auto";
+        assert_eq!(steps.contains(id), counted, "{id}");
+    }
+    assert!(steps.contains(&"aligners.case.import-scans"));
+}
+
+#[test]
+fn the_module_reads_the_steps_from_the_case() {
+    let m = AlignersModule::new();
+    let empty = CaseState::default();
+    assert!(!m.leaf_done(&empty, "aligners.case.import-scans"));
+    let demo = dca_module::commands::find("aligners.demo").unwrap();
+    let (state, _) = demo
+        .execute(
+            &empty,
+            &serde_json::json!({ "arch": "lower" }),
+            &dc_command::JobCtx::detached(),
+        )
+        .unwrap();
+    assert!(m.leaf_done(&state, "aligners.case.import-scans"));
+    assert!(m.leaf_done(&state, "aligners.preparation.numbering.automatic"));
+    assert!(!m.leaf_done(&state, "aligners.planning.aligners"));
+    assert!(!m.leaf_done(&state, "aligners.auto"));
 }
 
 #[test]
@@ -180,6 +349,9 @@ fn labels_resolve_in_english_and_italian() {
     dc_i18n::set_language(Lang::En).unwrap();
     assert_eq!(dc_i18n::tr(NAME_KEY), "Aligners");
     assert_eq!(dc_i18n::tr("aligners-menu-case"), "Case");
+    for (key, en, _) in GROUP_LABELS {
+        assert_eq!(dc_i18n::tr(key), *en);
+    }
     assert_eq!(dc_i18n::tr(NOT_AVAILABLE_KEY), "Not available yet");
     for n in tree::all_nodes() {
         for key in [n.label_key, n.desc_key] {
@@ -187,43 +359,64 @@ fn labels_resolve_in_english_and_italian() {
             assert!(!text.trim().is_empty() && text != key, "en {key}");
         }
     }
+    for (_, id, en, _) in TREE {
+        assert_eq!(dc_i18n::tr(tree::find(id).unwrap().label_key), *en, "{id}");
+    }
+    let spec_labels = || -> Vec<(String, &str)> {
+        dca_module::commands::all()
+            .iter()
+            .map(|c| (dc_i18n::tr(c.label_key), c.id))
+            .collect()
+    };
+    assert_unique(spec_labels());
 
     dc_i18n::set_language(Lang::It).unwrap();
     assert_eq!(dc_i18n::tr(NAME_KEY), "Allineatori");
-    assert_eq!(
-        dc_i18n::tr("aligners-menu-diagnosis-little-index"),
-        "Indice di irregolarità di Little"
-    );
-    assert_eq!(dc_i18n::tr("aligners-menu-planning-ipr"), "Stripping (IPR)");
-    assert_eq!(
-        dc_i18n::tr("aligners-menu-production-trim-line"),
-        "Linea di rifilatura"
-    );
+    for (key, _, it) in GROUP_LABELS {
+        assert_eq!(dc_i18n::tr(key), *it);
+    }
     for n in tree::all_nodes() {
         for key in [n.label_key, n.desc_key] {
             let text = dc_i18n::tr(key);
             assert!(!text.trim().is_empty() && text != key, "it {key}");
         }
     }
+    for (_, id, _, it) in TREE {
+        assert_eq!(dc_i18n::tr(tree::find(id).unwrap().label_key), *it, "{id}");
+    }
+    assert_unique(spec_labels());
 
-    // the inspector shows the translated "not available" notice on a
-    // placeholder entry
-    let Some(stub) = first_stub_leaf() else {
-        dc_i18n::set_language(Lang::En).unwrap();
-        return; // every command is implemented
-    };
-    let label = dc_i18n::tr(tree::find(stub).unwrap().label_key);
-    let texts = render_inspector_texts(Some(stub));
-    assert!(
-        texts.iter().any(|t| t == "Non ancora disponibile"),
-        "{texts:?}"
-    );
+    // the inspector shows the translated description of a leaf
+    let label = dc_i18n::tr(tree::find("aligners.followup.tracking").unwrap().label_key);
+    let texts = render_inspector_texts(Some("aligners.followup.tracking"));
     assert!(texts.contains(&label), "{texts:?}");
 
     dc_i18n::set_language(Lang::En).unwrap();
-    let texts = render_inspector_texts(Some(stub));
-    assert!(texts.iter().any(|t| t == "Not yet available"), "{texts:?}");
 }
+
+/// No two commands share a label: the CLI and the MCP server list them by it.
+fn assert_unique(labels: Vec<(String, &str)>) {
+    let mut seen = std::collections::BTreeMap::new();
+    for (label, id) in labels {
+        if let Some(other) = seen.insert(label.clone(), id) {
+            panic!("{id} and {other} are both labelled {label:?}");
+        }
+    }
+}
+
+const GROUP_LABELS: &[(&str, &str, &str)] = &[
+    ("aligners-menu-case", "Case", "Caso"),
+    ("aligners-menu-teeth", "Teeth", "Denti"),
+    (
+        "aligners-menu-teeth-manual",
+        "Manual corrections",
+        "Correzioni a mano",
+    ),
+    ("aligners-menu-diagnosis", "Diagnosis", "Diagnosi"),
+    ("aligners-menu-planning", "Plan", "Piano"),
+    ("aligners-menu-production", "Production", "Produzione"),
+    ("aligners-menu-followup", "Follow-up", "Visite"),
+];
 
 #[test]
 fn registers_in_a_module_registry() {
@@ -239,31 +432,68 @@ fn registers_in_a_module_registry() {
     assert_eq!(m.name_key(), NAME_KEY);
     assert_eq!(m.version(), env!("CARGO_PKG_VERSION"));
     assert!(reg.is_enabled("aligners"));
-    assert_eq!(m.menu().roots.len(), 9);
+    assert_eq!(m.menu().roots.len(), 6);
 }
 
 #[test]
-fn invoking_a_stub_selects_it_and_shows_the_toast() {
+fn every_leaf_works_and_only_leaves_can_be_invoked() {
     let jobs = JobSystem::new(1).unwrap();
     let state = Arc::new(CaseState::default());
     let mut ctx = ModuleCtx::new(&state, &jobs);
     let mut m = AlignersModule::new();
     assert_eq!(m.selected(), None);
-    let Some(stub) = first_stub_leaf() else {
-        return; // every command is implemented
-    };
-    m.invoke(stub, &mut ctx).unwrap();
-    assert_eq!(m.selected(), Some(stub));
+    for n in tree::leaves() {
+        assert_eq!(n.status(), MenuStatus::Ready, "{}", n.id);
+    }
     // groups are not commands; unknown ids are errors
     assert!(m.invoke("aligners.planning", &mut ctx).is_err());
     assert!(m.invoke("aligners.nope", &mut ctx).is_err());
+    // a command out of the menu runs from the CLI, not from a click
+    assert!(m.invoke("aligners.planning.schedule", &mut ctx).is_err());
     assert!(!m.select_entry("aligners.nope"));
     assert!(m.select_entry("aligners.planning"));
     let (cmds, toasts) = ctx.finish();
     assert!(cmds.is_empty());
+    assert!(toasts.is_empty());
+}
+
+#[test]
+fn a_leaf_with_an_input_waits_for_the_shell_and_the_others_run_with_their_defaults() {
+    let jobs = JobSystem::new(1).unwrap();
+    let state = Arc::new(CaseState::default());
+    let mut m = AlignersModule::new();
+    for id in ["aligners.output.export-all", "aligners.followup.visits"] {
+        let mut ctx = ModuleCtx::new(&state, &jobs);
+        m.invoke(id, &mut ctx).unwrap();
+        assert_eq!(m.selected(), Some(id));
+        let (cmds, toasts) = ctx.finish();
+        assert!(cmds.is_empty(), "{id}");
+        assert!(toasts.is_empty(), "{id}");
+    }
+    for id in ["aligners.auto", "aligners.followup.tracking"] {
+        let mut ctx = ModuleCtx::new(&state, &jobs);
+        m.invoke(id, &mut ctx).unwrap();
+        let (cmds, _) = ctx.finish();
+        assert_eq!(cmds.len(), 1, "{id}");
+        assert_eq!(cmds[0].id(), id);
+    }
+}
+
+#[test]
+fn a_click_on_the_bite_says_what_it_rests_on() {
+    let jobs = JobSystem::new(1).unwrap();
+    let state = Arc::new(CaseState::default());
+    let mut m = AlignersModule::new();
+    let mut ctx = ModuleCtx::new(&state, &jobs);
+    m.invoke("aligners.occlusion.align", &mut ctx).unwrap();
+    let (cmds, toasts) = ctx.finish();
+    assert_eq!(cmds.len(), 1);
     assert_eq!(
         toasts,
-        vec![Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY)]
+        vec![Toast::new(
+            ToastLevel::Info,
+            "aligners-notice-bite-estimated"
+        )]
     );
 }
 
@@ -280,14 +510,6 @@ fn invoking_the_import_leaf_runs_nothing_the_shell_asks_for_the_files() {
     let (cmds, toasts) = ctx.finish();
     assert!(cmds.is_empty());
     assert!(toasts.is_empty());
-}
-
-/// A leaf whose command is not registered yet, if any.
-fn first_stub_leaf() -> Option<&'static str> {
-    tree::leaves()
-        .into_iter()
-        .find(|n| n.status() == MenuStatus::Stub)
-        .map(|n| n.id)
 }
 
 #[test]
@@ -333,7 +555,7 @@ fn design_shortcuts_are_declared() {
         key("aligners.preparation.segmentation.manual-brush"),
         Some("B")
     );
-    assert_eq!(key("aligners.planning.staging.automatic"), Some("S"));
+    assert_eq!(key("aligners.planning.aligners"), Some("S"));
     assert_eq!(cmds.iter().filter(|c| c.shortcut.is_some()).count(), 3);
 }
 
@@ -385,30 +607,21 @@ fn inspector_renders_every_item_without_panicking() {
 }
 
 #[test]
-fn staging_page_has_the_table_and_the_limits() {
-    let texts = render_inspector_texts(Some("aligners.planning.staging")).join("\n");
-    // nothing here changes the language: assert on structure, not on the wording
-    let slider_labels = [
-        "aligners-staging-step-linear",
-        "aligners-staging-step-vertical",
-        "aligners-staging-step-rotation",
-        "aligners-staging-step-rotation-round",
-        "aligners-staging-step-angular",
-        "aligners-staging-max-crown-step",
-    ];
-    for key in slider_labels
-        .iter()
-        .chain(&["aligners-staging-stages", "aligners-staging-col-stage"])
-    {
-        assert!(!dc_i18n::tr(key).is_empty());
+fn no_page_shows_controls_that_do_nothing() {
+    // the staging placeholder was a page of disabled sliders: only the study
+    // models have settings
+    for n in tree::all_nodes() {
+        let out = run_inspector(Some(n.id));
+        let inputs = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Rect(_)))
+            .count();
+        let texts = render_inspector_texts(Some(n.id)).join("\n");
+        assert!(!texts.contains("0.33"), "{}: {texts}", n.id);
+        assert!(!texts.contains("0.25"), "{}: {texts}", n.id);
+        if n.id != "aligners.output.study-models" {
+            assert_eq!(inputs, 0, "{}", n.id);
+        }
     }
-    assert!(
-        texts.contains("0.25"),
-        "default step_linear missing: {texts}"
-    );
-    assert!(texts.contains("2.00"), "default rotation missing: {texts}");
-    assert!(texts.contains("0.33"), "default crown cap missing: {texts}");
-    // other pages do not carry the staging layout
-    let other = render_inspector_texts(Some("aligners.planning.ipr")).join("\n");
-    assert!(!other.contains("0.33"));
 }

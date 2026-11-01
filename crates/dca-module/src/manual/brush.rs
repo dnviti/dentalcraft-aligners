@@ -30,6 +30,7 @@ use super::common::{
     arch_labels, arch_name, arch_to_case, data_of, fdi_of, finish, invalid, label_of, pick_arch,
     point, store_labels,
 };
+use crate::commands::messages;
 
 /// What the brush does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -287,9 +288,7 @@ pub(crate) fn run_clean(
             .collect(),
     };
     if arches.is_empty() {
-        return Err(invalid(
-            "the scan is not segmented: paint or segment the teeth first",
-        ));
+        return Err(messages::none_segmented());
     }
     let mut next = state.clone();
     let mut stale = Vec::new();
@@ -298,10 +297,7 @@ pub(crate) fn run_clean(
         ctx.check_cancelled()?;
         let al = arch_labels(state, &data, arch)?;
         if !al.had_labels {
-            return Err(invalid(format!(
-                "the {} scan is not segmented: paint or segment the teeth first",
-                arch_name(arch)
-            )));
+            return Err(messages::not_segmented(arch));
         }
         let vertices = al.vertices();
         let scan = Scan::new(&vertices, &al.scan.tris).map_err(|e| invalid(e.to_string()))?;

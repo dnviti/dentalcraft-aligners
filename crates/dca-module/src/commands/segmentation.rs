@@ -25,7 +25,7 @@ use super::import::require_settled;
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.preparation.segmentation.automatic",
-        label: "aligners-cmd-segmentation-automatic",
+        label: "aligners-menu-preparation-segmentation-automatic",
         doc: "aligners-cmd-segmentation-automatic-doc",
         params: dca_algo::segmentation::Params,
         run: run_automatic,
@@ -209,7 +209,7 @@ mod tests {
     fn missing_scans_or_seeds_are_reported() {
         assert!(matches!(
             run(&CaseState::default(), Value::Null),
-            Err(CommandError::Invalid(m)) if m.contains("seeds")
+            Err(CommandError::Invalid(m)) if m.contains("tooth marks")
         ));
         let lower = demo_state("lower");
         assert!(matches!(
@@ -225,7 +225,7 @@ mod tests {
         no_seeds.set_module(MODULE_ID, ModuleState::new(data));
         assert!(matches!(
             run(&no_seeds, json!({ "arch": "lower" })),
-            Err(CommandError::Invalid(m)) if m.contains("seeds")
+            Err(CommandError::Invalid(m)) if m.contains("tooth marks")
         ));
         assert!(matches!(
             run(&lower, json!({ "arch": "sideways" })),
