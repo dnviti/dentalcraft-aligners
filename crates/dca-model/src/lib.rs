@@ -25,8 +25,8 @@ pub use settings::{
     TrimMode, TrimParams,
 };
 pub use state::{
-    AlignersState, ArchDetails, ArchSpace, Diagnosis, IprStep, Seed, Setup, Stage, ToothFrame,
-    ToothMeasures,
+    AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed, Setup, Stage,
+    ToothFrame, ToothMeasures,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 
