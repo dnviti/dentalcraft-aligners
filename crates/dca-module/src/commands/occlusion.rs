@@ -56,7 +56,7 @@ pub(crate) fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandE
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned())),
+            .ok_or_else(crate::commands::messages::no_data),
     }
 }
 

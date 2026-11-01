@@ -116,16 +116,16 @@ fn arch_data(
         return Ok(Some((teeth, None)));
     }
     let labelled = state.blobs.require(labels_ref)?;
-    let labels = labelled.vertex_labels.as_ref().ok_or_else(|| {
-        CommandError::Invalid(format!("the {} labels are missing", arch_name(arch)))
-    })?;
+    let labels = labelled
+        .vertex_labels
+        .as_ref()
+        .ok_or_else(|| crate::commands::messages::labels_missing(arch))?;
     if labels.len() != case_vertices.len() {
-        return Err(CommandError::Invalid(format!(
-            "the {} labels do not match the scan ({} labels, {} vertices)",
-            arch_name(arch),
+        return Err(crate::commands::messages::labels_mismatch(
+            arch,
             labels.len(),
-            case_vertices.len()
-        )));
+            case_vertices.len(),
+        ));
     }
     let in_arch: Vec<_> = case_vertices
         .iter()
@@ -177,7 +177,7 @@ fn run_diagnosis(
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned()))?,
+            .ok_or_else(crate::commands::messages::no_data)?,
     };
     // the measured teeth of each arch in arch coordinates (both, for the
     // Bolton ratios); the crowns only of the arches to analyse

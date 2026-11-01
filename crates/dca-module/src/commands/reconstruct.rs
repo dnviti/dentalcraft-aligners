@@ -64,7 +64,7 @@ pub(crate) fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandE
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned())),
+            .ok_or_else(crate::commands::messages::no_data),
     }
 }
 
@@ -96,16 +96,16 @@ pub(crate) fn arch_scan(
     };
     let mesh = state.blobs.require(&scan.mesh)?;
     let labelled = state.blobs.require(labels_ref)?;
-    let labels = labelled.vertex_labels.as_ref().ok_or_else(|| {
-        CommandError::Invalid(format!("the {} labels are missing", arch_name(arch)))
-    })?;
+    let labels = labelled
+        .vertex_labels
+        .as_ref()
+        .ok_or_else(|| crate::commands::messages::labels_missing(arch))?;
     if labels.len() != mesh.vertex_count() {
-        return Err(CommandError::Invalid(format!(
-            "the {} labels do not match the scan ({} labels, {} vertices)",
-            arch_name(arch),
+        return Err(crate::commands::messages::labels_mismatch(
+            arch,
             labels.len(),
-            mesh.vertex_count()
-        )));
+            mesh.vertex_count(),
+        ));
     }
     let case_vertices: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let framed = frame::run(
@@ -216,9 +216,7 @@ fn run_automatic(
         );
     }
     if out.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has a segmented scan: run the segmentation first".to_owned(),
-        ));
+        return Err(crate::commands::messages::none_segmented());
     }
     next.set_module(MODULE_ID, ModuleState::new(data));
     Ok((next, Value::Object(out)))
@@ -245,12 +243,8 @@ fn run_rebuild_tooth(
         measured(state, which, ctx)?
     };
     let mut data = aligners_data(&next)?;
-    let scan = arch_scan(&next, &data, arch)?.ok_or_else(|| {
-        CommandError::Invalid(format!(
-            "the {} arch has no segmented scan: run the segmentation first",
-            arch_name(arch)
-        ))
-    })?;
+    let scan = arch_scan(&next, &data, arch)?
+        .ok_or_else(|| crate::commands::messages::not_segmented(arch))?;
     let axis = axes(&data, &scan, arch)
         .get(&fdi)
         .copied()

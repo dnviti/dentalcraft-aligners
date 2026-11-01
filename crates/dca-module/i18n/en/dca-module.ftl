@@ -386,3 +386,21 @@ aligners-cleared-stages = aligner stages
 aligners-cleared-ramps = bite ramps
 aligners-cleared-visits = control visits
 aligners-cleared-bite-registered = bite registration (to be redone: the other arch stays where the registration moved it)
+
+# Errors a command reports when a step it depends on has not been done
+aligners-err-arch-upper = upper
+aligners-err-arch-lower = lower
+aligners-err-no-data = the Aligners data cannot be read
+aligners-err-no-case-data = the case has no Aligners data
+aligners-err-arch-not-segmented = the { $arch } arch has no segmented scan: run the segmentation first
+aligners-err-none-segmented = no arch has a segmented scan: run the segmentation first
+aligners-err-labels-missing = the { $arch } labels are missing
+aligners-err-tooth-labels-missing = the tooth labels are missing
+aligners-err-labels-mismatch = the { $arch } labels do not match the scan ({ $labels } labels, { $vertices } vertices)
+aligners-err-tooth-labels-mismatch = the labels do not match the scan ({ $labels } labels, { $vertices } vertices)
+aligners-err-no-scan = the case has no { $arch } scan
+aligners-err-no-scan-any = the case has no upper or lower scan
+aligners-err-scan-missing = the { $arch } scan is missing
+aligners-err-reference-missing = the reference scan is missing
+aligners-err-arch-no-seeds = the { $arch } arch has no tooth seeds: place or propose the seeds first
+aligners-err-none-seeded = no arch has a scan with tooth seeds: place or propose the seeds first

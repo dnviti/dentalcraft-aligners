@@ -92,7 +92,7 @@ fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandError> {
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned())),
+            .ok_or_else(crate::commands::messages::no_data),
     }
 }
 
@@ -106,20 +106,15 @@ fn run_orientation(
     let arch = params
         .reference
         .choose(has(ScanRole::Upper), has(ScanRole::Lower))
-        .ok_or_else(|| {
-            CommandError::Invalid(
-                match params.reference {
-                    Reference::Auto => "the case has no upper or lower scan",
-                    Reference::Upper => "the case has no upper scan",
-                    Reference::Lower => "the case has no lower scan",
-                }
-                .to_owned(),
-            )
+        .ok_or_else(|| match params.reference {
+            Reference::Auto => crate::commands::messages::no_scan_any(),
+            Reference::Upper => crate::commands::messages::no_scan(Arch::Upper),
+            Reference::Lower => crate::commands::messages::no_scan(Arch::Lower),
         })?;
     let scan = state
         .case
         .scan(arch.role())
-        .ok_or_else(|| CommandError::Invalid("the reference scan is missing".to_owned()))?;
+        .ok_or_else(crate::commands::messages::reference_missing)?;
     require_settled(scan)?;
     let mesh = state.blobs.require(&scan.mesh)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
@@ -170,9 +165,7 @@ fn run_numbering(
         Arches::Lower => vec![Arch::Lower],
     };
     if arches.is_empty() {
-        return Err(CommandError::Invalid(
-            "the case has no upper or lower scan".to_owned(),
-        ));
+        return Err(crate::commands::messages::no_scan_any());
     }
     for scan in arches.iter().filter_map(|a| state.case.scan(a.role())) {
         require_settled(scan)?;
@@ -180,9 +173,10 @@ fn run_numbering(
     let mut data = aligners_data(state)?;
     let mut report = Vec::new();
     for arch in arches {
-        let scan = state.case.scan(arch.role()).ok_or_else(|| {
-            CommandError::Invalid(format!("the case has no {} scan", arch_name(arch)))
-        })?;
+        let scan = state
+            .case
+            .scan(arch.role())
+            .ok_or_else(|| crate::commands::messages::no_scan(arch))?;
         let mesh = state.blobs.require(&scan.mesh)?;
         let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let input = autoseed::Input {
