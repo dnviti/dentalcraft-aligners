@@ -48,13 +48,13 @@ pub const FRONT: DVec3 = DVec3::NEG_Y;
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FrameError {
     /// Fewer than 4 seeds.
-    #[error("at least 4 seeds (incisors and molars) are needed for the arch frame")]
+    #[error("at least 4 tooth marks (incisors and molars) are needed to place the arch")]
     TooFewSeeds,
     /// Seeds do not cover the incisors and both sides.
-    #[error("seeds are needed on both sides and on the incisors")]
+    #[error("tooth marks are needed on both sides and on the incisors")]
     SeedsOnOneSide,
     /// The mesh has no vertices or is flat in every direction.
-    #[error("the mesh is empty or degenerate")]
+    #[error("the scan is empty or damaged")]
     DegenerateMesh,
     /// The case has no upper or lower scan.
     #[error("the case has no arch scan")]
@@ -379,7 +379,7 @@ pub fn arch_frame_from_mesh(vertices: &[DVec3]) -> Result<(ArchFrame, DVec3), Fr
     Ok((ArchFrame { origin, x, y, n }, centre))
 }
 
-/// Which scan the world frame is taken from.
+/// Which scan gives the position of the patient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Reference {

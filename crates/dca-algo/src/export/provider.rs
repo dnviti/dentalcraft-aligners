@@ -25,24 +25,21 @@ use serde::{Deserialize, Serialize};
 use super::{ExportError, Input, deform_series, stage_deltas};
 use crate::anatomy::Arch;
 
-/// Quality of the print files: the voxel of the distance fields the models
-/// and the shells are built on and the mesh tolerance of the files
-/// (`quality.PRESETS` of the plugin: `export_voxel`, `shell_voxel`,
-/// `mesh_tolerance`), plus a draft for quick runs and tests.
+/// Quality of the print files: the detail of the models and of the shells
+/// and the surface tolerance of the files, plus a draft for quick runs and
+/// tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Quality {
-    /// Quick look and tests: 0.25 mm voxel, 0.05 mm tolerance (not a preset
-    /// of the plugin; the wall stays above four voxels).
+    /// Quick look and tests: 0.25 mm detail, 0.05 mm tolerance.
     Draft,
-    /// The plugin's Leggera: 0.15 mm voxel, 0.03 mm tolerance.
+    /// Light: 0.15 mm detail, 0.03 mm tolerance.
     Light,
-    /// The plugin's Standard, the production files: 0.1 mm voxel, 0.01 mm
-    /// tolerance.
+    /// Standard, the production files: 0.1 mm detail, 0.01 mm tolerance.
     #[default]
     #[serde(alias = "final")]
     Standard,
-    /// The plugin's Alta: 0.08 mm voxel, 0.005 mm tolerance.
+    /// High: 0.08 mm detail, 0.005 mm tolerance.
     High,
 }
 

@@ -12,6 +12,7 @@
 //!
 //! Both need the two arches segmented (labels) with their seeds.
 
+use super::messages;
 use dc_case::{BlobRef, CaseState, ModuleState, Pose, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
@@ -29,14 +30,14 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.occlusion.virtual-bite",
-            label: "aligners-menu-occlusion-virtual-bite",
+            label: "aligners-cmd-occlusion-virtual-bite",
             doc: "aligners-cmd-occlusion-virtual-bite-doc",
             params: occlusion::Params,
             run: run_virtual_bite,
         },
         stage_command! {
             id: "aligners.occlusion.contact-map",
-            label: "aligners-menu-occlusion-contact-map",
+            label: "aligners-cmd-occlusion-contact-map",
             doc: "aligners-cmd-occlusion-contact-map-doc",
             params: ContactMapParams,
             run: run_contact_map,
@@ -72,10 +73,10 @@ pub(crate) fn arch_model(
 ) -> Result<ArchModel, CommandError> {
     let role = arch.role();
     let (Some(scan), Some(labels_ref)) = (state.case.scan(role), data.labels.get(&role)) else {
-        return Err(CommandError::Invalid(format!(
-            "the {} arch has no segmented scan: both arches must be segmented",
-            arch_name(arch)
-        )));
+        return Err(messages::invalid(
+            "aligners-err-both-arches",
+            &[("arch", &messages::arch_word(arch))],
+        ));
     };
     let mesh = state.blobs.require(&scan.mesh)?;
     let labelled = state.blobs.require(labels_ref)?;
@@ -84,10 +85,10 @@ pub(crate) fn arch_model(
         .as_ref()
         .filter(|l| l.len() == mesh.vertex_count())
         .ok_or_else(|| {
-            CommandError::Invalid(format!(
-                "the {} labels do not match the scan",
-                arch_name(arch)
-            ))
+            messages::invalid(
+                "aligners-err-labels-stale",
+                &[("arch", &messages::arch_word(arch))],
+            )
         })?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     ArchModel::new(arch, &vertices, &mesh.tris, labels, &data.seeds)
@@ -302,14 +303,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_commands_are_menu_leaves_and_documented() {
+    fn the_commands_are_registered_and_documented() {
         for id in [
             "aligners.occlusion.virtual-bite",
             "aligners.occlusion.contact-map",
         ] {
             let spec = crate::commands::find(id).unwrap();
             assert_eq!(spec.schema()["type"], "object");
-            assert!(crate::tree::find(id).is_some(), "{id}");
+            assert!(crate::commands::is_registered(id), "{id}");
         }
     }
 

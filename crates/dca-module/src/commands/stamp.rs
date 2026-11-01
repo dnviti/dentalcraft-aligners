@@ -34,7 +34,7 @@ use serde_json::{Map, Value, json};
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.production.stamp",
-        label: "aligners-menu-production-stamp",
+        label: "aligners-cmd-stamp",
         doc: "aligners-cmd-stamp-doc",
         params: StampParams,
         run: run_stamp,
@@ -56,7 +56,7 @@ pub(crate) struct StampParams {
 struct StampSchema {
     /// Arches to stamp.
     arch: Which,
-    /// Directory where the stamped meshes are written as binary STL
+    /// Directory where the stamped models are written as binary STL
     /// (`upper_stamped.stl`, `lower_stamped.stl`, in case coordinates); not
     /// written when missing.
     dir: Option<String>,
@@ -341,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn the_command_is_a_menu_leaf_with_a_schema_and_needs_a_scan() {
-        assert!(crate::tree::find(ID).is_some());
+    fn the_command_is_for_the_cli_with_a_schema_and_needs_a_scan() {
+        assert!(crate::tree::find(ID).is_none());
         let spec = crate::commands::find(ID).unwrap();
         let schema = spec.schema();
         assert_eq!(schema["type"], "object");
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn a_manual_placement_needs_no_segmentation() {
+    fn a_manual_placement_needs_no_teeth_and_gum_separated() {
         let state = block_case();
         let (_, out) = run(
             &state,
@@ -481,7 +481,7 @@ mod tests {
         // the same call on a tooth needs the segmentation
         assert!(matches!(
             run(&state, json!({ "arch": "upper" })),
-            Err(CommandError::Invalid(m)) if m.contains("segment")
+            Err(CommandError::Invalid(m)) if m.contains("tooth colours")
         ));
     }
 }

@@ -127,13 +127,13 @@ pub const MIN_SEEDS: usize = 4;
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum AutoseedError {
     /// The mesh has no triangles or is flat in every direction.
-    #[error("the mesh is empty or degenerate")]
+    #[error("the scan is empty or damaged")]
     DegenerateMesh,
     /// The crowns do not form an arch.
     #[error("arch not found")]
     ArchNotFound,
     /// Fewer than [`MIN_SEEDS`] teeth found.
-    #[error("automatic proposal failed ({0} teeth found): place the seeds manually")]
+    #[error("the teeth could not be found ({0} found): mark them by hand")]
     TooFewSeeds(usize),
     /// The forced arch ends are not molars or second premolars (5..=8).
     #[error("the distal tooth of each side must be 5, 6, 7 or 8")]

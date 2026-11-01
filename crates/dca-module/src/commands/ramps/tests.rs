@@ -32,14 +32,14 @@ fn data(s: &CaseState) -> AlignersState {
 }
 
 #[test]
-fn the_commands_are_menu_leaves_with_schemas() {
+fn the_commands_are_registered_with_schemas() {
     for id in [
         "aligners.occlusion.bite-with-aligners",
         "aligners.occlusion.bite-ramps",
     ] {
         let spec = crate::commands::find(id).unwrap();
         assert_eq!(spec.schema()["type"], "object");
-        assert!(crate::tree::find(id).is_some(), "{id}");
+        assert!(crate::tree::find(id).is_none(), "{id}");
     }
     let schema = crate::commands::find("aligners.occlusion.bite-ramps")
         .unwrap()

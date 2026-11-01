@@ -22,7 +22,7 @@ use super::reconstruct::{aligners_data, arch_name, arch_scan};
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.preparation.gingiva",
-        label: "aligners-menu-preparation-gingiva",
+        label: "aligners-cmd-gingiva",
         doc: "aligners-cmd-gingiva-doc",
         params: dca_algo::gingiva::Params,
         run: run_gingiva,
@@ -90,8 +90,8 @@ mod tests {
     }
 
     #[test]
-    fn the_command_is_a_menu_leaf_and_needs_a_segmentation() {
-        assert!(crate::tree::find(ID).is_some());
+    fn the_command_is_for_the_cli_and_needs_teeth_and_gum_separated() {
+        assert!(crate::tree::find(ID).is_none());
         assert_eq!(
             crate::commands::find(ID).unwrap().schema()["type"],
             "object"

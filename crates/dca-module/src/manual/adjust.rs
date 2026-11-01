@@ -35,6 +35,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::common::{arch_labels, arch_to_case, data_of, fdi_of, finish, invalid, pose_in};
+use crate::commands::messages;
 
 /// Points per crown used by the collision check.
 const SAMPLES: usize = 1500;
@@ -274,9 +275,10 @@ pub(crate) fn run_adjust(
         return Err(invalid(format!("tooth {f} is marked missing")));
     }
     if !data.tooth_frames.contains_key(&f) {
-        return Err(invalid(format!(
-            "tooth {f} has no frame: run the teeth stage first"
-        )));
+        return Err(messages::invalid(
+            "aligners-err-tooth-not-measured",
+            &[("fdi", &f.to_string())],
+        ));
     }
     if p.lock && p.stage.is_some() {
         return Err(invalid("lock only applies to the setup"));

@@ -178,7 +178,7 @@ mod tests {
     fn an_empty_or_unsegmented_case_has_no_frames() {
         assert!(matches!(
             run(&CaseState::default(), Value::Null),
-            Err(CommandError::Invalid(m)) if m.contains("segmentation")
+            Err(CommandError::Invalid(m)) if m.contains("tooth colours")
         ));
         let lower = demo_state(&CaseState::default(), "lower");
         let err = run(&lower, json!({ "arch": "upper" })).unwrap_err();

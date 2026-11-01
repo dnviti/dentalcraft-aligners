@@ -390,7 +390,7 @@ mod tests {
     fn it_needs_a_segmented_arch_and_valid_parameters() {
         assert!(matches!(
             run(&CaseState::default(), Value::Null),
-            Err(CommandError::Invalid(m)) if m.contains("segmentation")
+            Err(CommandError::Invalid(m)) if m.contains("tooth colours")
         ));
         let lower = demo(&CaseState::default(), "lower", "mild");
         assert!(matches!(

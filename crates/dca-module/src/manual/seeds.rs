@@ -19,6 +19,7 @@ use serde_json::json;
 
 use super::common::{arch_labels, arch_name, data_of, fdi_of, finish, invalid, point};
 use crate::commands::import::require_settled;
+use crate::commands::messages;
 
 /// What to do with the seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -65,23 +66,30 @@ pub(crate) fn run_seed(
     match p.op {
         SeedOp::Delete => {
             let Some(i) = had else {
-                return Err(invalid(format!("tooth {f} has no seed")));
+                return Err(messages::invalid(
+                    "aligners-err-tooth-no-mark",
+                    &[("fdi", &f.to_string())],
+                ));
             };
             data.seeds.remove(i);
         }
         SeedOp::Add | SeedOp::Move => {
             let mut at = point(
                 p.position
-                    .ok_or_else(|| invalid("position is required to add or move a seed"))?,
+                    .ok_or_else(|| invalid("position is required to add or move a tooth mark"))?,
             )?;
             match (p.op, had) {
                 (SeedOp::Add, Some(_)) => {
-                    return Err(invalid(format!(
-                        "tooth {f} already has a seed: move it, or delete it first"
-                    )));
+                    return Err(messages::invalid(
+                        "aligners-err-tooth-has-mark",
+                        &[("fdi", &f.to_string())],
+                    ));
                 }
                 (SeedOp::Move, None) => {
-                    return Err(invalid(format!("tooth {f} has no seed to move: add one")));
+                    return Err(messages::invalid(
+                        "aligners-err-tooth-no-mark",
+                        &[("fdi", &f.to_string())],
+                    ));
                 }
                 _ => {}
             }

@@ -196,10 +196,10 @@ pub enum ExportError {
     #[error("no target directory")]
     NoDir,
     /// No stage to export.
-    #[error("there are no aligners yet: run the staging first")]
+    #[error("there are no aligners yet")]
     NoStages,
     /// The labels do not belong to the scan.
-    #[error("the {arch} labels do not match the scan ({labels} labels, {vertices} vertices)")]
+    #[error("the {arch} tooth colours do not match the scan ({labels} colours, {vertices} points)")]
     Labels {
         /// Arch.
         arch: &'static str,

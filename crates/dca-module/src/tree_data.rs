@@ -1,5 +1,7 @@
 //! The data of the menu tree (see `tree` for the id and key naming scheme).
 
+use dc_module_api::LeafInput;
+
 use crate::tree::Node;
 
 /// Top-level groups of the Aligners menu.
@@ -17,130 +19,82 @@ pub(crate) static GROUPS: &[Node] = &[
                 "upload-simple",
             ),
             Node::leaf(
-                "aligners.case.units-orientation",
-                "aligners-menu-case-units-orientation",
-                "aligners-desc-case-units-orientation",
-                "ruler",
-            ),
-            Node::leaf(
-                "aligners.case.case-info",
-                "aligners-menu-case-case-info",
-                "aligners-desc-case-case-info",
-                "identification-card",
-            ),
+                "aligners.auto",
+                "aligners-menu-auto",
+                "aligners-desc-auto",
+                "magic-wand",
+            )
+            .not_a_step(),
         ],
     ),
     Node::group(
-        "aligners.preparation",
-        "aligners-menu-preparation",
-        "aligners-desc-preparation",
-        "faders",
+        "aligners.teeth",
+        "aligners-menu-teeth",
+        "aligners-desc-teeth",
+        "tooth",
         &[
-            Node::group(
-                "aligners.preparation.orientation",
-                "aligners-menu-preparation-orientation",
-                "aligners-desc-preparation-orientation",
-                "compass",
-                &[
-                    Node::leaf(
-                        "aligners.preparation.orientation.automatic",
-                        "aligners-menu-preparation-orientation-automatic",
-                        "aligners-desc-preparation-orientation-automatic",
-                        "magic-wand",
-                    ),
-                    Node::leaf(
-                        "aligners.preparation.orientation.manual",
-                        "aligners-menu-preparation-orientation-manual",
-                        "aligners-desc-preparation-orientation-manual",
-                        "hand-pointing",
-                    ),
-                ],
+            Node::leaf(
+                "aligners.preparation.numbering.automatic",
+                "aligners-menu-preparation-numbering-automatic",
+                "aligners-desc-preparation-numbering-automatic",
+                "list-numbers",
+            ),
+            Node::leaf(
+                "aligners.preparation.segmentation.automatic",
+                "aligners-menu-preparation-segmentation-automatic",
+                "aligners-desc-preparation-segmentation-automatic",
+                "intersect",
+            )
+            .key("A"),
+            Node::leaf(
+                "aligners.teeth.build",
+                "aligners-menu-teeth-build",
+                "aligners-desc-teeth-build",
+                "cube",
             ),
             Node::group(
-                "aligners.preparation.numbering",
-                "aligners-menu-preparation-numbering",
-                "aligners-desc-preparation-numbering",
-                "list-numbers",
+                "aligners.teeth.manual",
+                "aligners-menu-teeth-manual",
+                "aligners-desc-teeth-manual",
+                "hand-pointing",
                 &[
-                    Node::leaf(
-                        "aligners.preparation.numbering.automatic",
-                        "aligners-menu-preparation-numbering-automatic",
-                        "aligners-desc-preparation-numbering-automatic",
-                        "magic-wand",
-                    ),
                     Node::leaf(
                         "aligners.preparation.numbering.place-seeds",
                         "aligners-menu-preparation-numbering-place-seeds",
                         "aligners-desc-preparation-numbering-place-seeds",
                         "map-pin",
-                    ),
+                    )
+                    .not_a_step(),
                     Node::leaf(
                         "aligners.preparation.numbering.renumber",
                         "aligners-menu-preparation-numbering-renumber",
                         "aligners-desc-preparation-numbering-renumber",
                         "pencil-simple",
-                    ),
+                    )
+                    .not_a_step(),
                     Node::leaf(
                         "aligners.preparation.numbering.mark-missing",
                         "aligners-menu-preparation-numbering-mark-missing",
                         "aligners-desc-preparation-numbering-mark-missing",
                         "prohibit",
-                    ),
-                ],
-            ),
-            Node::group(
-                "aligners.preparation.segmentation",
-                "aligners-menu-preparation-segmentation",
-                "aligners-desc-preparation-segmentation",
-                "intersect",
-                &[
-                    Node::leaf(
-                        "aligners.preparation.segmentation.automatic",
-                        "aligners-menu-preparation-segmentation-automatic",
-                        "aligners-desc-preparation-segmentation-automatic",
-                        "magic-wand",
                     )
-                    .key("A"),
+                    .not_a_step(),
                     Node::leaf(
                         "aligners.preparation.segmentation.manual-brush",
                         "aligners-menu-preparation-segmentation-manual-brush",
                         "aligners-desc-preparation-segmentation-manual-brush",
                         "paint-brush",
                     )
-                    .key("B"),
+                    .key("B")
+                    .not_a_step(),
                     Node::leaf(
                         "aligners.preparation.segmentation.clean-borders",
                         "aligners-menu-preparation-segmentation-clean-borders",
                         "aligners-desc-preparation-segmentation-clean-borders",
                         "broom",
-                    ),
+                    )
+                    .not_a_step(),
                 ],
-            ),
-            Node::group(
-                "aligners.preparation.reconstruction",
-                "aligners-menu-preparation-reconstruction",
-                "aligners-desc-preparation-reconstruction",
-                "tooth",
-                &[
-                    Node::leaf(
-                        "aligners.preparation.reconstruction.automatic",
-                        "aligners-menu-preparation-reconstruction-automatic",
-                        "aligners-desc-preparation-reconstruction-automatic",
-                        "magic-wand",
-                    ),
-                    Node::leaf(
-                        "aligners.preparation.reconstruction.rebuild-tooth",
-                        "aligners-menu-preparation-reconstruction-rebuild-tooth",
-                        "aligners-desc-preparation-reconstruction-rebuild-tooth",
-                        "arrows-clockwise",
-                    ),
-                ],
-            ),
-            Node::leaf(
-                "aligners.preparation.gingiva",
-                "aligners-menu-preparation-gingiva",
-                "aligners-desc-preparation-gingiva",
-                "wave-sine",
             ),
         ],
     ),
@@ -149,38 +103,12 @@ pub(crate) static GROUPS: &[Node] = &[
         "aligners-menu-diagnosis",
         "aligners-desc-diagnosis",
         "stethoscope",
-        &[
-            Node::leaf(
-                "aligners.diagnosis.space-analysis",
-                "aligners-menu-diagnosis-space-analysis",
-                "aligners-desc-diagnosis-space-analysis",
-                "arrows-out-line-horizontal",
-            ),
-            Node::leaf(
-                "aligners.diagnosis.little-index",
-                "aligners-menu-diagnosis-little-index",
-                "aligners-desc-diagnosis-little-index",
-                "chart-line",
-            ),
-            Node::leaf(
-                "aligners.diagnosis.bolton",
-                "aligners-menu-diagnosis-bolton",
-                "aligners-desc-diagnosis-bolton",
-                "scales",
-            ),
-            Node::leaf(
-                "aligners.diagnosis.complexity",
-                "aligners-menu-diagnosis-complexity",
-                "aligners-desc-diagnosis-complexity",
-                "gauge",
-            ),
-            Node::leaf(
-                "aligners.diagnosis.edit-values",
-                "aligners-menu-diagnosis-edit-values",
-                "aligners-desc-diagnosis-edit-values",
-                "pencil-simple-line",
-            ),
-        ],
+        &[Node::leaf(
+            "aligners.diagnosis.space-analysis",
+            "aligners-menu-diagnosis-space-analysis",
+            "aligners-desc-diagnosis-space-analysis",
+            "clipboard-text",
+        )],
     ),
     Node::group(
         "aligners.planning",
@@ -188,25 +116,17 @@ pub(crate) static GROUPS: &[Node] = &[
         "aligners-desc-planning",
         "target",
         &[
-            Node::group(
-                "aligners.planning.setup",
-                "aligners-menu-planning-setup",
-                "aligners-desc-planning-setup",
+            Node::leaf(
+                "aligners.occlusion.align",
+                "aligners-menu-occlusion-align",
+                "aligners-desc-occlusion-align",
+                "arrows-merge",
+            ),
+            Node::leaf(
+                "aligners.planning.setup.automatic",
+                "aligners-menu-planning-setup-automatic",
+                "aligners-desc-planning-setup-automatic",
                 "crosshair",
-                &[
-                    Node::leaf(
-                        "aligners.planning.setup.automatic",
-                        "aligners-menu-planning-setup-automatic",
-                        "aligners-desc-planning-setup-automatic",
-                        "magic-wand",
-                    ),
-                    Node::leaf(
-                        "aligners.planning.setup.arch-line",
-                        "aligners-menu-planning-setup-arch-line",
-                        "aligners-desc-planning-setup-arch-line",
-                        "bezier-curve",
-                    ),
-                ],
             ),
             Node::leaf(
                 "aligners.planning.movements",
@@ -214,103 +134,13 @@ pub(crate) static GROUPS: &[Node] = &[
                 "aligners-desc-planning-movements",
                 "arrows-out-cardinal",
             ),
-            Node::group(
-                "aligners.planning.staging",
-                "aligners-menu-planning-staging",
-                "aligners-desc-planning-staging",
+            Node::leaf(
+                "aligners.planning.aligners",
+                "aligners-menu-planning-aligners",
+                "aligners-desc-planning-aligners",
                 "stack",
-                &[
-                    Node::leaf(
-                        "aligners.planning.staging.automatic",
-                        "aligners-menu-planning-staging-automatic",
-                        "aligners-desc-planning-staging-automatic",
-                        "magic-wand",
-                    )
-                    .key("S"),
-                    Node::leaf(
-                        "aligners.planning.staging.tooth-speed",
-                        "aligners-menu-planning-staging-tooth-speed",
-                        "aligners-desc-planning-staging-tooth-speed",
-                        "timer",
-                    ),
-                ],
-            ),
-            Node::leaf(
-                "aligners.planning.ipr",
-                "aligners-menu-planning-ipr",
-                "aligners-desc-planning-ipr",
-                "scissors",
-            ),
-            Node::leaf(
-                "aligners.planning.attachments",
-                "aligners-menu-planning-attachments",
-                "aligners-desc-planning-attachments",
-                "paperclip",
-            ),
-            Node::leaf(
-                "aligners.planning.schedule",
-                "aligners-menu-planning-schedule",
-                "aligners-desc-planning-schedule",
-                "calendar-blank",
-            ),
-            Node::leaf(
-                "aligners.planning.clinical-review",
-                "aligners-menu-planning-clinical-review",
-                "aligners-desc-planning-clinical-review",
-                "clipboard-text",
-            ),
-        ],
-    ),
-    Node::group(
-        "aligners.occlusion",
-        "aligners-menu-occlusion",
-        "aligners-desc-occlusion",
-        "arrows-merge",
-        &[
-            Node::leaf(
-                "aligners.occlusion.virtual-bite",
-                "aligners-menu-occlusion-virtual-bite",
-                "aligners-desc-occlusion-virtual-bite",
-                "mask-happy",
-            ),
-            Node::group(
-                "aligners.occlusion.bite-registration",
-                "aligners-menu-occlusion-bite-registration",
-                "aligners-desc-occlusion-bite-registration",
-                "link",
-                &[
-                    Node::leaf(
-                        "aligners.occlusion.bite-registration.icp",
-                        "aligners-menu-occlusion-bite-registration-icp",
-                        "aligners-desc-occlusion-bite-registration-icp",
-                        "magic-wand",
-                    ),
-                    Node::leaf(
-                        "aligners.occlusion.bite-registration.three-points",
-                        "aligners-menu-occlusion-bite-registration-three-points",
-                        "aligners-desc-occlusion-bite-registration-three-points",
-                        "dots-three",
-                    ),
-                ],
-            ),
-            Node::leaf(
-                "aligners.occlusion.contact-map",
-                "aligners-menu-occlusion-contact-map",
-                "aligners-desc-occlusion-contact-map",
-                "grid-nine",
-            ),
-            Node::leaf(
-                "aligners.occlusion.bite-with-aligners",
-                "aligners-menu-occlusion-bite-with-aligners",
-                "aligners-desc-occlusion-bite-with-aligners",
-                "mouth",
-            ),
-            Node::leaf(
-                "aligners.occlusion.bite-ramps",
-                "aligners-menu-occlusion-bite-ramps",
-                "aligners-desc-occlusion-bite-ramps",
-                "arrow-fat-line-up",
-            ),
+            )
+            .key("S"),
         ],
     ),
     Node::group(
@@ -320,48 +150,17 @@ pub(crate) static GROUPS: &[Node] = &[
         "printer",
         &[
             Node::leaf(
-                "aligners.production.base-labels",
-                "aligners-menu-production-base-labels",
-                "aligners-desc-production-base-labels",
+                "aligners.output.export-all",
+                "aligners-menu-output-export-all",
+                "aligners-desc-output-export-all",
+                "file-arrow-down",
+            )
+            .input(LeafInput::Folder { param: "dir" }),
+            Node::leaf(
+                "aligners.output.study-models",
+                "aligners-menu-output-study-models",
+                "aligners-desc-output-study-models",
                 "cube",
-            ),
-            Node::group(
-                "aligners.production.shell",
-                "aligners-menu-production-shell",
-                "aligners-desc-production-shell",
-                "shield",
-                &[
-                    Node::leaf(
-                        "aligners.production.shell.automatic",
-                        "aligners-menu-production-shell-automatic",
-                        "aligners-desc-production-shell-automatic",
-                        "magic-wand",
-                    ),
-                    Node::leaf(
-                        "aligners.production.shell.corrections",
-                        "aligners-menu-production-shell-corrections",
-                        "aligners-desc-production-shell-corrections",
-                        "hand-pointing",
-                    ),
-                ],
-            ),
-            Node::leaf(
-                "aligners.production.trim-line",
-                "aligners-menu-production-trim-line",
-                "aligners-desc-production-trim-line",
-                "line-segments",
-            ),
-            Node::leaf(
-                "aligners.production.stamp",
-                "aligners-menu-production-stamp",
-                "aligners-desc-production-stamp",
-                "text-aa",
-            ),
-            Node::leaf(
-                "aligners.production.print-check",
-                "aligners-menu-production-print-check",
-                "aligners-desc-production-print-check",
-                "check-circle",
             ),
         ],
     ),
@@ -376,76 +175,13 @@ pub(crate) static GROUPS: &[Node] = &[
                 "aligners-menu-followup-visits",
                 "aligners-desc-followup-visits",
                 "calendar-check",
-            ),
+            )
+            .input(LeafInput::ScanFile { param: "scan" }),
             Node::leaf(
                 "aligners.followup.tracking",
                 "aligners-menu-followup-tracking",
                 "aligners-desc-followup-tracking",
                 "path",
-            ),
-        ],
-    ),
-    Node::group(
-        "aligners.output",
-        "aligners-menu-output",
-        "aligners-desc-output",
-        "export",
-        &[
-            Node::leaf(
-                "aligners.output.export-stl",
-                "aligners-menu-output-export-stl",
-                "aligners-desc-output-export-stl",
-                "file-arrow-down",
-            ),
-            Node::leaf(
-                "aligners.output.print-check",
-                "aligners-menu-output-print-check",
-                "aligners-desc-output-print-check",
-                "check-circle",
-            ),
-            Node::leaf(
-                "aligners.output.study-models",
-                "aligners-menu-output-study-models",
-                "aligners-desc-output-study-models",
-                "cube",
-            ),
-            Node::leaf(
-                "aligners.output.manifest",
-                "aligners-menu-output-manifest",
-                "aligners-desc-output-manifest",
-                "list-checks",
-            ),
-            Node::leaf(
-                "aligners.output.report",
-                "aligners-menu-output-report",
-                "aligners-desc-output-report",
-                "file-text",
-            ),
-            Node::leaf(
-                "aligners.output.viewer",
-                "aligners-menu-output-viewer",
-                "aligners-desc-output-viewer",
-                "play-circle",
-            ),
-        ],
-    ),
-    Node::group(
-        "aligners.tools",
-        "aligners-menu-tools",
-        "aligners-desc-tools",
-        "toolbox",
-        &[
-            Node::leaf(
-                "aligners.tools.manual-tools",
-                "aligners-menu-tools-manual-tools",
-                "aligners-desc-tools-manual-tools",
-                "wrench",
-            ),
-            Node::leaf(
-                "aligners.tools.history",
-                "aligners-menu-tools-history",
-                "aligners-desc-tools-history",
-                "list-checks",
             ),
         ],
     ),

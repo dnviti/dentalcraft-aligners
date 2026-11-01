@@ -1,15 +1,14 @@
 //! The Aligners module for DentalCraft (id `aligners`, shown as
 //! "Aligners" / "Allineatori").
 //!
-//! [`AlignersModule`] implements [`dc_module_api::Module`]. The whole menu
-//! ([`tree`]) is there; an entry is implemented when its command is in the
-//! registry ([`commands`]), otherwise it is a placeholder: invoking it
-//! selects the entry in the inspector and shows the "not available yet"
-//! toast. The algorithms behind the entries live in `dca-algo`, the data in
-//! `dca-model`.
+//! [`AlignersModule`] implements [`dc_module_api::Module`]. The menu
+//! ([`tree`]) holds what the end user needs; every other command of the
+//! registry ([`commands`]) is reachable from the CLI and the MCP server. The
+//! algorithms behind the entries live in `dca-algo`, the data in `dca-model`.
 
 mod codec;
 pub mod commands;
+mod done;
 mod inspector;
 mod manual;
 pub mod tree;
@@ -21,7 +20,7 @@ use dc_module_api::{
     ModuleRegistry, NOT_AVAILABLE_KEY, Toast, ToastLevel, is_import_scans_command,
 };
 use dc_scene::SceneItem;
-use dca_model::{AlignersState, StagingSettings};
+use dca_model::AlignersState;
 
 pub use dca_model::MODULE_ID;
 
@@ -34,8 +33,6 @@ pub const NAME_KEY: &str = "aligners-name";
 #[derive(Debug)]
 pub struct AlignersModule {
     selected: Option<&'static str>,
-    /// Values of the staging limit sliders (placeholder page).
-    staging_ui: StagingSettings,
     /// Study base settings being edited in the inspector.
     study_ui: inspector::StudyEdit,
 }
@@ -52,7 +49,6 @@ impl AlignersModule {
         loader(); // registers the translations
         Self {
             selected: None,
-            staging_ui: StagingSettings::default(),
             study_ui: None,
         }
     }
@@ -115,16 +111,24 @@ impl Module for AlignersModule {
                 ctx.toast(Toast::new(ToastLevel::Info, NOT_AVAILABLE_KEY));
                 Ok(())
             }
-            // the import needs its files: the shell asks for them and runs it
-            MenuStatus::Ready if is_import_scans_command(node.id) => Ok(()),
+            // the import needs its files, a leaf with an input its answer: the
+            // shell asks for them and runs the command
+            MenuStatus::Ready if is_import_scans_command(node.id) || node.input.is_some() => Ok(()),
             // a Ready leaf is a registered command: run it with its defaults
             MenuStatus::Ready => {
                 let spec = commands::find(node.id)
                     .ok_or_else(|| ModuleError::UnknownCommand(command_id.to_owned()))?;
+                if let Some(key) = commands::wrappers::notice(node.id, ctx.state()) {
+                    ctx.toast(Toast::new(ToastLevel::Info, key));
+                }
                 ctx.queue(Box::new(spec.command(serde_json::Value::Null)));
                 Ok(())
             }
         }
+    }
+
+    fn leaf_done(&self, state: &CaseState, leaf_id: &str) -> bool {
+        done::leaf_done(state, leaf_id)
     }
 
     fn select(&mut self, id: &str) {
@@ -133,7 +137,7 @@ impl Module for AlignersModule {
 
     fn inspector(&mut self, ui: &mut egui::Ui, ctx: &mut ModuleCtx<'_>) {
         loader();
-        inspector::show(ui, self.selected, &mut self.staging_ui);
+        inspector::show(ui, self.selected);
         if inspector::is_study_models(self.selected) {
             inspector::study_settings(ui, ctx, &mut self.study_ui);
         }

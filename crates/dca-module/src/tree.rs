@@ -4,10 +4,14 @@
 //! ([`menu_tree`]), the command list ([`command_descs`]) and the inspector
 //! (title and description by item id). The data is in `tree_data.rs`.
 //!
-//! Naming: a leaf is the command `aligners.<path>` (the path is the ids of
-//! the group, item and optional sub-item joined by dots, e.g.
-//! `aligners.preparation.segmentation.manual-brush`). Fluent ids cannot
-//! contain dots, so the i18n keys use hyphens:
+//! The menu holds what a dentist or a technician needs; the other registered
+//! commands ([`crate::commands`]) are reachable from the CLI and the MCP
+//! server only, with their own label keys.
+//!
+//! Naming: a leaf is the command `aligners.<path>`, whatever group shows it
+//! (e.g. `aligners.preparation.segmentation.manual-brush` is under Teeth, so
+//! that scripts keep working). Fluent ids cannot contain dots, so the i18n
+//! keys use hyphens:
 //!
 //! | what        | id / key                                              |
 //! |-------------|-------------------------------------------------------|
@@ -15,13 +19,13 @@
 //! | label key   | `aligners-menu-preparation-segmentation-manual-brush` |
 //! | description | `aligners-desc-preparation-segmentation-manual-brush` |
 //!
-//! Groups and sub-menus follow the same scheme (`aligners.preparation`,
-//! `aligners-menu-preparation`) but are not commands.
+//! Groups and sub-menus follow the same scheme (`aligners.teeth`,
+//! `aligners-menu-teeth`) but are not commands.
 //!
 //! Status: a leaf is `Ready` if and only if a command with its id is
 //! registered in [`crate::commands`]; otherwise it is a placeholder (`Stub`).
 
-use dc_module_api::{CommandDesc, MenuItem, MenuStatus, MenuTree};
+use dc_module_api::{CommandDesc, LeafInput, MenuItem, MenuStatus, MenuTree};
 
 use crate::tree_data::GROUPS;
 
@@ -39,6 +43,11 @@ pub struct Node {
     pub icon: &'static str,
     /// Keyboard shortcut of a leaf, egui notation (`A`, `Ctrl+Shift+S`).
     pub shortcut: Option<&'static str>,
+    /// What the shell asks the user before running a leaf.
+    pub input: Option<LeafInput>,
+    /// The leaf is a step of the workflow (not a shortcut over the steps, not
+    /// an optional correction).
+    pub counts_as_step: bool,
     /// Children; empty for a leaf.
     pub children: &'static [Node],
 }
@@ -58,6 +67,8 @@ impl Node {
             desc_key,
             icon,
             shortcut: None,
+            input: None,
+            counts_as_step: true,
             children: &[],
         }
     }
@@ -65,6 +76,18 @@ impl Node {
     /// The same leaf with a keyboard shortcut.
     pub(crate) const fn key(mut self, shortcut: &'static str) -> Self {
         self.shortcut = Some(shortcut);
+        self
+    }
+
+    /// The same leaf asking the user for `input` before it runs.
+    pub(crate) const fn input(mut self, input: LeafInput) -> Self {
+        self.input = Some(input);
+        self
+    }
+
+    /// The same leaf left out of the workflow progress.
+    pub(crate) const fn not_a_step(mut self) -> Self {
+        self.counts_as_step = false;
         self
     }
 
@@ -82,6 +105,8 @@ impl Node {
             desc_key,
             icon,
             shortcut: None,
+            input: None,
+            counts_as_step: true,
             children,
         }
     }
@@ -122,7 +147,9 @@ impl Node {
                 self.children.iter().map(Node::to_menu_item).collect(),
             )
         };
-        let item = item.with_icon(self.icon);
+        let mut item = item.with_icon(self.icon);
+        item.input = self.input;
+        item.counts_as_step = self.counts_as_step;
         if self.status() == MenuStatus::Stub {
             item.stub()
         } else {

@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use super::messages;
 use dc_case::{CaseState, Fdi, ModuleState};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
@@ -30,14 +31,14 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.preparation.reconstruction.automatic",
-            label: "aligners-menu-preparation-reconstruction-automatic",
+            label: "aligners-cmd-reconstruction-automatic",
             doc: "aligners-cmd-reconstruction-automatic-doc",
             params: dca_algo::reconstruct::Params,
             run: run_automatic,
         },
         stage_command! {
             id: "aligners.preparation.reconstruction.rebuild-tooth",
-            label: "aligners-menu-preparation-reconstruction-rebuild-tooth",
+            label: "aligners-cmd-reconstruction-rebuild-tooth",
             doc: "aligners-cmd-reconstruction-rebuild-tooth-doc",
             params: dca_algo::reconstruct::ToothParams,
             run: run_rebuild_tooth,
@@ -245,10 +246,12 @@ fn run_rebuild_tooth(
     let mut data = aligners_data(&next)?;
     let scan = arch_scan(&next, &data, arch)?
         .ok_or_else(|| crate::commands::messages::not_segmented(arch))?;
-    let axis = axes(&data, &scan, arch)
-        .get(&fdi)
-        .copied()
-        .ok_or_else(|| CommandError::Invalid(format!("tooth {fdi} is not in the segmentation")))?;
+    let axis = axes(&data, &scan, arch).get(&fdi).copied().ok_or_else(|| {
+        messages::invalid(
+            "aligners-err-tooth-not-separated",
+            &[("fdi", &fdi.to_string())],
+        )
+    })?;
     let one = BTreeMap::from([(fdi, axis)]);
     let input = Input {
         vertices: &scan.vertices,
@@ -367,11 +370,11 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_are_menu_leaves_with_schemas() {
+    fn the_commands_are_registered_with_schemas() {
         for id in [AUTO, ONE] {
             let spec = crate::commands::find(id).unwrap();
             assert_eq!(spec.schema()["type"], "object");
-            assert!(crate::tree::find(id).is_some(), "{id}");
+            assert!(crate::commands::is_registered(id), "{id}");
         }
         assert!(crate::commands::find(ONE).unwrap().schema()["properties"]["fdi"].is_object());
     }

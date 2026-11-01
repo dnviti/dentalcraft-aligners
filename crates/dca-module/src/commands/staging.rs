@@ -23,6 +23,7 @@
 
 use std::collections::BTreeMap;
 
+use super::messages;
 use dc_case::{CaseState, Fdi, ModuleState, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
@@ -40,7 +41,7 @@ use serde_json::{Value, json};
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![stage_command! {
         id: "aligners.planning.staging.automatic",
-        label: "aligners-menu-planning-staging-automatic",
+        label: "aligners-cmd-staging-automatic",
         doc: "aligners-cmd-staging-automatic-doc",
         params: Params,
         run: run_automatic,
@@ -185,18 +186,22 @@ fn run_automatic(
 
     for arch in params.arch.arches() {
         let role = arch.role();
+        // `why` is the i18n key of the reason
         let skip = |why: &str| -> Result<bool, CommandError> {
             if explicit {
-                Err(CommandError::Invalid(format!(
-                    "the {} arch: {why}",
-                    arch_name(arch)
-                )))
+                Err(messages::invalid(
+                    "aligners-err-arch-why",
+                    &[
+                        ("arch", &messages::arch_word(arch)),
+                        ("why", &messages::tr(why, &[])),
+                    ],
+                ))
             } else {
                 Ok(true)
             }
         };
         let Some(scan) = labelled_scan(state, &data, role)? else {
-            skip("no segmented scan: run the segmentation first")?;
+            skip("aligners-err-why-not-separated")?;
             continue;
         };
         let fdis: Vec<Fdi> = data
@@ -206,11 +211,11 @@ fn run_automatic(
             .filter(|&f| Arch::of(f) == arch)
             .collect();
         if fdis.is_empty() {
-            skip("no tooth frames: run the teeth stage first")?;
+            skip("aligners-err-why-not-measured")?;
             continue;
         }
         if !fdis.iter().any(|f| data.setup.poses.contains_key(f)) {
-            skip("no setup: run the setup first")?;
+            skip("aligners-err-why-no-setup")?;
             continue;
         }
         let seq = anatomy::arch_sequence(&fdis, arch);
@@ -337,10 +342,7 @@ fn run_automatic(
         );
     }
     if report.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch can be staged: run the segmentation, the teeth stage and the setup first"
-                .to_owned(),
-        ));
+        return Err(messages::invalid("aligners-err-nothing-to-stage", &[]));
     }
     let mut next = state.clone();
     let total = data.stages.len();
@@ -474,12 +476,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_command_is_registered_as_the_menu_leaf() {
+    fn the_command_is_registered_for_the_cli_and_not_in_the_menu() {
         let spec = crate::commands::find("aligners.planning.staging.automatic").unwrap();
         let schema = spec.schema();
         assert!(schema["properties"]["pattern"].is_object());
         assert!(schema["properties"]["arch"].is_object());
-        assert!(crate::tree::find("aligners.planning.staging.automatic").is_some());
+        assert!(crate::tree::find("aligners.planning.staging.automatic").is_none());
     }
 
     #[test]
@@ -505,7 +507,7 @@ pub(crate) mod tests {
             json!({ "arch": "lower" }),
         )
         .unwrap_err();
-        assert!(matches!(err, CommandError::Invalid(m) if m.contains("setup")));
+        assert!(matches!(err, CommandError::Invalid(m) if m.contains("final position")));
         let err = exec(
             "aligners.planning.staging.automatic",
             &s,

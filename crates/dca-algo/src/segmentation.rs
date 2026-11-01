@@ -60,7 +60,7 @@ pub enum SegmentationError {
     #[error("{0}")]
     Invalid(String),
     /// No seed of the arch: nothing to segment.
-    #[error("no tooth seed on this arch: place or propose the seeds first")]
+    #[error("this arch has no tooth marks: find the teeth or mark them first")]
     NoSeeds,
     /// The simplification failed.
     #[error("simplification of the scan failed: {0}")]
@@ -74,13 +74,11 @@ pub struct Params {
     /// Arch to segment (`upper` or `lower`); all the arches with a scan and
     /// seeds when absent.
     pub arch: Option<Arch>,
-    /// Faces of the simplified mesh of the first partition (plugin
-    /// `rw_faces`, Lai et al. 2009).
+    /// Faces of the simplified scan of the first separation.
     pub target_faces: usize,
-    /// Weight of the convex edges in the fold measure (plugin
-    /// `rw_eta_convex`, Lai et al. 2009).
+    /// Weight of the convex edges in the fold measure.
     pub eta_convex: f64,
-    /// Sharpness of the fold weights, `exp(-d / sigma)` (plugin `rw_sigma`).
+    /// Sharpness of the fold weights, `exp(-d / sigma)`.
     pub sigma: f64,
     /// Refine the boundaries at full resolution.
     pub refine: bool,

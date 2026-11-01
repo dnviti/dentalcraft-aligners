@@ -42,14 +42,14 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
             id: "aligners.occlusion.bite-with-aligners",
-            label: "aligners-menu-occlusion-bite-with-aligners",
+            label: "aligners-cmd-bite-with-aligners",
             doc: "aligners-cmd-bite-with-aligners-doc",
             params: BiteParams,
             run: run_bite,
         },
         stage_command! {
             id: "aligners.occlusion.bite-ramps",
-            label: "aligners-menu-occlusion-bite-ramps",
+            label: "aligners-cmd-bite-ramps",
             doc: "aligners-cmd-bite-ramps-doc",
             params: RampParams,
             run: run_ramps,
@@ -554,7 +554,7 @@ impl StageBite {
     pub(crate) fn missing(&self) -> Option<&'static str> {
         match (&self.lower, &self.upper) {
             (Some(_), Some(_)) => None,
-            _ => Some("the bite needs both arches segmented"),
+            _ => Some("the bite needs both arches, with teeth and gum separated"),
         }
     }
 

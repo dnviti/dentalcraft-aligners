@@ -52,6 +52,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use super::messages;
 use super::staging::{aligners_data, arch_name, labelled_scan, md_sign};
 
 /// The registered commands of this stage, built with `stage_command!`.
@@ -144,11 +145,9 @@ fn pick_arch(params: &Params, data: &AlignersState) -> Result<Arch, CommandError
     match (has(Arch::Upper), has(Arch::Lower)) {
         (true, false) => Ok(Arch::Upper),
         (false, true) => Ok(Arch::Lower),
-        (false, false) => Err(CommandError::Invalid(
-            "no tooth frames: run the segmentation and the teeth stage first".to_owned(),
-        )),
+        (false, false) => Err(messages::invalid("aligners-err-no-teeth-any", &[])),
         (true, true) => Err(CommandError::Invalid(
-            "the case has both arches: say which one the scan is (arch)".to_owned(),
+            "the case has both arches: say which one (arch)".to_owned(),
         )),
     }
 }
@@ -322,6 +321,17 @@ fn read_visit_scan(
     Ok((scan.mesh, scan.warnings))
 }
 
+/// The arch a visit scan shows, from the name of its file and its shape, as
+/// the import recognises it.
+fn scan_arch(mesh: &TriMesh, path: &str) -> Result<Arch, CommandError> {
+    let name = Path::new(path)
+        .file_name()
+        .map_or_else(|| path.into(), |n| n.to_string_lossy());
+    super::import::detect(mesh, &name)
+        .map(|d| d.arch)
+        .map_err(|_| messages::invalid("aligners-err-visit-arch", &[]))
+}
+
 fn run_visit(
     state: &CaseState,
     params: Params,
@@ -335,7 +345,17 @@ fn run_visit(
     }
     let vp = params.visit_params()?;
     let mut data = aligners_data(state)?;
-    let arch = pick_arch(&params, &data)?;
+    // a click gives only the file: with both arches, the file says which one
+    let both = |a| data.tooth_frames.keys().any(|&f| Arch::of(f) == a);
+    let read = if params.arch.is_none() && both(Arch::Upper) && both(Arch::Lower) {
+        Some(read_visit_scan(&params.scan, ctx)?)
+    } else {
+        None
+    };
+    let arch = match &read {
+        Some((mesh, _)) => scan_arch(mesh, &params.scan)?,
+        None => pick_arch(&params, &data)?,
+    };
     let role: ScanRole = arch.role();
     let name = arch_name(arch);
     let date = match &params.date {
@@ -352,27 +372,29 @@ fn run_visit(
         .filter(|&f| Arch::of(f) == arch)
         .collect();
     if fdis.is_empty() {
-        return Err(CommandError::Invalid(format!(
-            "the {name} arch has no tooth frames: run the teeth stage first"
-        )));
+        return Err(messages::invalid(
+            "aligners-err-arch-no-teeth",
+            &[("arch", &messages::arch_word(arch))],
+        ));
     }
     let Some(case_scan) = labelled_scan(state, &data, role)? else {
-        return Err(CommandError::Invalid(format!(
-            "the {name} arch has no segmented scan: run the segmentation first"
-        )));
+        return Err(messages::not_segmented(arch));
     };
     let last = data.stages.iter().map(|s| s.index).max().unwrap_or(0);
     let worn = params
         .stage
         .unwrap_or_else(|| dca_algo::schedule::active_stages(arch, &data.stages));
     if worn > last {
-        return Err(CommandError::Invalid(format!(
-            "aligner {worn} is not in the plan ({} aligners): run the staging first or give an earlier stage",
-            last
-        )));
+        return Err(messages::invalid(
+            "aligners-err-aligner-not-planned",
+            &[("aligner", &worn.to_string()), ("total", &last.to_string())],
+        ));
     }
 
-    let (scan, warnings) = read_visit_scan(&params.scan, ctx)?;
+    let (scan, warnings) = match read {
+        Some(read) => read,
+        None => read_visit_scan(&params.scan, ctx)?,
+    };
     let scan_v: Vec<DVec3> = scan.positions.iter().map(|p| p.as_dvec3()).collect();
 
     // the model the plan expects at that aligner: teeth and gingiva at stage `worn`
@@ -641,12 +663,7 @@ fn run_replan(
                     .rev()
                     .find(|v| arch_role.is_none_or(|r| r == v.arch))
                     .cloned()
-                    .ok_or_else(|| {
-                        CommandError::Invalid(
-                            "no control visit to start from: analyse a visit first or give the delivered aligner (stage)"
-                                .to_owned(),
-                        )
-                    })?,
+                    .ok_or_else(|| messages::invalid("aligners-err-no-visit", &[]))?,
             )
         }
     };
@@ -675,9 +692,10 @@ fn run_replan(
         .filter(|&f| Arch::of(f) == arch)
         .collect();
     if fdis.is_empty() || !fdis.iter().any(|f| data.setup.poses.contains_key(f)) {
-        return Err(CommandError::Invalid(format!(
-            "the {name} arch has no tooth frames and setup: run the teeth stage and the setup first"
-        )));
+        return Err(messages::invalid(
+            "aligners-err-arch-no-plan",
+            &[("arch", &messages::arch_word(arch))],
+        ));
     }
     let last = data.stages.iter().map(|s| s.index).max().unwrap_or(0);
     let from = visit
@@ -689,9 +707,7 @@ fn run_replan(
         )));
     }
     let Some(scan) = labelled_scan(state, &data, arch.role())? else {
-        return Err(CommandError::Invalid(format!(
-            "the {name} arch has no segmented scan: run the segmentation first"
-        )));
+        return Err(messages::not_segmented(arch));
     };
 
     // the arch frame the staging works in, the crowns in the rest frames
@@ -1198,6 +1214,52 @@ mod tests {
         let rms = |v: &Value| v["registration_rms_mm"].as_f64().unwrap();
         assert!((rms(&out) - rms(&want)).abs() < 1e-3, "{out}\n{want}");
         assert_eq!(out["decision"], want["decision"], "{out}");
+    }
+
+    #[test]
+    fn with_both_arches_the_file_says_which_arch_the_visit_is() {
+        let lower = staged("lower");
+        let both = exec(
+            "aligners.demo",
+            &lower,
+            json!({ "arch": "upper", "severity": "mild" }),
+        )
+        .unwrap()
+        .0;
+        let both = exec("aligners.teeth.frames", &both, Value::Null).unwrap().0;
+        // a click gives only the file: its name tells the arch
+        let path = write_visit_scan(&lower, 2, &BTreeMap::new(), "lower");
+        let out = exec(
+            ID,
+            &both,
+            json!({ "scan": path.display().to_string(), "stage": 2, "segment": false }),
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(out.unwrap().1["arch"], "lower");
+        // a file that tells nothing is refused with what to do
+        let path = std::env::temp_dir().join(format!("dca-visit-{}-x.stl", std::process::id()));
+        let tiny = TriMesh::new(
+            vec![
+                glam::Vec3::ZERO,
+                glam::Vec3::new(40.0, 0.0, 0.0),
+                glam::Vec3::new(0.0, 40.0, 0.0),
+                glam::Vec3::new(0.0, 0.0, 40.0),
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        );
+        dc_mesh::io::write(&path, &tiny, dc_mesh::MeshFormat::Stl).unwrap();
+        let err = exec(ID, &both, json!({ "scan": path.display().to_string() }));
+        let _ = std::fs::remove_file(&path);
+        let m = err.unwrap_err().to_string();
+        assert!(m.contains("upper or the lower"), "{m}");
+    }
+
+    #[test]
+    fn a_click_on_re_plan_without_a_visit_says_to_do_the_visit() {
+        let m = exec("aligners.followup.tracking", &staged("lower"), Value::Null)
+            .unwrap_err()
+            .to_string();
+        assert!(m.contains("run Control visit first"), "{m}");
     }
 
     #[test]

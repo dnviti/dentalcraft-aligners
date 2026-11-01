@@ -98,7 +98,7 @@ pub struct Params {
     pub radius_mm: f64,
     /// Within this of the margins the weights of a vertex sum to one, mm.
     pub root_mm: f64,
-    /// Fade back to the harmonic weights over this, mm.
+    /// Fade back to the smooth weights over this, mm.
     pub root_fade_mm: f64,
 }
 

@@ -70,7 +70,7 @@ pub struct FullParams {
     /// Which print files to make: models for thermoforming, aligners to
     /// print directly, or both.
     pub workflow: Workflow,
-    /// Run the print check on every mesh.
+    /// Run the print check on every file.
     pub print_check: bool,
     /// Count the self-intersections in the print check (the slow part).
     pub self_intersections: bool,
@@ -92,9 +92,9 @@ pub struct FullParams {
     /// gingiva, else the deformed scans as the models and no aligner;
     /// `true` requires them, `false` uses the scans.
     pub shells: Option<bool>,
-    /// Quality of the shell-stage files (voxel and mesh tolerance).
+    /// Quality of the shell-stage files (detail and surface tolerance).
     pub quality: Quality,
-    /// Voxel of the model and shell fields (mm), instead of the quality's.
+    /// Detail of the models and shells (mm), instead of the quality's.
     pub voxel_mm: Option<f64>,
     /// Identification stamp: embossed on the models, engraved in the
     /// aligners (arch, number, date of the export, `stamp_code`).
@@ -102,8 +102,8 @@ pub struct FullParams {
     /// Case code in the stamp (letters, digits, `-`; at most 8; never the
     /// name of the patient).
     pub stamp_code: String,
-    /// Meshes built at the same time (default: what the source of the meshes
-    /// says one build can afford, at most the threads).
+    /// Files built at the same time (default: what one build can afford, at
+    /// most the threads).
     pub parallel: Option<usize>,
 }
 
