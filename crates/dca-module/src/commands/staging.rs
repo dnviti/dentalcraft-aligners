@@ -114,7 +114,7 @@ pub(crate) fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandE
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned())),
+            .ok_or_else(crate::commands::messages::no_data),
     }
 }
 
@@ -138,13 +138,12 @@ pub(crate) fn labelled_scan(
     let labels = labelled
         .vertex_labels
         .clone()
-        .ok_or_else(|| CommandError::Invalid("the tooth labels are missing".to_owned()))?;
+        .ok_or_else(crate::commands::messages::tooth_labels_missing)?;
     if labels.len() != mesh.vertex_count() {
-        return Err(CommandError::Invalid(format!(
-            "the labels do not match the scan ({} labels, {} vertices)",
+        return Err(crate::commands::messages::tooth_labels_mismatch(
             labels.len(),
-            mesh.vertex_count()
-        )));
+            mesh.vertex_count(),
+        ));
     }
     Ok(Some(LabelledScan { mesh, labels }))
 }

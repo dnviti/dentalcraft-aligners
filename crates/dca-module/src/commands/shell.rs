@@ -296,7 +296,7 @@ fn run_print(
     ctx.check_cancelled()?;
     let data = state
         .module_data::<AlignersState>(MODULE_ID)
-        .ok_or_else(|| CommandError::Invalid("the case has no Aligners data".to_owned()))?;
+        .ok_or_else(crate::commands::messages::no_case_data)?;
     let design = params.design(&data.settings);
     let explicit = params.arch != teeth::Which::All;
     let mut work = Vec::new();

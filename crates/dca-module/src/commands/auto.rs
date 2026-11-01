@@ -146,7 +146,7 @@ fn numbering(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandErr
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .map(|d| d.seeds.clone())
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned()))?,
+            .ok_or_else(crate::commands::messages::no_data)?,
     };
     let mut steps = Vec::new();
     for arch in arches(state) {

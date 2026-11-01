@@ -87,6 +87,7 @@ mod frame;
 mod gingiva;
 pub mod import;
 mod manual;
+mod messages;
 mod occlusion;
 mod ramps;
 mod reconstruct;

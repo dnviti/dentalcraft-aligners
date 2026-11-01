@@ -32,19 +32,20 @@ fn run_frame(
         .choose(has(dc_case::ScanRole::Upper), has(dc_case::ScanRole::Lower))
         .ok_or_else(|| {
             use dca_algo::frame::Reference;
-            CommandError::Invalid(
-                match params.reference {
-                    Reference::Auto => "the case has no upper or lower scan",
-                    Reference::Upper => "the case has no upper scan",
-                    Reference::Lower => "the case has no lower scan",
+            match params.reference {
+                Reference::Auto => crate::commands::messages::no_scan_any(),
+                Reference::Upper => {
+                    crate::commands::messages::no_scan(dca_algo::anatomy::Arch::Upper)
                 }
-                .to_owned(),
-            )
+                Reference::Lower => {
+                    crate::commands::messages::no_scan(dca_algo::anatomy::Arch::Lower)
+                }
+            }
         })?;
     let scan = state
         .case
         .scan(arch.role())
-        .ok_or_else(|| CommandError::Invalid("the reference scan is missing".to_owned()))?;
+        .ok_or_else(crate::commands::messages::reference_missing)?;
     super::import::require_settled(scan)?;
     let mesh = state.blobs.require(&scan.mesh)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
@@ -52,7 +53,7 @@ fn run_frame(
         None => Vec::new(),
         Some(m) => m
             .downcast_ref::<AlignersState>()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned()))?
+            .ok_or_else(crate::commands::messages::no_data)?
             .seeds
             .clone(),
     };

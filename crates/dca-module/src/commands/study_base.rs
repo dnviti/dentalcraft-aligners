@@ -98,7 +98,7 @@ fn failed(e: impl ToString) -> CommandError {
 fn data_of(state: &CaseState) -> Result<&AlignersState, CommandError> {
     state
         .module_data::<AlignersState>(MODULE_ID)
-        .ok_or_else(|| CommandError::Invalid("the case has no Aligners data".to_owned()))
+        .ok_or_else(crate::commands::messages::no_case_data)
 }
 
 /// The geometry parameters: the settings, overridden by the fields of

@@ -155,10 +155,7 @@ fn run_trim_line(
         ctx.check_cancelled()?;
         let Some(scan) = labelled_scan(state, &data, arch.role())? else {
             if explicit {
-                return Err(CommandError::Invalid(format!(
-                    "the {} arch has no segmented scan: run the segmentation first",
-                    arch_name(arch)
-                )));
+                return Err(crate::commands::messages::not_segmented(arch));
             }
             continue;
         };
@@ -177,9 +174,7 @@ fn run_trim_line(
         out.insert(arch_name(arch).to_owned(), report);
     }
     if out.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has a segmented scan: run the segmentation first".to_owned(),
-        ));
+        return Err(crate::commands::messages::none_segmented());
     }
     Ok((state.clone(), Value::Object(out)))
 }

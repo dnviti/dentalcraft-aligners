@@ -47,22 +47,16 @@ fn run_automatic(
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned()))?,
+            .ok_or_else(crate::commands::messages::no_data)?,
     };
     let has_seeds = |arch: Arch| data.seeds.iter().any(|s| Arch::of(s.fdi) == arch);
     let arches: Vec<Arch> = match params.arch {
         Some(arch) => {
             if state.case.scan(arch.role()).is_none() {
-                return Err(CommandError::Invalid(format!(
-                    "the case has no {} scan",
-                    arch_name(arch)
-                )));
+                return Err(crate::commands::messages::no_scan(arch));
             }
             if !has_seeds(arch) {
-                return Err(CommandError::Invalid(format!(
-                    "the {} arch has no tooth seeds: place or propose the seeds first",
-                    arch_name(arch)
-                )));
+                return Err(crate::commands::messages::no_seeds(arch));
             }
             vec![arch]
         }
@@ -72,9 +66,7 @@ fn run_automatic(
             .collect(),
     };
     if arches.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has a scan with tooth seeds: place or propose the seeds first".to_owned(),
-        ));
+        return Err(crate::commands::messages::none_seeded());
     }
 
     // the gate of every later stage: nothing is computed on a scan whose arch
@@ -89,9 +81,10 @@ fn run_automatic(
     for arch in arches {
         ctx.check_cancelled()?;
         let role = arch.role();
-        let scan = state.case.scan(role).ok_or_else(|| {
-            CommandError::Invalid(format!("the {} scan is missing", arch_name(arch)))
-        })?;
+        let scan = state
+            .case
+            .scan(role)
+            .ok_or_else(|| crate::commands::messages::scan_missing(arch))?;
         let mesh = state.blobs.require(&scan.mesh)?;
         let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         // the arch frame its seeds define (case_teeth.segment_iter works in arch coordinates)

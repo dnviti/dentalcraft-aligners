@@ -124,7 +124,7 @@ fn run_automatic(
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| invalid("the Aligners data cannot be read"))?,
+            .ok_or_else(crate::commands::messages::no_data)?,
     };
     let explicit = params.arch != Which::All;
     let mut next = state.clone();
@@ -134,10 +134,7 @@ fn run_automatic(
         let role = arch.role();
         let (Some(scan), Some(labels_ref)) = (state.case.scan(role), data.labels.get(&role)) else {
             if explicit {
-                return Err(invalid(format!(
-                    "the {} arch has no segmented scan: run the segmentation first",
-                    arch_name(arch)
-                )));
+                return Err(crate::commands::messages::not_segmented(arch));
             }
             continue;
         };
@@ -146,14 +143,13 @@ fn run_automatic(
         let labels = labelled
             .vertex_labels
             .as_ref()
-            .ok_or_else(|| invalid(format!("the {} labels are missing", arch_name(arch))))?;
+            .ok_or_else(|| crate::commands::messages::labels_missing(arch))?;
         if labels.len() != mesh.vertex_count() {
-            return Err(invalid(format!(
-                "the {} labels do not match the scan ({} labels, {} vertices)",
-                arch_name(arch),
+            return Err(crate::commands::messages::labels_mismatch(
+                arch,
                 labels.len(),
-                mesh.vertex_count()
-            )));
+                mesh.vertex_count(),
+            ));
         }
         let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let framed = frame::run(
@@ -332,9 +328,7 @@ fn run_automatic(
         );
     }
     if report.is_empty() {
-        return Err(invalid(
-            "no arch has a segmented scan: run the segmentation first",
-        ));
+        return Err(crate::commands::messages::none_segmented());
     }
     next.set_module(MODULE_ID, ModuleState::new(data));
     Ok((next, Value::Object(report)))

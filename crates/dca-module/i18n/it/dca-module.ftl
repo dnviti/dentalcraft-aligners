@@ -386,3 +386,21 @@ aligners-cleared-stages = stadi degli allineatori
 aligners-cleared-ramps = rampe di morso
 aligners-cleared-visits = visite di controllo
 aligners-cleared-bite-registered = registrazione del morso (da rifare: l'altra arcata resta dove l'aveva spostata la registrazione)
+
+# Errori di un comando quando manca un passo da cui dipende
+aligners-err-arch-upper = superiore
+aligners-err-arch-lower = inferiore
+aligners-err-no-data = i dati di Allineatori non sono leggibili
+aligners-err-no-case-data = il caso non ha dati di Allineatori
+aligners-err-arch-not-segmented = l'arcata { $arch } non ha una scansione segmentata: esegui prima la segmentazione
+aligners-err-none-segmented = nessuna arcata ha una scansione segmentata: esegui prima la segmentazione
+aligners-err-labels-missing = mancano le etichette dell'arcata { $arch }
+aligners-err-tooth-labels-missing = mancano le etichette dei denti
+aligners-err-labels-mismatch = le etichette dell'arcata { $arch } non corrispondono alla scansione ({ $labels } etichette, { $vertices } vertici)
+aligners-err-tooth-labels-mismatch = le etichette non corrispondono alla scansione ({ $labels } etichette, { $vertices } vertici)
+aligners-err-no-scan = il caso non ha una scansione { $arch }
+aligners-err-no-scan-any = il caso non ha né una scansione superiore né una inferiore
+aligners-err-scan-missing = manca la scansione { $arch }
+aligners-err-reference-missing = manca la scansione di riferimento
+aligners-err-arch-no-seeds = l'arcata { $arch } non ha semi dei denti: posizionali o proponili prima
+aligners-err-none-seeded = nessuna arcata ha una scansione con semi dei denti: posizionali o proponili prima

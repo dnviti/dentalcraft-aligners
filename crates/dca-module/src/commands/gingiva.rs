@@ -42,10 +42,7 @@ fn run_gingiva(
     for arch in params.arch.arches() {
         let Some(scan) = arch_scan(state, &data, arch)? else {
             if explicit {
-                return Err(CommandError::Invalid(format!(
-                    "the {} arch has no segmented scan: run the segmentation first",
-                    arch_name(arch)
-                )));
+                return Err(crate::commands::messages::not_segmented(arch));
             }
             continue;
         };
@@ -70,9 +67,7 @@ fn run_gingiva(
         out.insert(arch_name(arch).to_owned(), report);
     }
     if out.is_empty() {
-        return Err(CommandError::Invalid(
-            "no arch has a segmented scan: run the segmentation first".to_owned(),
-        ));
+        return Err(crate::commands::messages::none_segmented());
     }
     next.set_module(MODULE_ID, ModuleState::new(data));
     Ok((next, Value::Object(out)))

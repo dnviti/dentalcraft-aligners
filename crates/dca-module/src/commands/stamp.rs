@@ -108,7 +108,7 @@ fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandError> {
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .cloned()
-            .ok_or_else(|| CommandError::Invalid("the Aligners data cannot be read".to_owned())),
+            .ok_or_else(crate::commands::messages::no_data),
     }
 }
 
@@ -140,13 +140,12 @@ fn arch_scan(
         .require(labels_ref)?
         .vertex_labels
         .clone()
-        .ok_or_else(|| CommandError::Invalid("the tooth labels are missing".to_owned()))?;
+        .ok_or_else(crate::commands::messages::tooth_labels_missing)?;
     if labels.len() != mesh.vertex_count() {
-        return Err(CommandError::Invalid(format!(
-            "the labels do not match the scan ({} labels, {} vertices)",
+        return Err(crate::commands::messages::tooth_labels_mismatch(
             labels.len(),
-            mesh.vertex_count()
-        )));
+            mesh.vertex_count(),
+        ));
     }
     let vertices: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let framed = frame::run(
@@ -258,15 +257,11 @@ fn run_stamp(
         ctx.check_cancelled()?;
         let Some(target) = target(state, &data, arch, manual)? else {
             if explicit {
-                let what = if manual {
-                    "has no scan"
+                return Err(if manual {
+                    crate::commands::messages::no_scan(arch)
                 } else {
-                    "has no segmented scan: run the segmentation first"
-                };
-                return Err(CommandError::Invalid(format!(
-                    "the {} arch {what}",
-                    arch_name(arch)
-                )));
+                    crate::commands::messages::not_segmented(arch)
+                });
             }
             continue;
         };
