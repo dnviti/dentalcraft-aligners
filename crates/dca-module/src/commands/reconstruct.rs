@@ -186,13 +186,21 @@ fn run_automatic(
     let mut next = measured(state, params.arch, ctx)?;
     let mut data = aligners_data(&next)?;
     let mut out = Map::new();
-    for arch in params.arch.arches() {
+    let fraction = super::auto::step_fraction(ctx);
+    let arches = params.arch.arches();
+    for (k, &arch) in arches.iter().enumerate() {
         let Some(scan) = arch_scan(&next, &data, arch)? else {
             continue;
         };
         let axes = axes(&data, &scan, arch);
         let t0 = std::time::Instant::now();
-        let closed = reconstruct::run(
+        // the bar moves with every tooth closed, inside the part of this arch
+        let (k, n) = (k as f64, arches.len() as f64);
+        let progress = |done: usize, total: usize| {
+            let x = (k + done as f64 / total.max(1) as f64) / n;
+            ctx.set_fraction(fraction(x));
+        };
+        let closed = reconstruct::run_with_progress(
             &Input {
                 vertices: &scan.vertices,
                 tris: &scan.tris,
@@ -200,6 +208,7 @@ fn run_automatic(
                 axes: &axes,
             },
             &params,
+            &progress,
         )
         .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
         ctx.check_cancelled()?;

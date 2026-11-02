@@ -1,7 +1,7 @@
 //! Thin-plate fairing, untangling and despiking of a closed tooth
 //! (`reconstruct.fair`, `untangle`, `edge_angles`, `despike`).
 
-use dc_geom::sparse::{CsrMatrix, PcgParams, pcg_solve_many};
+use dc_geom::sparse::PcgParams;
 use glam::DVec3;
 
 use super::geom::{self, unique_edges};
@@ -88,7 +88,8 @@ impl Weight<'_> {
 /// the sum over the `rows` vertices of `|L x|^2` (umbrella Laplacian) plus
 /// `anchor_w |x - x0|^2` over the `anchor` vertices, all other vertices
 /// fixed. Normal equations solved by Jacobi-preconditioned conjugate
-/// gradients from the current positions.
+/// gradients from the current positions (single-threaded, see
+/// [`super::solve`]: the teeth are closed in parallel).
 pub fn fair(
     v: &[DVec3],
     tris: &[[u32; 3]],
@@ -142,9 +143,7 @@ pub fn fair(
     for (k, &l) in lam.iter().enumerate() {
         trip.push((k, k, l));
     }
-    let Ok(a) = CsrMatrix::from_triplets(nf, &trip) else {
-        return v.to_vec();
-    };
+    let a = super::solve::csr_from_triplets(nf, &trip);
     // right-hand side: -L_RF^T L_R,fixed x_fixed + lam x0
     let mut bs = Vec::with_capacity(3);
     let mut x0 = Vec::with_capacity(3);
@@ -173,10 +172,9 @@ pub fn fair(
         tolerance: 1e-6,
     };
     let mut out = v.to_vec();
-    if let Ok(sol) = pcg_solve_many(&a, &bs, Some(&x0), &params) {
-        for (k, &i) in fidx.iter().enumerate() {
-            out[i] = DVec3::new(sol.x[0][k], sol.x[1][k], sol.x[2][k]);
-        }
+    let sol = super::solve::pcg_solve_many(&a, &bs, &x0, &params);
+    for (k, &i) in fidx.iter().enumerate() {
+        out[i] = DVec3::new(sol[0][k], sol[1][k], sol[2][k]);
     }
     out
 }

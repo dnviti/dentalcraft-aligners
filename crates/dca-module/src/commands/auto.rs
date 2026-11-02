@@ -11,7 +11,11 @@
 //! 2. orientation (`aligners.preparation.orientation.automatic`), from the
 //!    seeds the numbering left, as the plugin takes the arch frame of the
 //!    proposal (`case_auto.auto_seeds_iter`);
-//! 3. segmentation (`aligners.preparation.segmentation.automatic`);
+//! 3. segmentation (`aligners.preparation.segmentation.automatic`), then
+//!    the check of the segmented teeth of each arch
+//!    (`aligners.preparation.segmentation.check`): the seeds this run
+//!    proposed are corrected and the arch segmented again, the seeds placed
+//!    by hand only checked;
 //! 4. reconstruction (`aligners.preparation.reconstruction.automatic`, which
 //!    measures the teeth first: `aligners.teeth.frames`);
 //! 5. gingiva (`aligners.preparation.gingiva`);
@@ -31,6 +35,15 @@
 //!     (printable models, trimmed aligners, at `quality`, draft by default);
 //!     without it the models are the deformed scans.
 //!
+//! When the arch step decided the only arch scan of the case by the shape
+//! and the widths of its teeth alone, the arch is verified on the built
+//! crowns as in the plugin (`dca_algo::arch_check`): the scan is analysed as
+//! a lower arch first; after the reconstruction the incisor / molar ratio
+//! and the width fit may move it to the upper arch (and back), and the
+//! pipeline starts again from the numbering on the moved scan, at most three
+//! builds in all (output `arch_check`). With any other cue an unusual ratio
+//! is only reported (`warnings`).
+//!
 //! The first step that fails stops the pipeline: the error names the step
 //! and the case is left as it was (the command is one undoable change). The
 //! output lists every step with its seconds and its output.
@@ -38,12 +51,14 @@
 //! The menu leaf "Run everything automatically" runs it with no parameters.
 //! The other leaves run the stages one at a time.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
-use dc_case::{CaseState, ScanRole};
+use dc_case::{CaseState, Fdi, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
+use dca_algo::arch_check::{self, ATTEMPTS, Trial};
 use dca_algo::export::provider::Quality;
 use dca_model::{AlignersState, MODULE_ID};
 use schemars::JsonSchema;
@@ -52,6 +67,8 @@ use serde_json::{Map, Value, json};
 
 use super::import::DETECT_ARCH;
 use super::messages;
+use super::seed_check::CHECK;
+use super::teeth_build::RECONSTRUCT;
 use super::wrappers::bite_steps;
 
 /// The registered commands of this stage, built with `stage_command!`.
@@ -196,10 +213,34 @@ fn calendar(params: &Params) -> Map<String, Value> {
     m
 }
 
+/// The check of the segmented teeth of each arch
+/// (`case_auto.check_segmentation_iter`): the seeds the numbering proposed
+/// in this run are corrected, the seeds placed by hand only checked.
+fn check_steps(state: &CaseState, params: &Params, numbered: &[Arch]) -> Vec<Step> {
+    arches(state)
+        .into_iter()
+        .map(|arch| {
+            Step::new(
+                CHECK,
+                json!({
+                    "arch": arch_name(arch),
+                    "correct": numbered.contains(&arch),
+                    "third_molars": params.third_molars,
+                    "missing": params.missing,
+                }),
+            )
+        })
+        .collect()
+}
+
 /// The steps after the numbering, in pipeline order.
-fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
-    let mut steps = vec![
-        Step::new("aligners.preparation.segmentation.automatic", Value::Null),
+fn later_steps(state: &CaseState, params: &Params, numbered: &[Arch]) -> Vec<Step> {
+    let mut steps = vec![Step::new(
+        "aligners.preparation.segmentation.automatic",
+        Value::Null,
+    )];
+    steps.extend(check_steps(state, params, numbered));
+    steps.extend([
         Step::new("aligners.preparation.reconstruction.automatic", Value::Null),
         Step::new("aligners.preparation.gingiva", Value::Null),
         Step::new("aligners.diagnosis.space-analysis", Value::Null),
@@ -209,7 +250,7 @@ fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
             "aligners.planning.schedule",
             Value::Object(calendar(params)),
         ),
-    ];
+    ]);
     let both =
         state.case.scan(ScanRole::Upper).is_some() && state.case.scan(ScanRole::Lower).is_some();
     if params.occlusion && both {
@@ -235,12 +276,46 @@ fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
 /// The steps after the arch step, for the state that step left.
 pub(super) fn plan(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandError> {
     let mut steps = numbering(state, params)?;
+    let numbered: Vec<Arch> = steps
+        .iter()
+        .filter_map(|s| s.params["arch"].as_str())
+        .map(|a| {
+            if a == "upper" {
+                Arch::Upper
+            } else {
+                Arch::Lower
+            }
+        })
+        .collect();
     steps.push(Step::new(
         "aligners.preparation.orientation.automatic",
         Value::Null,
     ));
-    steps.extend(later_steps(state, params));
+    steps.extend(later_steps(state, params, &numbered));
     Ok(steps)
+}
+
+thread_local! {
+    /// The part of the progress bar the step running on this thread owns.
+    static SPAN: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with `[from, to]` as the part of the progress bar of the step
+/// it runs, so that a stage that reports its own progress
+/// ([`step_fraction`]) moves the bar inside it.
+pub(super) fn with_span<T>(from: f32, to: f32, f: impl FnOnce() -> T) -> T {
+    let old = SPAN.replace(Some((from, to)));
+    let out = f();
+    SPAN.set(old);
+    out
+}
+
+/// The fraction of the whole job when the running stage is at `x` (0-1) of
+/// its work: inside the span of its step, or from where the bar is to the
+/// end when it runs on its own.
+pub(super) fn step_fraction(ctx: &JobCtx) -> impl Fn(f64) -> f32 + Sync + use<> {
+    let (a, b) = SPAN.get().unwrap_or((ctx.progress().fraction, 1.0));
+    move |x| a + (b - a) * x.clamp(0.0, 1.0) as f32
 }
 
 /// Runs one step on `state`; the error names it by its label, in the words
@@ -281,6 +356,49 @@ pub(super) fn run_step(
     Ok((next, record))
 }
 
+/// The arch scan the arch step decided only by the shape and the widths of
+/// its teeth, when it is the only arch scan of the case: the plugin checks
+/// that arch on the built crowns (`case_auto.auto_steps`, `anatomical`).
+fn anatomical(state: &CaseState, detect: &Value) -> Option<Arch> {
+    let only = match arches(state).as_slice() {
+        [a] => *a,
+        _ => return None,
+    };
+    let decided = detect["output"]["scans"]
+        .as_array()?
+        .iter()
+        .any(|s| s["detection"]["source"] == "shape_and_widths" && s["to"] == arch_name(only));
+    decided.then_some(only)
+}
+
+/// The scan of `from` moved to the opposite arch, its results cleared (as
+/// the arch step does when it moves a scan).
+fn move_arch(state: &CaseState, from: Arch, to: Arch) -> Result<CaseState, CommandError> {
+    let mut next = state.clone();
+    let before = next.referenced_blobs();
+    for scan in &mut next.case.scans {
+        if scan.role == from.role() {
+            scan.role = to.role();
+        }
+    }
+    next.case.scans.sort_by_key(|s| s.role);
+    let touched = [from.role(), to.role()].into_iter().collect();
+    dc_case::import::roles_changed(&mut next, &touched, &before)
+        .map_err(|e| CommandError::Invalid(e.to_string()))?;
+    Ok(next)
+}
+
+/// The mesio-distal widths of the built teeth of `arch`.
+fn widths(state: &CaseState, arch: Arch) -> Result<BTreeMap<Fdi, f64>, CommandError> {
+    let data = super::reconstruct::aligners_data(state)?;
+    Ok(data
+        .tooth_geometry
+        .iter()
+        .filter(|(f, _)| Arch::of(**f) == arch)
+        .map(|(f, m)| (*f, m.width_md))
+        .collect())
+}
+
 fn run_auto(
     state: &CaseState,
     params: Params,
@@ -293,20 +411,80 @@ fn run_auto(
     let t0 = Instant::now();
     let arch_step = Step::new(DETECT_ARCH, Value::Null);
     let (mut current, record) = run_step(state, &arch_step, 0, ctx)?;
-    let steps = plan(&current, &params)?;
+    // an arch decided by the widths alone is analysed as a lower arch first
+    // and verified on the crowns (not when the seeds must be kept)
+    let verify = anatomical(&current, &record).filter(|_| params.seeds != Seeds::Keep);
+    let mut arch_check = Map::new();
+    let mut warnings = Vec::new();
+    if let Some(a) = verify {
+        arch_check.insert("detected".to_owned(), json!(arch_name(a)));
+        if a == Arch::Upper {
+            current = move_arch(&current, a, Arch::Lower)?;
+        }
+    }
+    let mut verified = verify.map(|_| Arch::Lower);
+    let mut tried: BTreeMap<Arch, Trial> = BTreeMap::new();
+    let mut attempts = 0;
+    let mut steps = plan(&current, &params)?;
 
-    let n = steps.len() + 1;
-    let mut records = Vec::with_capacity(n);
-    records.push(record);
-    for (i, step) in steps.iter().enumerate() {
-        ctx.set_fraction((i + 1) as f32 / n as f32);
-        let (next, record) = run_step(&current, step, i + 1, ctx)?;
+    let mut records = vec![record];
+    let mut i = 0;
+    while i < steps.len() {
+        let n = (steps.len() + 1) as f32;
+        let (from, to) = ((i + 1) as f32 / n, (i + 2) as f32 / n);
+        ctx.set_fraction(from);
+        let k = records.len();
+        let (next, record) = with_span(from, to, || run_step(&current, &steps[i], k, ctx))?;
         current = next;
         records.push(record);
+        let mut restart = false;
+        if steps[i].id == RECONSTRUCT {
+            for arch in arches(&current) {
+                let trial = Trial::of(&widths(&current, arch)?);
+                if verified == Some(arch) {
+                    attempts += 1;
+                    tried.insert(arch, trial);
+                    if attempts >= ATTEMPTS {
+                        continue;
+                    }
+                    if let Some(other) = arch_check::next_arch(arch, &tried) {
+                        // the crowns contradict the arch: the other one, from the seeds
+                        current = move_arch(&current, arch, other)?;
+                        verified = Some(other);
+                        steps = plan(&current, &params)?;
+                        restart = true;
+                        break;
+                    }
+                } else if verify.is_none() && arch_check::ratio_unusual(arch, trial.ratio) {
+                    warnings.push(messages::tr(
+                        "aligners-auto-warn-ratio",
+                        &[
+                            ("ratio", &format!("{:.2}", trial.ratio.unwrap_or_default())),
+                            ("arch", &messages::arch_word(arch)),
+                        ],
+                    ));
+                }
+            }
+        }
+        i = if restart { 0 } else { i + 1 };
+    }
+    if let Some(a) = verified {
+        arch_check.insert("arch".to_owned(), json!(arch_name(a)));
+        arch_check.insert(
+            "tried".to_owned(),
+            Value::Object(
+                tried
+                    .iter()
+                    .map(|(a, t)| (arch_name(*a).to_owned(), json!(t)))
+                    .collect(),
+            ),
+        );
     }
     ctx.set_fraction(1.0);
     let out = json!({
         "steps": records,
+        "arch_check": arch_check,
+        "warnings": warnings,
         "seconds": t0.elapsed().as_secs_f64(),
     });
     Ok((current, out))
@@ -467,11 +645,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(all.len(), 2);
-        let ids: Vec<&str> = later_steps(&s, &p).iter().map(|s| s.id).collect();
+        let ids: Vec<&str> = later_steps(&s, &p, &[]).iter().map(|s| s.id).collect();
         assert_eq!(
             ids,
             [
                 "aligners.preparation.segmentation.automatic",
+                CHECK,
+                CHECK,
                 "aligners.preparation.reconstruction.automatic",
                 "aligners.preparation.gingiva",
                 "aligners.diagnosis.space-analysis",
@@ -486,9 +666,15 @@ mod tests {
         for id in ids {
             assert!(crate::commands::is_registered(id), "{id}");
         }
-        let steps = later_steps(&s, &p);
-        assert_eq!(steps[6].params["start_date"], "2026-01-05");
-        assert_eq!(steps[9].params["dir"], "x");
+        let steps = later_steps(&s, &p, &[]);
+        assert_eq!(steps[8].params["start_date"], "2026-01-05");
+        assert_eq!(steps[11].params["dir"], "x");
+        // the seeds of the demo were placed before the run: only checked
+        assert_eq!(steps[1].params["correct"], false);
+        let numbered = later_steps(&s, &p, &[Arch::Lower]);
+        assert_eq!(numbered[1].params["arch"], "lower");
+        assert_eq!(numbered[1].params["correct"], true);
+        assert_eq!(numbered[2].params["correct"], false);
     }
 
     #[test]
@@ -496,7 +682,7 @@ mod tests {
         use super::super::occlusion::tests::two_demo_arches;
         let mut s = two_demo_arches();
         let ids = |s: &CaseState| -> Vec<&'static str> {
-            later_steps(s, &Params::default())
+            later_steps(s, &Params::default(), &[])
                 .iter()
                 .map(|s| s.id)
                 .skip_while(|id| !id.starts_with("aligners.occlusion."))
@@ -526,9 +712,48 @@ mod tests {
             ..Params::default()
         };
         assert!(
-            later_steps(&s, &no_bite)
+            later_steps(&s, &no_bite, &[])
                 .iter()
                 .all(|s| !s.id.starts_with("aligners.occlusion."))
         );
+    }
+
+    #[test]
+    fn an_arch_decided_by_the_widths_alone_is_verified_and_can_be_moved() {
+        let s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({ "arch": "lower" }),
+        )
+        .unwrap()
+        .0;
+        let record = |source: &str| {
+            json!({ "output": { "scans": [
+                { "to": "lower", "detection": { "source": source } }
+            ] } })
+        };
+        assert_eq!(
+            anatomical(&s, &record("shape_and_widths")),
+            Some(Arch::Lower)
+        );
+        assert_eq!(anatomical(&s, &record("palate")), None);
+        // the widths of the demo teeth say lower: kept
+        let built = exec("aligners.teeth.frames", &s, Value::Null).unwrap().0;
+        let trial = Trial::of(&widths(&built, Arch::Lower).unwrap());
+        let tried = BTreeMap::from([(Arch::Lower, trial)]);
+        assert_eq!(
+            arch_check::next_arch(Arch::Lower, &tried),
+            None,
+            "{trial:?}"
+        );
+        // moved: the scan is upper and what was computed on it is gone
+        let moved = move_arch(&built, Arch::Lower, Arch::Upper).unwrap();
+        assert!(moved.case.scan(ScanRole::Upper).is_some());
+        assert!(moved.case.scan(ScanRole::Lower).is_none());
+        let d = super::super::reconstruct::aligners_data(&moved).unwrap();
+        assert!(d.seeds.is_empty() && d.tooth_frames.is_empty(), "cleared");
+        // with both arches nothing is questioned
+        let two = super::super::occlusion::tests::two_demo_arches();
+        assert_eq!(anatomical(&two, &record("shape_and_widths")), None);
     }
 }

@@ -94,6 +94,7 @@ mod occlusion;
 mod ramps;
 mod reconstruct;
 mod schedule;
+mod seed_check;
 mod segmentation;
 mod setup;
 mod shell;
@@ -101,6 +102,7 @@ mod staging;
 mod stamp;
 pub(crate) mod study_base;
 mod teeth;
+mod teeth_build;
 mod trim;
 mod visits;
 pub(crate) mod wrappers;
@@ -113,6 +115,7 @@ pub fn all() -> Vec<CommandSpec> {
         demo::specs,
         autoseed::specs,
         segmentation::specs,
+        seed_check::specs,
         teeth::specs,
         reconstruct::specs,
         gingiva::specs,

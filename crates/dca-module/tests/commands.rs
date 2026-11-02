@@ -79,6 +79,7 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.preparation.numbering.sequence",
     "aligners.preparation.numbering.clear-seeds",
     "aligners.preparation.gingiva",
+    "aligners.preparation.segmentation.check",
     "aligners.diagnosis.little-index",
     "aligners.diagnosis.bolton",
     "aligners.diagnosis.complexity",

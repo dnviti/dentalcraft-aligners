@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence;
 use crate::reconstruct::geom::{self, KdTree, unique_edges};
+use crate::reconstruct::solve;
 use crate::reconstruct::{APEX_MM, SMOOTH_ITER, T_MIN};
 
 /// Membrane under the crowns / interdental col lowered up to this depth, mm.
@@ -318,26 +319,30 @@ fn solve_membrane(
             }
         }
     }
-    let mut bs: Vec<Vec<f64>> = (0..3)
-        .map(|c| {
+    let bs: [Vec<f64>; 4] = std::array::from_fn(|c| {
+        if c < 3 {
             (0..nf)
                 .map(|k| (b1[k][c] + b2[k][c]) + eps * vs[fidx[k]][c])
                 .collect()
-        })
-        .collect();
-    bs.push(vec![1.0; nf]);
-    let mut x0: Vec<Vec<f64>> = (0..3)
-        .map(|c| fidx.iter().map(|&i| vs[i][c]).collect())
-        .collect();
-    x0.push(vec![0.0; nf]);
+        } else {
+            vec![1.0; nf]
+        }
+    });
+    let x0: [Vec<f64>; 4] = std::array::from_fn(|c| {
+        if c < 3 {
+            fidx.iter().map(|&i| vs[i][c]).collect()
+        } else {
+            vec![0.0; nf]
+        }
+    });
     let params = PcgParams {
         max_iterations: maxiter,
         tolerance: 1e-4,
     };
-    let sol = CsrMatrix::from_triplets(nf, &trip)
-        .and_then(|a| pcg_solve_many(&a, &bs, Some(&x0), &params))
-        .map(|s| s.x)
-        .unwrap_or(x0);
+    // the four right-hand sides iterated together in parallel passes
+    // (the same bits as `pcg_solve_many`)
+    let a = solve::csr_from_triplets(nf, &trip);
+    let sol = solve::pcg_solve_many_par(&a, &bs, &x0, &params);
     let x = (0..nf)
         .map(|k| DVec3::new(sol[0][k], sol[1][k], sol[2][k]))
         .collect();
@@ -352,6 +357,18 @@ pub fn gum_surface(
     tris: &[[u32; 3]],
     labels: &[u16],
     params: &Params,
+) -> Result<GumSurface, GingivaError> {
+    gum_surface_with_progress(v, tris, labels, params, &|_| {})
+}
+
+/// [`gum_surface`], calling `progress(fraction)` (`0` to `1`) as its stages
+/// end: the margin cut, the membrane solve (most of the time), the col.
+pub fn gum_surface_with_progress(
+    v: &[DVec3],
+    tris: &[[u32; 3]],
+    labels: &[u16],
+    params: &Params,
+    progress: &(dyn Fn(f32) + Sync),
 ) -> Result<GumSurface, GingivaError> {
     check(v, tris, labels)?;
     let n = v.len();
@@ -398,6 +415,7 @@ pub fn gum_surface(
     let e2 = unique_edges(&cut.tris);
     let mut vr = cut.vertices.clone();
     if membrane.iter().any(|&m| m) {
+        progress(0.1);
         let (fidx, x, u) = solve_membrane(&cut.vertices, &e2, &membrane, 1e-4, 3000);
         // depth: u ~ (graph distance)^2 / 4 in edge units -> distance in mm
         let lens: Vec<f64> = e2
@@ -413,11 +431,13 @@ pub fn gum_surface(
             vr[i] = p;
         }
     }
+    progress(0.85);
     let col: Vec<bool> = interdental(labels, &edges, n2)
         .into_iter()
         .zip(&membrane)
         .map(|(a, b)| a && *b)
         .collect();
+    progress(1.0);
     Ok(GumSurface {
         vertices: vr,
         tris: cut.tris,

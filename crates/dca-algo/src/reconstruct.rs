@@ -28,6 +28,7 @@
 mod fair;
 pub mod geom;
 mod outline;
+pub(crate) mod solve;
 
 use std::collections::BTreeMap;
 
@@ -244,14 +245,29 @@ pub struct Output {
 
 /// Closes every tooth of `input.axes` (in parallel).
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, ReconstructError> {
+    run_with_progress(input, params, &|_, _| {})
+}
+
+/// [`run`], calling `progress(done, total)` each time a tooth is closed
+/// (from the worker threads, in completion order; `total` is the number of
+/// teeth of `input.axes`).
+pub fn run_with_progress(
+    input: &Input<'_>,
+    params: &Params,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<Output, ReconstructError> {
     check(input)?;
     let edges = unique_edges(input.tris);
     let fdis: Vec<Fdi> = input.axes.keys().copied().collect();
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let teeth: Result<Vec<(Fdi, ClosedTooth)>, ReconstructError> = fdis
         .par_iter()
         .map(|&f| {
             let axis = input.axes[&f];
-            closed_tooth_with(input, &edges, f, axis, params).map(|t| (f, t))
+            let t = closed_tooth_with(input, &edges, f, axis, params).map(|t| (f, t));
+            let k = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            progress(k, fdis.len());
+            t
         })
         .collect();
     Ok(Output {
@@ -311,13 +327,22 @@ fn closed_tooth_with(
     type Best = ((usize, usize), Vec<DVec3>, Vec<[u32; 3]>, usize);
     let mut best: Option<Best> = None;
     let mut last = Stats::default();
-    for (k, ax) in closing_axes(&patch.vertices, &patch.tris, axis)
-        .into_iter()
-        .enumerate()
-    {
-        let (vt, tt, n_fill, stats) = close_crown(&patch, ax, params, &others);
-        last = stats;
+    let axes = closing_axes(&patch.vertices, &patch.tris, axis);
+    let attempt = |k: usize| {
+        let (vt, tt, n_fill, stats) = close_crown(&patch, axes[k], params, &others);
         let folds = geom::self_intersections(&vt, &tt);
+        (vt, tt, n_fill, stats, folds)
+    };
+    // the long axis first; when that solid folds, the other axes together
+    // (each attempt is independent, the choice below is the sequential one)
+    let first = attempt(0);
+    let rest: Vec<_> = if first.4 == 0 {
+        Vec::new()
+    } else {
+        (1..axes.len()).into_par_iter().map(attempt).collect()
+    };
+    for (k, (vt, tt, n_fill, stats, folds)) in std::iter::once(first).chain(rest).enumerate() {
+        last = stats;
         if best.as_ref().is_none_or(|b| (folds, n_fill) < b.0) {
             best = Some(((folds, n_fill), vt, tt, k));
         }

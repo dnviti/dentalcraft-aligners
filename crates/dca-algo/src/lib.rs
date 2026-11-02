@@ -16,6 +16,7 @@
 
 pub mod aligner_bite;
 pub mod anatomy;
+pub mod arch_check;
 pub mod archform;
 pub mod autoseed;
 pub mod bite;
@@ -30,6 +31,7 @@ pub mod occlusion;
 pub mod ramps;
 pub mod reconstruct;
 pub mod schedule;
+pub mod seed_check;
 pub mod segmentation;
 pub mod setup;
 pub mod shell;

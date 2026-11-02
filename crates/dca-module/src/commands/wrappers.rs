@@ -7,7 +7,8 @@
 //!   is numbered on its own, an arch that fails is reported in the output of
 //!   the numbering step (`failed`) and keeps what it had;
 //! * `aligners.teeth.build`: the closed teeth (which measures the teeth
-//!   first) and the gingiva;
+//!   first) and the gingiva, of every tooth or of the teeth that changed,
+//!   then the diagnosis (see `teeth_build`);
 //! * `aligners.occlusion.align`: the registration on the bite scans when the
 //!   case has one, otherwise the virtual bite; then the contact map;
 //! * `aligners.planning.aligners`: the aligners and their calendar;
@@ -27,8 +28,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::auto::{Step, run_step};
+use super::auto::{Step, run_step, with_span};
 use super::autoseed::NumberingParams;
+use super::teeth_build::{TeethParams, run_teeth};
 
 /// Id of the "Find the teeth" leaf.
 pub(crate) const FIND_TEETH: &str = "aligners.teeth.find";
@@ -54,7 +56,7 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
         stage_command! {
             id: "aligners.teeth.build",
             label: "aligners-menu-teeth-build",
-            doc: "aligners-cmd-teeth-build-doc",
+            doc: "aligners-cmd-teeth-build-full-doc",
             params: TeethParams,
             run: run_teeth,
         },
@@ -92,8 +94,10 @@ fn run_steps(
     let mut current = state.clone();
     let mut records = Vec::with_capacity(steps.len());
     for (k, step) in steps.iter().enumerate() {
-        ctx.set_fraction(k as f32 / steps.len() as f32);
-        let (next, record) = run_step(&current, step, k, ctx)?;
+        let n = steps.len() as f32;
+        let (from, to) = (k as f32 / n, (k + 1) as f32 / n);
+        ctx.set_fraction(from);
+        let (next, record) = with_span(from, to, || run_step(&current, step, k, ctx))?;
         current = next;
         records.push(record);
     }
@@ -127,31 +131,6 @@ fn run_find_teeth(
     let steps = [
         Step::new(NUMBERING, numbering),
         Step::new(ORIENTATION, Value::Null),
-    ];
-    let (next, records) = run_steps(state, &steps, ctx)?;
-    Ok((next, json!({ "steps": records })))
-}
-
-/// Parameters of `aligners.teeth.build`.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct TeethParams {
-    /// Arches (default all the arches with teeth and gum separated).
-    arch: Which,
-}
-
-fn run_teeth(
-    state: &CaseState,
-    params: TeethParams,
-    ctx: &JobCtx,
-) -> Result<CommandOutput, CommandError> {
-    let arch = json!({ "arch": params.arch });
-    let steps = [
-        Step::new(
-            "aligners.preparation.reconstruction.automatic",
-            arch.clone(),
-        ),
-        Step::new("aligners.preparation.gingiva", arch),
     ];
     let (next, records) = run_steps(state, &steps, ctx)?;
     Ok((next, json!({ "steps": records })))
