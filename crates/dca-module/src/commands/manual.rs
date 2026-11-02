@@ -41,6 +41,20 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
             run: crate::manual::seeds::run_seed,
         },
         stage_command! {
+            id: "aligners.preparation.numbering.sequence",
+            label: "aligners-cmd-numbering-sequence",
+            doc: "aligners-cmd-numbering-sequence-doc",
+            params: crate::manual::sequence::SequenceParams,
+            run: crate::manual::sequence::run_sequence,
+        },
+        stage_command! {
+            id: "aligners.preparation.numbering.clear-seeds",
+            label: "aligners-cmd-numbering-clear-seeds",
+            doc: "aligners-cmd-numbering-clear-seeds-doc",
+            params: crate::manual::sequence::ClearParams,
+            run: crate::manual::sequence::run_clear,
+        },
+        stage_command! {
             id: "aligners.manual.rebuild-tooth",
             label: "aligners-cmd-manual-rebuild-tooth",
             doc: "aligners-cmd-manual-rebuild-tooth-doc",

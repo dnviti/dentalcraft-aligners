@@ -15,6 +15,8 @@
 //! | renumber or swap a tooth | `aligners.preparation.numbering.renumber` |
 //! | mark a tooth missing or present | `aligners.preparation.numbering.mark-missing` |
 //! | seed edit (add, move, delete) | `aligners.preparation.numbering.place-seeds` |
+//! | number the teeth in order (points and skip steps) | `aligners.preparation.numbering.sequence` |
+//! | clear the tooth marks | `aligners.preparation.numbering.clear-seeds` |
 //! | rebuild one tooth | `aligners.manual.rebuild-tooth` |
 //! | adjust a tooth (setup or stage) | `aligners.planning.movements` |
 //!
@@ -27,6 +29,7 @@ pub(crate) mod common;
 pub(crate) mod numbering;
 pub(crate) mod rebuild;
 pub(crate) mod seeds;
+pub(crate) mod sequence;
 
 #[cfg(test)]
 mod tests;

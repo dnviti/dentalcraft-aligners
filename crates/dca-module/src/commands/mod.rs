@@ -80,7 +80,7 @@ macro_rules! stage_command {
 }
 
 mod auto;
-mod autoseed;
+pub(crate) mod autoseed;
 mod bite;
 mod demo;
 mod diagnosis;

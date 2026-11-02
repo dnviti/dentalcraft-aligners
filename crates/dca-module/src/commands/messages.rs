@@ -4,6 +4,7 @@
 
 use dc_command::CommandError;
 use dca_algo::anatomy::Arch;
+use dca_algo::autoseed::AutoseedError;
 
 /// `key` with its arguments.
 pub(crate) fn tr(key: &str, args: &[(&str, &str)]) -> String {
@@ -112,4 +113,28 @@ pub(crate) fn no_seeds(arch: Arch) -> CommandError {
 /// No arch has a scan with tooth seeds.
 pub(crate) fn none_seeded() -> CommandError {
     invalid("aligners-err-none-seeded", &[])
+}
+
+/// The sentence for an error of the automatic seeds on the scan of `arch`
+/// (`None` when the error is about the parameters and not about a scan). The
+/// ones about the data say to mark the teeth by hand.
+pub(crate) fn autoseed_error(arch: Option<Arch>, e: &AutoseedError) -> CommandError {
+    let arch = arch.map(arch_word).unwrap_or_default();
+    let arch = [("arch", arch.as_str())];
+    match e {
+        AutoseedError::BadEnds => invalid("aligners-err-seed-bad-ends", &[]),
+        AutoseedError::BadTooth(n) => {
+            invalid("aligners-err-seed-bad-tooth", &[("fdi", &n.to_string())])
+        }
+        AutoseedError::DegenerateMesh => {
+            CommandError::Failed(tr("aligners-err-seed-degenerate", &arch))
+        }
+        AutoseedError::ArchNotFound => {
+            CommandError::Failed(tr("aligners-err-seed-arch-not-found", &arch))
+        }
+        AutoseedError::TooFewSeeds(n) => CommandError::Failed(tr(
+            "aligners-err-seed-too-few",
+            &[("arch", arch[0].1), ("found", &n.to_string())],
+        )),
+    }
 }

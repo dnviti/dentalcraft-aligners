@@ -1466,7 +1466,7 @@ mod tests {
         let (next, _) = import(&CaseState::default(), json!({ "path": path })).unwrap();
         assert_eq!(next.case.scans[0].role_source, RoleSource::Provisional);
         let m = message(exec("aligners.auto", &next, Value::Null).unwrap_err());
-        assert!(m.contains("Stopped at Automatic orientation"), "{m}");
+        assert!(m.contains("Stopped at Number the teeth"), "{m}");
         assert!(m.contains("scan_a.stl"), "{m}");
         assert!(m.contains("Import scans panel"), "{m}");
         assert!(m.contains("press Confirm"), "{m}");

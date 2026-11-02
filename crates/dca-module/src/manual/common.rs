@@ -175,6 +175,11 @@ pub(crate) fn store_labels(
 /// uses any more.
 pub(crate) fn finish(next: &mut CaseState, data: AlignersState, stale: &[BlobRef]) {
     next.set_module(MODULE_ID, ModuleState::new(data));
+    finish_blobs(next, stale);
+}
+
+/// Drops the blobs in `stale` that nothing in `next` uses any more.
+pub(crate) fn finish_blobs(next: &mut CaseState, stale: &[BlobRef]) {
     if stale.is_empty() {
         return;
     }

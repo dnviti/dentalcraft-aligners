@@ -71,10 +71,13 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.demo",
     "aligners.case.detect-arch",
     "aligners.preparation.orientation.automatic",
+    "aligners.preparation.numbering.automatic",
     "aligners.teeth.frames",
     "aligners.preparation.reconstruction.automatic",
     "aligners.preparation.reconstruction.rebuild-tooth",
     "aligners.manual.rebuild-tooth",
+    "aligners.preparation.numbering.sequence",
+    "aligners.preparation.numbering.clear-seeds",
     "aligners.preparation.gingiva",
     "aligners.diagnosis.little-index",
     "aligners.diagnosis.bolton",
@@ -97,6 +100,7 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.output.manifest",
     "aligners.output.report",
     "aligners.settings.study-models",
+    "aligners.settings.find-teeth",
 ];
 
 #[test]

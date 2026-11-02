@@ -6,9 +6,11 @@
 //!
 //! 0. the arch (`aligners.case.detect-arch`): it may move scans and clear
 //!    their results, so the rest of the list is built from its result;
-//! 1. orientation (`aligners.preparation.orientation.automatic`);
-//! 2. numbering (`aligners.preparation.numbering.automatic`): the seeds of
+//! 1. numbering (`aligners.preparation.numbering.automatic`): the seeds of
 //!    the arches that have none (parameter `seeds`);
+//! 2. orientation (`aligners.preparation.orientation.automatic`), from the
+//!    seeds the numbering left, as the plugin takes the arch frame of the
+//!    proposal (`case_auto.auto_seeds_iter`);
 //! 3. segmentation (`aligners.preparation.segmentation.automatic`);
 //! 4. reconstruction (`aligners.preparation.reconstruction.automatic`, which
 //!    measures the teeth first: `aligners.teeth.frames`);
@@ -231,12 +233,12 @@ fn later_steps(state: &CaseState, params: &Params) -> Vec<Step> {
 }
 
 /// The steps after the arch step, for the state that step left.
-fn plan(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandError> {
-    let mut steps = vec![Step::new(
+pub(super) fn plan(state: &CaseState, params: &Params) -> Result<Vec<Step>, CommandError> {
+    let mut steps = numbering(state, params)?;
+    steps.push(Step::new(
         "aligners.preparation.orientation.automatic",
         Value::Null,
-    )];
-    steps.extend(numbering(state, params)?);
+    ));
     steps.extend(later_steps(state, params));
     Ok(steps)
 }
@@ -427,8 +429,9 @@ mod tests {
             .filter(|id| **id == "aligners.preparation.numbering.automatic")
             .count();
         assert_eq!(numberings, 2);
+        // the orientation comes right after the numbering, from its seeds
         assert_eq!(
-            ids(&Params::default())[0],
+            ids(&Params::default())[2],
             "aligners.preparation.orientation.automatic"
         );
         // and so does the command, which stops at the plan and not at the start

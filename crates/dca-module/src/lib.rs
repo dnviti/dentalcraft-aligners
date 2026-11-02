@@ -9,6 +9,7 @@
 mod codec;
 pub mod commands;
 mod done;
+mod find_teeth;
 mod inspector;
 mod manual;
 pub mod tree;
@@ -35,6 +36,8 @@ pub struct AlignersModule {
     selected: Option<&'static str>,
     /// Study base settings being edited in the inspector.
     study_ui: inspector::StudyEdit,
+    /// The field of the missing teeth being edited in the inspector.
+    find_ui: find_teeth::FindEdit,
 }
 
 impl Default for AlignersModule {
@@ -50,6 +53,7 @@ impl AlignersModule {
         Self {
             selected: None,
             study_ui: None,
+            find_ui: find_teeth::FindEdit::default(),
         }
     }
 
@@ -118,7 +122,13 @@ impl Module for AlignersModule {
             MenuStatus::Ready => {
                 let spec = commands::find(node.id)
                     .ok_or_else(|| ModuleError::UnknownCommand(command_id.to_owned()))?;
-                ctx.queue(Box::new(spec.command(serde_json::Value::Null)));
+                // the options of Find the teeth are in the inspector
+                let params = if node.id == commands::wrappers::FIND_TEETH {
+                    find_teeth::leaf_params(ctx.state())
+                } else {
+                    serde_json::Value::Null
+                };
+                ctx.queue(Box::new(spec.command(params)));
                 Ok(())
             }
         }
@@ -137,6 +147,9 @@ impl Module for AlignersModule {
         inspector::show(ui, self.selected);
         if inspector::is_study_models(self.selected) {
             inspector::study_settings(ui, ctx, &mut self.study_ui);
+        }
+        if self.selected == Some(commands::wrappers::FIND_TEETH) {
+            find_teeth::show(ui, ctx, &mut self.find_ui);
         }
     }
 
