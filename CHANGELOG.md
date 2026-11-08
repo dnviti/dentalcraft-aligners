@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.2](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.1...v0.2.0-alpha.2) (2026-11-08)
+
+
+### Features
+
+* **aligners:** find the teeth and 3D teeth ([#5](https://github.com/dnviti-personal-org/dentalcraft-aligners/issues/5)) ([dd1f8cc](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/dd1f8cc4a8fd414e9ceb54c395261e46e11c145e))
+
 ## [0.2.0-alpha.1](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.1.0...v0.2.0-alpha.1) (2026-11-01)
 
 
