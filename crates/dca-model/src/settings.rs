@@ -195,6 +195,27 @@ impl Default for StudyBaseSettings {
     }
 }
 
+/// Settings of "Find the teeth" (the plugin's `include_third_molars` and
+/// `missing_teeth`): they feed the parameters of `aligners.teeth.find` when
+/// its leaf is run.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FindTeethSettings {
+    /// Look for the third molars too (default false).
+    pub third_molars: bool,
+    /// FDI numbers of the teeth known to be missing, sorted, without
+    /// repetitions (default none).
+    pub missing: Vec<u8>,
+}
+
+impl FindTeethSettings {
+    /// The parameters of `aligners.teeth.find` when its menu leaf is run:
+    /// these settings (the module and the workspace both run the leaf).
+    pub fn leaf_params(&self) -> serde_json::Value {
+        serde_json::json!({ "third_molars": self.third_molars, "missing": self.missing })
+    }
+}
+
 /// General settings of the module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -211,6 +232,8 @@ pub struct Settings {
     pub clearance_mm: f64,
     /// Study-model bases.
     pub study_base: StudyBaseSettings,
+    /// "Find the teeth": third molars and teeth known to be missing.
+    pub find_teeth: FindTeethSettings,
 }
 
 impl Default for Settings {
@@ -222,6 +245,7 @@ impl Default for Settings {
             shell_thickness_mm: 1.0,
             clearance_mm: 0.0,
             study_base: StudyBaseSettings::default(),
+            find_teeth: FindTeethSettings::default(),
         }
     }
 }
@@ -237,6 +261,25 @@ mod tests {
         assert_eq!(s.staging.max_crown_step_mm, 0.33);
         assert_eq!(s.interval_days, 14);
         assert_eq!(PerioStage::Stage3.linear_step_mm(), 0.10);
+        assert_eq!(s.find_teeth, FindTeethSettings::default());
+        assert!(!s.find_teeth.third_molars && s.find_teeth.missing.is_empty());
+    }
+
+    #[test]
+    fn settings_saved_without_find_teeth_still_load() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("find_teeth");
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.find_teeth, FindTeethSettings::default());
+        let s: Settings =
+            serde_json::from_str(r#"{"find_teeth":{"third_molars":true,"missing":[35,45]}}"#)
+                .unwrap();
+        assert!(s.find_teeth.third_molars);
+        assert_eq!(s.find_teeth.missing, [35, 45]);
+        assert_eq!(
+            s.find_teeth.leaf_params(),
+            serde_json::json!({ "third_molars": true, "missing": [35, 45] })
+        );
     }
 
     #[test]

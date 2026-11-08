@@ -39,7 +39,9 @@ fn run_gingiva(
     let explicit = params.arch != dca_algo::teeth::Which::All;
     let mut next = state.clone();
     let mut out = Map::new();
-    for arch in params.arch.arches() {
+    let fraction = super::auto::step_fraction(ctx);
+    let arches = params.arch.arches();
+    for (k, &arch) in arches.iter().enumerate() {
         let Some(scan) = arch_scan(state, &data, arch)? else {
             if explicit {
                 return Err(crate::commands::messages::not_segmented(arch));
@@ -47,8 +49,17 @@ fn run_gingiva(
             continue;
         };
         let t0 = std::time::Instant::now();
-        let mut g = gingiva::gum_surface(&scan.vertices, &scan.tris, &scan.labels, &params)
-            .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
+        // the bar moves as the stages of the gum end, inside the part of this arch
+        let (k, n) = (k as f64, arches.len() as f64);
+        let progress = |x: f32| ctx.set_fraction(fraction((k + f64::from(x)) / n));
+        let mut g = gingiva::gum_surface_with_progress(
+            &scan.vertices,
+            &scan.tris,
+            &scan.labels,
+            &params,
+            &progress,
+        )
+        .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
         ctx.check_cancelled()?;
         for p in &mut g.vertices {
             *p = scan.to_case.transform_point3(*p);

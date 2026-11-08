@@ -2,8 +2,10 @@
 //! (`aligners.preparation.numbering.place-seeds`).
 //!
 //! A seed is the centre of the occlusal face of a tooth with its number; the
-//! segmentation starts from the seeds, so the labels of the arch are out of
-//! date after an edit and the report says so (run the segmentation again).
+//! segmentation starts from the seeds, so the labels of the arch (and what
+//! was built from them) are out of date after an edit. As in the plugin
+//! (`case_core.add_seed` and `steps.mark_manual`), they are kept: the report
+//! names them in `invalidated` and the user runs the segmentation again.
 //! The position is in case coordinates; the viewport sends the point where
 //! the user clicked on the scan.
 
@@ -61,6 +63,7 @@ pub(crate) fn run_seed(
         require_settled(scan)?;
     }
     let mut data = data_of(state)?;
+    let before = data.seeds.clone();
     let had = data.seeds.iter().position(|s| s.fdi == f);
     let mut position = None;
     match p.op {
@@ -122,7 +125,12 @@ pub(crate) fn run_seed(
         .iter()
         .filter(|s| Arch::of(s.fdi) == arch)
         .count();
-    let segmented = data.labels.contains_key(&arch.role());
+    // what the tooth marks of the arch decided is kept, out of date
+    let edited: Vec<Seed> = std::mem::replace(&mut data.seeds, before)
+        .into_iter()
+        .filter(|s| Arch::of(s.fdi) == arch)
+        .collect();
+    let invalidated = data.edit_arch_seeds(arch.role(), &edited);
     let mut next = state.clone();
     finish(&mut next, data, &[]);
     Ok((
@@ -133,7 +141,8 @@ pub(crate) fn run_seed(
             "arch": arch_name(arch),
             "position": position.map(|v| v.to_array()),
             "seeds_in_arch": arch_seeds,
-            "segmentation_outdated": segmented,
+            "segmentation_outdated": invalidated.contains(&"labels"),
+            "invalidated": invalidated,
         }),
     ))
 }

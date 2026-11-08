@@ -14,6 +14,8 @@ const CLEAN: &str = "aligners.preparation.segmentation.clean-borders";
 const RENUMBER: &str = "aligners.preparation.numbering.renumber";
 const MISSING: &str = "aligners.preparation.numbering.mark-missing";
 const SEEDS: &str = "aligners.preparation.numbering.place-seeds";
+const SEQUENCE: &str = "aligners.preparation.numbering.sequence";
+const CLEAR: &str = "aligners.preparation.numbering.clear-seeds";
 const REBUILD: &str = "aligners.manual.rebuild-tooth";
 const ADJUST: &str = "aligners.planning.movements";
 
@@ -672,6 +674,235 @@ fn seeds_are_added_moved_and_deleted() {
         )
         .is_err()
     );
+}
+
+// ---- numbering in order, clearing the marks ---------------------------------------------------------
+
+fn at(x: f64) -> Value {
+    json!({ "kind": "point", "position": [x, 0.0, 0.0] })
+}
+
+#[test]
+fn clearing_the_marks_keeps_the_missing_list_unless_asked_and_can_be_undone() {
+    let (state, _) = ok(MISSING, &demo(), json!({ "fdi": 38 }));
+    assert!(!al(&state).seeds.is_empty() && al(&state).missing.contains(&fdi(38)));
+    // as in the plugin, the list of missing teeth stays by default
+    let cleared = undoable(&state, CLEAR, json!({}));
+    assert!(al(&cleared).seeds.is_empty() && al(&cleared).missing.contains(&fdi(38)));
+    let (_, out) = ok(CLEAR, &state, json!({}));
+    assert_eq!(out["missing_cleared"], json!([]));
+    // keep_missing false clears it too
+    let (all, out) = ok(CLEAR, &state, json!({ "keep_missing": false }));
+    assert!(al(&all).seeds.is_empty() && al(&all).missing.is_empty());
+    assert_eq!(out["missing_cleared"], json!([38]));
+    // what was computed from the marks stays, out of date (as in the plugin)
+    assert_eq!(
+        al(&cleared).labels.get(&ScanRole::Lower),
+        al(&state).labels.get(&ScanRole::Lower)
+    );
+    assert_eq!(al(&cleared).tooth_frames, al(&state).tooth_frames);
+    let (_, out) = ok(CLEAR, &state, json!({}));
+    assert_eq!(out["segmentation_outdated"], true);
+    assert!(
+        out["invalidated"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("labels"))
+    );
+    assert_eq!(out["seeds_removed"], al(&state).seeds.len());
+    // only one arch: the lower marks are not touched by clearing the upper arch
+    let (other, out) = ok(CLEAR, &state, json!({ "arch": "upper" }));
+    assert_eq!(al(&other).seeds, al(&state).seeds);
+    assert_eq!(out["seeds_removed"], 0);
+    assert_eq!(out["segmentation_outdated"], false);
+    assert!(al(&other).labels.contains_key(&ScanRole::Lower));
+    // nothing to clear: nothing is out of date
+    let (_, out) = ok(CLEAR, &cleared, json!({}));
+    assert_eq!(out["invalidated"], json!([]));
+    assert!(exec(CLEAR, &state, json!({ "arch": "sideways" })).is_err());
+    assert!(exec(CLEAR, &state, json!({ "nope": 1 })).is_err());
+}
+
+#[test]
+fn the_sequence_numbers_the_teeth_from_the_right_distal_to_the_left() {
+    let (state, _) = ok(CLEAR, &demo(), json!({}));
+    let steps = json!([at(1.0), at(2.0), { "kind": "skip" }, at(4.0)]);
+    let done = undoable(&state, SEQUENCE, json!({ "steps": steps }));
+    // 47, 46 get a point, 45 is skipped, 44 gets the next point (no third molars)
+    let nums: Vec<u8> = al(&done).seeds.iter().map(|s| s.fdi.get()).collect();
+    assert_eq!(nums, [47, 46, 44]);
+    assert_eq!(seed(&done, 46), DVec3::new(2.0, 0.0, 0.0));
+    assert_eq!(seed(&done, 44), DVec3::new(4.0, 0.0, 0.0));
+    // S skips the tooth only: it is not added to the missing teeth
+    assert!(al(&done).missing.is_empty());
+    let (_, out) = ok(SEQUENCE, &state, json!({ "steps": steps }));
+    assert_eq!(out["arch"], "lower");
+    assert_eq!(out["next_fdi"], 43);
+    assert_eq!(out["seeds_in_arch"], 3);
+    assert_eq!(out["assigned"][2], json!({ "fdi": 45, "kind": "skip" }));
+    assert_eq!(out["remaining"].as_array().unwrap().len(), 10);
+}
+
+#[test]
+fn the_sequence_continues_where_it_stopped_and_skips_the_taken_teeth() {
+    let (state, _) = ok(CLEAR, &demo(), json!({}));
+    let (first, _) = ok(SEQUENCE, &state, json!({ "steps": [at(1.0), at(2.0)] }));
+    let (second, out) = ok(
+        SEQUENCE,
+        &first,
+        json!({ "steps": [{ "kind": "skip" }, at(3.0)] }),
+    );
+    assert_eq!(out["assigned"][0]["fdi"], 45);
+    assert_eq!(out["assigned"][1]["fdi"], 44);
+    assert_eq!(al(&second).seeds.len(), 3);
+    // a skipped tooth is asked for again in the next numbering (as in the plugin)
+    let (_, out) = ok(SEQUENCE, &second, json!({ "steps": [at(5.0)] }));
+    assert_eq!(out["assigned"][0]["fdi"], 45);
+    // a tooth marked missing is not asked for
+    let (marked, _) = ok(MISSING, &second, json!({ "fdi": 45 }));
+    let (_, out) = ok(SEQUENCE, &marked, json!({ "steps": [at(5.0)] }));
+    assert_eq!(out["assigned"][0]["fdi"], 43);
+    // third molars on request: the sequence starts with 48 and ends with 38
+    let (third, out) = ok(
+        SEQUENCE,
+        &state,
+        json!({ "third_molars": true, "steps": [at(1.0)] }),
+    );
+    assert_eq!(seed(&third, 48), DVec3::new(1.0, 0.0, 0.0));
+    assert_eq!(out["remaining"].as_array().unwrap().last().unwrap(), 38);
+}
+
+#[test]
+fn the_sequence_refuses_what_does_not_fit_and_changes_nothing() {
+    let (state, _) = ok(CLEAR, &demo(), json!({}));
+    for params in [
+        json!({}),
+        json!({ "steps": [] }),
+        json!({ "steps": [{ "kind": "teleport" }] }),
+        json!({ "steps": [{ "kind": "point" }] }),
+        json!({ "steps": [{ "kind": "point", "position": [null, 0.0, 0.0] }] }),
+        json!({ "steps": [at(1.0)], "arch": "upper" }),
+        json!({ "steps": vec![at(1.0); 15] }),
+    ] {
+        assert!(exec(SEQUENCE, &state, params.clone()).is_err(), "{params}");
+    }
+    // a scan whose arch is a guess is refused
+    let mut guess = state.clone();
+    guess.case.scans[0].role_source = dc_case::RoleSource::Provisional;
+    assert!(
+        invalid(exec(SEQUENCE, &guess, json!({ "steps": [at(1.0)] }))).contains("Import scans")
+    );
+    // the whole arch fits exactly
+    let full = vec![at(1.0); 14];
+    let (done, out) = ok(SEQUENCE, &state, json!({ "steps": full }));
+    assert_eq!(al(&done).seeds.len(), 14);
+    assert_eq!(out["next_fdi"], Value::Null);
+}
+
+#[test]
+fn a_skip_step_leaves_the_tooth_alone_and_a_stop_keeps_the_marks_given() {
+    // the arch has its colours but no marks (so nothing is dropped by a skip)
+    let state = without_marks(&demo());
+    assert!(labels(&state).contains(&47));
+    let (done, out) = ok(SEQUENCE, &state, json!({ "steps": [{ "kind": "skip" }] }));
+    assert_eq!(out["segmentation_outdated"], false);
+    assert!(al(&done).missing.is_empty() && al(&done).seeds.is_empty());
+    assert!(labels(&done).contains(&47));
+    assert_eq!(out["next_fdi"], 46);
+    // stopping early (Esc or Enter) keeps the marks given
+    let (stopped, out) = ok(SEQUENCE, &state, json!({ "steps": [at(1.0), at(2.0)] }));
+    assert_eq!(al(&stopped).seeds.len(), 2);
+    assert_eq!(out["next_fdi"], 45);
+}
+
+/// The state with no tooth marks but everything else it had (the marks
+/// removed by hand, not by a command).
+fn without_marks(state: &CaseState) -> CaseState {
+    let mut data = al(state).clone();
+    data.seeds.clear();
+    let mut out = state.clone();
+    out.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+    out
+}
+
+#[test]
+fn a_change_of_the_marks_keeps_what_was_computed_from_them_out_of_date() {
+    let (state, _) = ok("aligners.teeth.frames", &demo(), Value::Null);
+    let p = seed(&state, 36);
+    // moving a mark by 0.1 mm keeps the colours and the teeth of the arch,
+    // as the plugin does (`add_seed`, then the later steps are to redo)
+    let (moved, out) = ok(
+        SEEDS,
+        &state,
+        json!({ "op": "move", "fdi": 36, "position": (p + DVec3::new(0.1, 0.0, 0.0)).to_array() }),
+    );
+    assert_eq!(out["segmentation_outdated"], true);
+    let outdated = out["invalidated"].as_array().unwrap();
+    for id in ["labels", "tooth_frames"] {
+        assert!(outdated.contains(&json!(id)), "{id} in {outdated:?}");
+    }
+    assert!(out.get("dropped").is_none());
+    let mut expect = al(&state).clone();
+    expect.seeds = al(&moved).seeds.clone();
+    assert_eq!(al(&moved), &expect, "only the mark changed");
+    assert_eq!(labels(&moved), labels(&state));
+    assert_eq!(moved.blobs.len(), state.blobs.len());
+    // the same position again is no change
+    let (same, out) = ok(
+        SEEDS,
+        &state,
+        json!({ "op": "move", "fdi": 36, "position": p.to_array() }),
+    );
+    assert_eq!(out["segmentation_outdated"], false);
+    assert_eq!(out["invalidated"], json!([]));
+    assert!(al(&same).labels.contains_key(&ScanRole::Lower));
+    // a sequence that adds marks keeps them too
+    let (done, out) = ok(
+        SEQUENCE,
+        &without_marks(&state),
+        json!({ "steps": [at(1.0)] }),
+    );
+    assert_eq!(out["segmentation_outdated"], true);
+    assert!(al(&done).labels.contains_key(&ScanRole::Lower));
+    assert_eq!(al(&done).tooth_frames, al(&state).tooth_frames);
+}
+
+#[test]
+fn a_step_for_another_tooth_refuses_the_numbering_in_words_of_the_app() {
+    let (state, _) = ok(CLEAR, &demo(), json!({}));
+    // the steps name the teeth they are for: 47 then 46
+    let named = json!({ "steps": [
+        { "kind": "point", "position": [1.0, 0.0, 0.0], "fdi": 47 },
+        { "kind": "skip", "fdi": 46 },
+    ] });
+    let (done, out) = ok(SEQUENCE, &state, named.clone());
+    assert_eq!(al(&done).seeds.len(), 1);
+    assert_eq!(out["next_fdi"], 45);
+    // once 47 has its mark, the same steps are for other teeth: refused
+    let m = invalid(exec(SEQUENCE, &done, named));
+    assert!(
+        m.contains("47") && m.contains("46") && m.contains("start it again"),
+        "{m}"
+    );
+    let wrong = json!({ "steps": [{ "kind": "skip", "fdi": 31 }] });
+    assert!(invalid(exec(SEQUENCE, &state, wrong)).contains("next tooth to number is 47"));
+    // the other refusals are sentences of the app too
+    assert_eq!(
+        invalid(exec(SEQUENCE, &state, json!({ "steps": [] }))),
+        "give at least one step"
+    );
+    let m = invalid(exec(
+        SEQUENCE,
+        &state,
+        json!({ "steps": vec![at(1.0); 15] }),
+    ));
+    assert!(m.contains("15 steps for 14 teeth"), "{m}");
+    let m = invalid(exec(
+        SEQUENCE,
+        &state,
+        json!({ "steps": [at(1.0)], "arch": "upper" }),
+    ));
+    assert!(m.contains("no") && m.contains("upper"), "{m}");
 }
 
 // ---- rebuild one tooth ------------------------------------------------------------------------------------

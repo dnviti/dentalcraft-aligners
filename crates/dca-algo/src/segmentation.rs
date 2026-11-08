@@ -34,6 +34,7 @@
 mod clean;
 mod faces;
 mod graph;
+pub(crate) use graph::face_graph;
 mod mesh;
 mod refine;
 mod solve;

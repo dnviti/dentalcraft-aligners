@@ -34,9 +34,9 @@ pub(crate) static GROUPS: &[Node] = &[
         "tooth",
         &[
             Node::leaf(
-                "aligners.preparation.numbering.automatic",
-                "aligners-menu-preparation-numbering-automatic",
-                "aligners-desc-preparation-numbering-automatic",
+                "aligners.teeth.find",
+                "aligners-menu-teeth-find",
+                "aligners-desc-teeth-find",
                 "list-numbers",
             ),
             Node::leaf(

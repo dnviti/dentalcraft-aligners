@@ -41,7 +41,8 @@ pub(crate) fn leaf_done(state: &CaseState, id: &str) -> bool {
         |has: &dyn Fn(Arch) -> bool| !arches.is_empty() && arches.iter().all(|a| has(*a));
     let of = |a: Arch| move |f: &dc_case::Fdi| Arch::of(*f) == a;
     match id {
-        "aligners.preparation.numbering.automatic"
+        "aligners.teeth.find"
+        | "aligners.preparation.numbering.automatic"
         | "aligners.preparation.numbering.place-seeds" => {
             every_arch(&|a| data.seeds.iter().any(|s| Arch::of(s.fdi) == a))
         }
@@ -100,7 +101,7 @@ mod tests {
     fn the_steps_follow_the_data_of_the_case() {
         let s = demo();
         assert!(leaf_done(&s, IMPORT_SCANS));
-        let marks = "aligners.preparation.numbering.automatic";
+        let marks = "aligners.teeth.find";
         let colours = "aligners.preparation.segmentation.automatic";
         assert!(leaf_done(&s, marks) && leaf_done(&s, colours));
         assert!(!leaf_done(&s, "aligners.teeth.build"));

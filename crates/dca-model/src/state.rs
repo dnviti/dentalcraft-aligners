@@ -283,6 +283,46 @@ impl AlignersState {
     /// visits are not renumbered either; the remaining ones keep their
     /// `number`.
     pub fn clear_arch(&mut self, role: ScanRole) -> Vec<&'static str> {
+        if role == ScanRole::Bite {
+            return Vec::new();
+        }
+        let mut cleared = Vec::new();
+        if std::mem::take(&mut self.bite_registered) {
+            cleared.push("bite_registered");
+        }
+        let n = self.seeds.len();
+        self.seeds.retain(|s| !in_arch(s.fdi, role));
+        if self.seeds.len() != n {
+            cleared.push("seeds");
+        }
+        let n = self.missing.len();
+        self.missing.retain(|f| !in_arch(*f, role));
+        if self.missing.len() != n {
+            cleared.push("missing");
+        }
+        cleared.extend(self.clear_seed_dependents(role));
+        let n = self.visits.len();
+        self.visits.retain(|v| v.arch != role);
+        if self.visits.len() != n {
+            cleared.push("visits");
+        }
+        cleared
+    }
+
+    /// Drops what is computed from the seeds of the arch `role`, keeping the
+    /// seeds, the teeth marked missing, the bite flag, the settings and the
+    /// control visits (scans of their own), and returns the ids of the groups
+    /// that held data, in the order of [`CLEARED_IDS`]. A bite role clears
+    /// nothing.
+    ///
+    /// Call it whenever the seeds of an arch change (automatic numbering,
+    /// manual marks): the tooth labels (and the teeth flagged for a rebuild),
+    /// tooth frames, measures, closed crowns and gingiva of the arch, its
+    /// space analysis, the setup, its poses in every stage and its ramps no
+    /// longer describe the teeth the seeds name. The results that need both
+    /// arches (Bolton, complexity score, automatic ramps) go with them, as in
+    /// [`AlignersState::clear_arch`], which is this plus the arch's own entries.
+    pub fn clear_seed_dependents(&mut self, role: ScanRole) -> Vec<&'static str> {
         let other = match role {
             ScanRole::Upper => ScanRole::Lower,
             ScanRole::Lower => ScanRole::Upper,
@@ -294,16 +334,6 @@ impl AlignersState {
                 cleared.push(id);
             }
         };
-
-        note("bite_registered", std::mem::take(&mut self.bite_registered));
-
-        let n = self.seeds.len();
-        self.seeds.retain(|s| !in_arch(s.fdi, role));
-        note("seeds", self.seeds.len() != n);
-
-        let n = self.missing.len();
-        self.missing.retain(|f| !in_arch(*f, role));
-        note("missing", self.missing.len() != n);
 
         let n = self.dirty.len();
         self.dirty.retain(|f| !in_arch(*f, role));
@@ -356,11 +386,61 @@ impl AlignersState {
         ramps.retain(|r| !in_arch(r.fdi, role) && r.kind != RampKind::Auto);
         note("ramps", ramps.len() != n);
 
-        let n = self.visits.len();
-        self.visits.retain(|v| v.arch != role);
-        note("visits", self.visits.len() != n);
-
         cleared
+    }
+
+    /// Replaces the seeds of the arch `role` with `seeds` (the other arch
+    /// keeps its own). When the arch's seeds really change, what depends on
+    /// them goes ([`AlignersState::clear_seed_dependents`]) and its ids are
+    /// returned; the same seeds again clear nothing. This is for the
+    /// automatic numbering, which proposes a new set of marks.
+    pub fn replace_arch_seeds(&mut self, role: ScanRole, seeds: &[Seed]) -> Vec<&'static str> {
+        if self.set_arch_seeds(role, seeds) {
+            self.clear_seed_dependents(role)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Sets the seeds of the arch `role` to `seeds` as edited by hand (a
+    /// mark added, moved or deleted, the numbering in order, the marks
+    /// cleared), keeping everything computed from the old ones: as in the
+    /// plugin (`case_core.add_seed`, `steps.mark_manual(obj, "semi")`), the
+    /// colours of the teeth and what follows them stay and are only out of
+    /// date until the user runs the segmentation again. Returns the ids of
+    /// the groups that are now out of date ([`AlignersState::seed_dependents`]),
+    /// empty when the seeds did not change.
+    pub fn edit_arch_seeds(&mut self, role: ScanRole, seeds: &[Seed]) -> Vec<&'static str> {
+        if self.set_arch_seeds(role, seeds) {
+            self.seed_dependents(role)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The ids of the groups [`AlignersState::clear_seed_dependents`] would
+    /// drop for the arch `role`, in the order of [`CLEARED_IDS`], without
+    /// dropping anything.
+    pub fn seed_dependents(&self, role: ScanRole) -> Vec<&'static str> {
+        self.clone().clear_seed_dependents(role)
+    }
+
+    /// Puts `seeds` in the place of the seeds of the arch `role`; `true` when
+    /// they differ (in any order) from the ones it had.
+    fn set_arch_seeds(&mut self, role: ScanRole, seeds: &[Seed]) -> bool {
+        let key = |s: &Seed| s.fdi.get();
+        let mut old: Vec<Seed> = self
+            .seeds
+            .iter()
+            .filter(|s| in_arch(s.fdi, role))
+            .copied()
+            .collect();
+        let mut new = seeds.to_vec();
+        old.sort_by_key(key);
+        new.sort_by_key(key);
+        self.seeds.retain(|s| !in_arch(s.fdi, role));
+        self.seeds.extend_from_slice(seeds);
+        old != new
     }
 }
 
@@ -452,6 +532,65 @@ mod tests {
         });
         st.stages.push(stage);
         st
+    }
+
+    #[test]
+    fn seed_dependents_go_when_the_seeds_of_the_arch_change() {
+        let mut st = sample();
+        let f11 = Fdi::new(11).unwrap();
+        let same = st.seeds.clone();
+        // the same seeds again: nothing goes
+        assert!(st.replace_arch_seeds(ScanRole::Upper, &same).is_empty());
+        assert!(st.labels.contains_key(&ScanRole::Upper) && !st.setup.poses.is_empty());
+        // another arch: the upper results stay
+        assert!(st.replace_arch_seeds(ScanRole::Lower, &[]).is_empty());
+        assert!(st.labels.contains_key(&ScanRole::Upper));
+        // other seeds: the results go, the seeds, the teeth marked missing and
+        // the settings stay
+        st.missing.insert(Fdi::new(18).unwrap());
+        let moved = [Seed {
+            fdi: f11,
+            position: DVec3::new(2.0, -30.0, 2.0),
+        }];
+        let cleared = st.replace_arch_seeds(ScanRole::Upper, &moved);
+        assert_eq!(
+            cleared,
+            ["labels", "tooth_frames", "diagnosis", "setup", "stages"]
+        );
+        assert_eq!(st.seeds, moved);
+        assert!(st.missing.contains(&Fdi::new(18).unwrap()));
+        assert!(st.labels.is_empty() && st.tooth_frames.is_empty() && st.stages.is_empty());
+        assert!(st.diagnosis.arches.is_empty() && st.setup.poses.is_empty());
+        // the cleared ids are a subset of the ones the workspace words
+        assert!(cleared.iter().all(|c| CLEARED_IDS.contains(c)));
+    }
+
+    #[test]
+    fn seeds_edited_by_hand_keep_the_results_and_say_what_is_out_of_date() {
+        let mut st = sample();
+        let before = st.clone();
+        let same = st.seeds.clone();
+        assert!(st.edit_arch_seeds(ScanRole::Upper, &same).is_empty());
+        assert_eq!(st, before);
+        let moved = [Seed {
+            fdi: Fdi::new(11).unwrap(),
+            position: DVec3::new(2.0, -30.0, 2.0),
+        }];
+        let outdated = st.edit_arch_seeds(ScanRole::Upper, &moved);
+        // the same ids the automatic numbering would clear
+        assert_eq!(outdated, before.seed_dependents(ScanRole::Upper));
+        assert_eq!(
+            outdated,
+            ["labels", "tooth_frames", "diagnosis", "setup", "stages"]
+        );
+        // but only the seeds changed
+        assert_eq!(st.seeds, moved);
+        let mut expect = before.clone();
+        expect.seeds = moved.to_vec();
+        assert_eq!(st, expect);
+        // asking does not change anything
+        assert_eq!(st.seed_dependents(ScanRole::Upper), outdated);
+        assert_eq!(st, expect);
     }
 
     #[test]

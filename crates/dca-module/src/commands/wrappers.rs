@@ -2,8 +2,13 @@
 //! one undoable change. Each runs the registered commands of its stages
 //! through the same steps as `aligners.auto`, with no logic of its own.
 //!
+//! * `aligners.teeth.find`: the numbering of the teeth, then the orientation
+//!   from the new marks (the first two stages of `aligners.auto`); each arch
+//!   is numbered on its own, an arch that fails is reported in the output of
+//!   the numbering step (`failed`) and keeps what it had;
 //! * `aligners.teeth.build`: the closed teeth (which measures the teeth
-//!   first) and the gingiva;
+//!   first) and the gingiva, of every tooth or of the teeth that changed,
+//!   then the diagnosis (see `teeth_build`);
 //! * `aligners.occlusion.align`: the registration on the bite scans when the
 //!   case has one, otherwise the virtual bite; then the contact map;
 //! * `aligners.planning.aligners`: the aligners and their calendar;
@@ -23,8 +28,15 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::auto::{Step, run_step};
+use super::auto::{Step, run_step, with_span};
+use super::autoseed::NumberingParams;
+use super::teeth_build::{TeethParams, run_teeth};
 
+/// Id of the "Find the teeth" leaf.
+pub(crate) const FIND_TEETH: &str = "aligners.teeth.find";
+/// The steps of [`FIND_TEETH`], also run one at a time.
+pub(super) const ORIENTATION: &str = "aligners.preparation.orientation.automatic";
+pub(super) const NUMBERING: &str = "aligners.preparation.numbering.automatic";
 /// Id of the bite leaf.
 pub(crate) const BITE: &str = "aligners.occlusion.align";
 pub(super) const REGISTER: &str = "aligners.occlusion.bite-registration.icp";
@@ -35,9 +47,16 @@ pub(super) const CONTACT_MAP: &str = "aligners.occlusion.contact-map";
 pub(crate) fn specs() -> Vec<CommandSpec> {
     vec![
         stage_command! {
+            id: FIND_TEETH,
+            label: "aligners-menu-teeth-find",
+            doc: "aligners-cmd-teeth-find-doc",
+            params: NumberingParams,
+            run: run_find_teeth,
+        },
+        stage_command! {
             id: "aligners.teeth.build",
             label: "aligners-menu-teeth-build",
-            doc: "aligners-cmd-teeth-build-doc",
+            doc: "aligners-cmd-teeth-build-full-doc",
             params: TeethParams,
             run: run_teeth,
         },
@@ -75,8 +94,10 @@ fn run_steps(
     let mut current = state.clone();
     let mut records = Vec::with_capacity(steps.len());
     for (k, step) in steps.iter().enumerate() {
-        ctx.set_fraction(k as f32 / steps.len() as f32);
-        let (next, record) = run_step(&current, step, k, ctx)?;
+        let n = steps.len() as f32;
+        let (from, to) = (k as f32 / n, (k + 1) as f32 / n);
+        ctx.set_fraction(from);
+        let (next, record) = with_span(from, to, || run_step(&current, step, k, ctx))?;
         current = next;
         records.push(record);
     }
@@ -92,26 +113,24 @@ fn app_lang() -> Lang {
     }
 }
 
-/// Parameters of `aligners.teeth.build`.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct TeethParams {
-    /// Arches (default all the arches with teeth and gum separated).
-    arch: Which,
-}
-
-fn run_teeth(
+/// The numbering of the teeth, then the orientation: the steps
+/// `aligners.auto` starts with, in its order, so the frame comes from the new
+/// marks as in the plugin (`case_auto.auto_seeds_iter` sets the arch frame of
+/// the proposal), here with the numbering parameters of the click. The
+/// numbering always runs on the arches asked for, replacing their seeds;
+/// with every arch, one that fails is reported and the others keep their new
+/// seeds (the numbering does not read the world frame, so the order changes
+/// nothing for it).
+fn run_find_teeth(
     state: &CaseState,
-    params: TeethParams,
+    params: NumberingParams,
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
-    let arch = json!({ "arch": params.arch });
+    let numbering =
+        serde_json::to_value(&params).map_err(|e| CommandError::Failed(e.to_string()))?;
     let steps = [
-        Step::new(
-            "aligners.preparation.reconstruction.automatic",
-            arch.clone(),
-        ),
-        Step::new("aligners.preparation.gingiva", arch),
+        Step::new(NUMBERING, numbering),
+        Step::new(ORIENTATION, Value::Null),
     ];
     let (next, records) = run_steps(state, &steps, ctx)?;
     Ok((next, json!({ "steps": records })))
@@ -277,6 +296,121 @@ mod tests {
             assert!(crate::tree::find(spec.id).is_some(), "{}", spec.id);
             assert_eq!(spec.schema()["type"], "object", "{}", spec.id);
         }
+    }
+
+    fn lower_demo() -> CaseState {
+        exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({ "arch": "lower" }),
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn find_teeth_is_the_numbering_then_the_orientation_like_the_pipeline() {
+        use super::super::auto::{Params as AutoParams, Seeds, plan};
+        let s = lower_demo();
+        let (next, out) = exec(FIND_TEETH, &s, Value::Null).unwrap();
+        assert_eq!(step_ids(&out), [NUMBERING, ORIENTATION]);
+        // the steps `aligners.auto` takes first, one after the other
+        let auto_params = AutoParams {
+            seeds: Seeds::All,
+            ..AutoParams::default()
+        };
+        let steps = plan(&s, &auto_params).unwrap();
+        let mut by_pipeline = s.clone();
+        for (k, step) in steps.iter().take(2).enumerate() {
+            assert_eq!(step.id, [NUMBERING, ORIENTATION][k]);
+            by_pipeline = run_step(&by_pipeline, step, k, &JobCtx::detached())
+                .unwrap()
+                .0;
+        }
+        assert_eq!(
+            next.case.world_frame.from_case,
+            by_pipeline.case.world_frame.from_case
+        );
+        assert_eq!(data(&next).seeds, data(&by_pipeline).seeds);
+        // the frame comes from the new seeds: the orientation run on the
+        // numbered case gives the same, not the identity the demo starts with
+        let numbered = exec(NUMBERING, &s, Value::Null).unwrap().0;
+        let oriented = exec(ORIENTATION, &numbered, Value::Null).unwrap().0;
+        assert_eq!(
+            next.case.world_frame.from_case,
+            oriented.case.world_frame.from_case
+        );
+        assert_ne!(
+            next.case.world_frame.from_case,
+            s.case.world_frame.from_case
+        );
+    }
+
+    #[test]
+    fn find_teeth_keeps_the_arch_that_worked_and_reports_the_other_in_one_undo() {
+        use super::super::autoseed::tests::with_broken_scan;
+        let s = two_demo_arches();
+        let broken = with_broken_scan(&s, ScanRole::Upper);
+        let (next, out) = exec(FIND_TEETH, &broken, json!({ "ends": [6, 6] })).unwrap();
+        assert_eq!(step_ids(&out), [NUMBERING, ORIENTATION]);
+        let numbered = &out["steps"][0]["output"];
+        assert_eq!(numbered["arches"][0]["arch"], "lower");
+        assert_eq!(numbered["failed"][0]["arch"], "upper");
+        assert!(
+            numbered["failed"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("upper")
+        );
+        // the lower marks are new, the upper ones are the ones it had
+        let up = |st: &CaseState| -> Vec<_> {
+            data(st)
+                .seeds
+                .iter()
+                .filter(|x| x.fdi.is_upper())
+                .copied()
+                .collect()
+        };
+        assert_eq!(up(&next), up(&broken));
+        assert_ne!(data(&next).seeds, data(&broken).seeds);
+    }
+
+    #[test]
+    fn find_teeth_passes_its_parameters_through_and_is_one_undo() {
+        use dc_command::UndoStack;
+        use std::sync::Arc;
+        let spec = crate::commands::find(FIND_TEETH).unwrap();
+        let schema = spec.schema();
+        for p in ["arch", "third_molars", "missing", "ends"] {
+            assert!(schema["properties"][p].is_object(), "{p}: {schema}");
+        }
+        let s = lower_demo();
+        // a bad parameter is refused by the numbering step
+        let err = exec(FIND_TEETH, &s, json!({ "ends": [4, 7] })).unwrap_err();
+        assert!(matches!(err, CommandError::Invalid(_)), "{err}");
+        // a tooth known to be missing stays without a mark
+        let (next, _) = exec(FIND_TEETH, &s, json!({ "missing": [41] })).unwrap();
+        assert!(data(&next).seeds.iter().all(|x| x.fdi.get() != 41));
+        // one undoable step: undo restores the frame and the seeds, redo the new ones
+        let before = Arc::new(s);
+        let mut stack = UndoStack::new(before.clone(), 1 << 30);
+        stack.push(Arc::new(next.clone()), "aligners-menu-teeth-find");
+        assert_eq!(stack.undo_depth(), 1);
+        let undone = stack.undo().unwrap();
+        assert!(Arc::ptr_eq(&undone, &before));
+        assert_eq!(undone.case.world_frame, before.case.world_frame);
+        assert_eq!(data(&undone).seeds, data(&before).seeds);
+        let redone = stack.redo().unwrap();
+        assert_eq!(redone.case.world_frame, next.case.world_frame);
+        assert_eq!(data(&redone).seeds, data(&next).seeds);
+    }
+
+    #[test]
+    fn find_teeth_stops_at_the_failing_step_and_changes_nothing() {
+        let err = exec(FIND_TEETH, &CaseState::default(), Value::Null).unwrap_err();
+        let m = err.to_string();
+        assert!(m.contains("Stopped at Number the teeth"), "{m}");
+        assert!(!m.contains("aligners."), "{m}");
     }
 
     #[test]

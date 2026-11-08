@@ -9,8 +9,10 @@
 mod codec;
 pub mod commands;
 mod done;
+mod find_teeth;
 mod inspector;
 mod manual;
+mod scene;
 pub mod tree;
 mod tree_data;
 
@@ -19,10 +21,11 @@ use dc_module_api::{
     CommandDesc, CommandSpec, MenuStatus, MenuTree, Module, ModuleCodec, ModuleCtx, ModuleError,
     ModuleRegistry, NOT_AVAILABLE_KEY, Toast, ToastLevel, is_import_scans_command,
 };
-use dc_scene::SceneItem;
+use dc_scene::{SceneEntry, SceneItem};
 use dca_model::AlignersState;
 
 pub use dca_model::MODULE_ID;
+pub use scene::GINGIVA_COLOR;
 
 dc_i18n::bundle!(pub fn loader);
 
@@ -35,6 +38,11 @@ pub struct AlignersModule {
     selected: Option<&'static str>,
     /// Study base settings being edited in the inspector.
     study_ui: inspector::StudyEdit,
+    /// The field of the missing teeth being edited in the inspector.
+    find_ui: find_teeth::FindEdit,
+    /// Blend weights of the built gingiva, computed when a stage first
+    /// needs them.
+    gums: scene::GumCache,
 }
 
 impl Default for AlignersModule {
@@ -50,6 +58,8 @@ impl AlignersModule {
         Self {
             selected: None,
             study_ui: None,
+            find_ui: find_teeth::FindEdit::default(),
+            gums: scene::GumCache::default(),
         }
     }
 
@@ -118,7 +128,13 @@ impl Module for AlignersModule {
             MenuStatus::Ready => {
                 let spec = commands::find(node.id)
                     .ok_or_else(|| ModuleError::UnknownCommand(command_id.to_owned()))?;
-                ctx.queue(Box::new(spec.command(serde_json::Value::Null)));
+                // the options of Find the teeth are in the inspector
+                let params = if node.id == commands::wrappers::FIND_TEETH {
+                    find_teeth::leaf_params(ctx.state())
+                } else {
+                    serde_json::Value::Null
+                };
+                ctx.queue(Box::new(spec.command(params)));
                 Ok(())
             }
         }
@@ -138,10 +154,21 @@ impl Module for AlignersModule {
         if inspector::is_study_models(self.selected) {
             inspector::study_settings(ui, ctx, &mut self.study_ui);
         }
+        if self.selected == Some(commands::wrappers::FIND_TEETH) {
+            find_teeth::show(ui, ctx, &mut self.find_ui);
+        }
     }
 
     fn scene(&self, _state: &CaseState) -> Vec<SceneItem> {
         Vec::new()
+    }
+
+    fn scene_at(&self, state: &CaseState, stage: Option<u32>) -> Vec<SceneEntry> {
+        scene::built_scene(state, stage, &self.gums, true).0
+    }
+
+    fn scene_at_nowait(&self, state: &CaseState, stage: Option<u32>) -> (Vec<SceneEntry>, bool) {
+        scene::built_scene(state, stage, &self.gums, false)
     }
 
     fn data_codec(&self) -> ModuleCodec {

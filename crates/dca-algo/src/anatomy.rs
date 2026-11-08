@@ -300,6 +300,17 @@ pub fn max_ipr_surface_default(fdi: Fdi, surface: Surface) -> f64 {
     max_ipr_surface(fdi, surface, IPR_CAP_MM, IPR_ENAMEL_FRACTION)
 }
 
+/// The teeth to number by hand, one after the other (`oa.place_seeds` of the
+/// plugin): the arch order, from the patient's right distal to the left
+/// distal, without the third molars unless `third_molars`, and without the
+/// teeth in `taken` (those that already have a mark or are missing).
+pub fn numbering_sequence(arch: Arch, third_molars: bool, taken: &[Fdi]) -> Vec<Fdi> {
+    arch_order(arch)
+        .into_iter()
+        .filter(|f| (third_molars || index(*f) != 8) && !taken.contains(f))
+        .collect()
+}
+
 /// The teeth of `fdis` that belong to the arch sequence, in arch order.
 pub fn arch_sequence(fdis: &[Fdi], arch: Arch) -> Vec<Fdi> {
     arch_order(arch)
@@ -360,6 +371,25 @@ mod tests {
             [
                 48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38
             ]
+        );
+    }
+
+    #[test]
+    fn the_numbering_sequence_skips_third_molars_and_taken_teeth() {
+        assert_eq!(
+            nums(&numbering_sequence(Arch::Upper, false, &[])),
+            [17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27]
+        );
+        assert_eq!(numbering_sequence(Arch::Lower, true, &[]).len(), 16);
+        assert_eq!(
+            nums(&numbering_sequence(Arch::Lower, true, &[f(48), f(41)])[..3]),
+            [47, 46, 45]
+        );
+        // the other arch's teeth are never in it
+        assert!(
+            numbering_sequence(Arch::Lower, true, &[])
+                .iter()
+                .all(|x| x.get() >= 31)
         );
     }
 

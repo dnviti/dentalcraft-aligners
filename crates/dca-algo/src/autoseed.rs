@@ -38,7 +38,7 @@
 
 mod dp;
 mod nearest;
-mod numpy;
+pub(crate) mod numpy;
 
 use std::collections::BTreeMap;
 
@@ -201,7 +201,7 @@ fn transform(m: &DMat4, p: DVec3) -> DVec3 {
 }
 
 /// Indices sorted by `(x, y, z)` (`numpy.lexsort((z, y, x))`, stable).
-fn lexsort_xyz(v: &[DVec3]) -> Vec<usize> {
+pub(crate) fn lexsort_xyz(v: &[DVec3]) -> Vec<usize> {
     let mut o: Vec<usize> = (0..v.len()).collect();
     o.sort_by(|&a, &b| {
         let (p, q) = (v[a], v[b]);

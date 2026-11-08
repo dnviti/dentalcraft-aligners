@@ -134,7 +134,7 @@ const TREE: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "aligners.teeth",
-        "aligners.preparation.numbering.automatic",
+        "aligners.teeth.find",
         "Find the teeth",
         "Trova i denti",
     ),
@@ -287,7 +287,7 @@ fn the_shell_is_told_what_to_ask_before_a_leaf_runs() {
 /// export or a follow-up.
 const STEPS: [&str; 8] = [
     "aligners.case.import-scans",
-    "aligners.preparation.numbering.automatic",
+    "aligners.teeth.find",
     "aligners.preparation.segmentation.automatic",
     "aligners.teeth.build",
     "aligners.diagnosis.space-analysis",
@@ -331,7 +331,7 @@ fn the_module_reads_the_steps_from_the_case() {
         )
         .unwrap();
     assert!(m.leaf_done(&state, "aligners.case.import-scans"));
-    assert!(m.leaf_done(&state, "aligners.preparation.numbering.automatic"));
+    assert!(m.leaf_done(&state, "aligners.teeth.find"));
     assert!(!m.leaf_done(&state, "aligners.planning.aligners"));
     assert!(!m.leaf_done(&state, "aligners.auto"));
 }
@@ -383,6 +383,17 @@ fn labels_resolve_in_english_and_italian() {
     for (_, id, en, _) in TREE {
         assert_eq!(dc_i18n::tr(tree::find(id).unwrap().label_key), *en, "{id}");
     }
+    // an error of the automatic seeds is a sentence of the app, not the English of the algorithm
+    let refused_ends = || -> String {
+        let spec = dca_module::commands::find("aligners.preparation.numbering.automatic").unwrap();
+        spec.execute(
+            &CaseState::default(),
+            &serde_json::json!({ "ends": [4, 7] }),
+            &dc_command::JobCtx::detached(),
+        )
+        .unwrap_err()
+        .to_string()
+    };
     let spec_labels = || -> Vec<(String, &str)> {
         dca_module::commands::all()
             .iter()
@@ -390,6 +401,7 @@ fn labels_resolve_in_english_and_italian() {
             .collect()
     };
     assert_unique(spec_labels());
+    assert!(refused_ends().contains("5, 6, 7 or 8"));
 
     dc_i18n::set_language(Lang::It).unwrap();
     assert_eq!(dc_i18n::tr(NAME_KEY), "Allineatori");
@@ -406,6 +418,7 @@ fn labels_resolve_in_english_and_italian() {
         assert_eq!(dc_i18n::tr(tree::find(id).unwrap().label_key), *it, "{id}");
     }
     assert_unique(spec_labels());
+    assert!(refused_ends().contains("5, 6, 7 o 8"));
 
     // the inspector shows the translated description of a leaf
     let label = dc_i18n::tr(tree::find("aligners.followup.tracking").unwrap().label_key);
@@ -625,7 +638,7 @@ fn inspector_renders_every_item_without_panicking() {
 #[test]
 fn no_page_shows_controls_that_do_nothing() {
     // the staging placeholder was a page of disabled sliders: only the study
-    // models have settings
+    // models and Find the teeth have settings
     for n in tree::all_nodes() {
         let out = run_inspector(Some(n.id));
         let inputs = out
@@ -636,7 +649,7 @@ fn no_page_shows_controls_that_do_nothing() {
         let texts = render_inspector_texts(Some(n.id)).join("\n");
         assert!(!texts.contains("0.33"), "{}: {texts}", n.id);
         assert!(!texts.contains("0.25"), "{}: {texts}", n.id);
-        if n.id != "aligners.output.study-models" {
+        if !["aligners.output.study-models", "aligners.teeth.find"].contains(&n.id) {
             assert_eq!(inputs, 0, "{}", n.id);
         }
     }
