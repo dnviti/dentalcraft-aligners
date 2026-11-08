@@ -106,7 +106,15 @@ aligners-cmd-autoseed-numbering = Number the teeth
 aligners-cmd-autoseed-numbering-doc = Finds the teeth of each arch scan and puts a numbered tooth mark (FDI) on the occlusal face of every tooth, replacing the tooth marks of that arch. The crown profile along the arch is matched to the typical tooth widths for every plausible number of molars; a tooth inside the arch may be missing. The proposal must be checked. It fails when fewer than 4 teeth are found: mark the teeth by hand. With arch all each arch is numbered on its own: one that fails keeps its tooth marks and is listed in failed with the reason, and the command fails only when every arch fails. What the old tooth marks decided is listed in dropped; the teeth known to be missing are read, not stored. Parameters: arch (all, upper or lower), third_molars (third molars may be present, default false), missing (FDI numbers of the teeth known to be missing), ends (forced distal tooth of the right and left side, positions 5 to 8, e.g. [7, 7]; default chosen by the data).
 
 ## ---- commands: segmentation ----
-aligners-cmd-segmentation-automatic-doc = Assigns every point of the scan to a tooth (FDI number) or to the gingiva (0), starting from the tooth marks. The scan is moved to the position of its arch and simplified to about 30 000 faces; a first separation follows the folds of the surface from a disk around every tooth mark, and it is repeated with every mark moved to the centre of its crown. The tooth colours are carried to the full scan, cleaned (one connected piece per tooth) and their borders refined at full resolution. They are stored in the case and replace the previous ones of the arch; the scans and the tooth marks are not modified. Needs the tooth marks, and refuses a scan whose arch is still provisional: confirm it first. Parameters: arch (upper or lower, default all arches with tooth marks), target_faces, eta_convex, sigma, refine.
+aligners-cmd-segmentation-automatic-doc = Assigns every point of the scan to a tooth (FDI number) or to the gingiva (0), starting from the tooth marks. The scan is moved to the position of its arch and simplified to about 30 000 faces; a first separation follows the folds of the surface from a disk around every tooth mark, and it is repeated with every mark moved to the centre of its crown. The tooth colours are carried to the full scan, cleaned (one connected piece per tooth) and their borders refined at full resolution. They are stored in the case and replace the previous ones of the arch; the scans and the tooth marks are not modified. What was made from the old colours of the arch (3D teeth, gum, measures, analysis, final position, aligners, the doubts of the check) is cleared and listed in invalidated. Needs the tooth marks, and refuses a scan whose arch is still provisional: confirm it first. It also refuses an arch with fewer than 4 tooth marks, or without marks on both sides and on the incisors, because its position cannot be worked out: nothing is changed and the error names the arch. Parameters: arch (upper or lower, default all arches with tooth marks), target_faces (5000 to 200000), eta_convex (0.01 to 1), sigma (0.1 to 10), the three by default from the settings of the case (aligners.settings.segmentation), refine (default true). Returns, per arch, teeth and seconds, and in all teeth, seconds and invalidated.
+aligners-cmd-segmentation-settings = Settings of Separate teeth and gum
+aligners-cmd-segmentation-settings-doc = Changes the separation parameters stored in the case: target_faces (detail of the simplified scan, 5000 to 200000, default 30000), eta_convex (tooth edge sensitivity, 0.01 to 1, default 0.2), sigma (border smoothing, 0.1 to 10, default 1.0). A field not given stays as it is. They are the values Separate teeth and gum uses when a parameter is not given: from the menu, in Find everything automatically and in the check of the separated teeth. A value outside its range is refused and nothing changes. Returns the three values.
+aligners-seg-step-simplify = Simplified scan
+aligners-seg-step-first = First separation
+aligners-seg-step-transfer = Tooth colours on the full scan
+aligners-seg-step-borders = Borders at full resolution
+aligners-seg-step-cleanup = Cleanup
+aligners-warn-segmentation-doubts = Check the teeth of the { $arch } arch before delivery: the automatic analysis left teeth that are not plausible ({ $list }). Check the tooth marks and their numbers, or correct the teeth by hand.
 
 ## ---- commands: teeth ----
 aligners-cmd-teeth-frames = Tooth axes and widths
@@ -298,6 +306,21 @@ aligners-err-seed-arch-not-found = no dental arch found in the { $arch } scan: p
 aligners-err-seed-too-few = only { $found } teeth found on the { $arch } arch: place the tooth marks by hand with { aligners-menu-preparation-numbering-place-seeds }
 aligners-err-seed-bad-ends = the last tooth of each side must be number 5, 6, 7 or 8
 aligners-err-seed-bad-tooth = { $fdi } is not a valid tooth number
+aligners-err-frame-too-few-seeds = the { $arch } arch has fewer than 4 tooth marks: at least 4 (incisors and molars) are needed to place the arch; place them with { aligners-menu-preparation-numbering-place-seeds } or let the program find them with { aligners-menu-teeth-find }
+aligners-err-frame-one-side = the { $arch } arch needs tooth marks on both sides and on the incisors to place the arch; place them with { aligners-menu-preparation-numbering-place-seeds } or let the program find them with { aligners-menu-teeth-find }
+aligners-err-frame-degenerate = the scan of the { $arch } arch is empty or damaged
+aligners-err-seg-part-scan = scan
+aligners-err-seg-part-simplified = simplified scan
+aligners-err-seg-fault-no-triangles = it has no triangles
+aligners-err-seg-fault-index = a triangle uses a point that does not exist
+aligners-err-seg-fault-not-finite = a point has an invalid position
+aligners-err-seg-bad-mesh = the { $part } of the { $arch } arch cannot be used: { $fault }
+aligners-err-seg-seed-not-finite = a tooth mark of the { $arch } arch has an invalid position
+aligners-err-seg-decimate = the scan of the { $arch } arch could not be simplified: { $detail }
+aligners-err-seg-transfer = the tooth colours of the { $arch } arch could not be carried to the full scan: { $detail }
+aligners-err-seg-target-faces = target_faces must be a number between 5000 and 200000 (got { $value })
+aligners-err-seg-eta-convex = eta_convex must be a number between 0.01 and 1 (got { $value })
+aligners-err-seg-sigma = sigma must be a number between 0.1 and 10 (got { $value })
 aligners-err-auto-keep-seeds = the { $arch } arch has no tooth marks: mark the teeth, or let the program find them
 aligners-err-no-aligners = there are no aligners yet: run { aligners-menu-planning-aligners } first
 aligners-err-no-measured-teeth = no arch has measured teeth: run { aligners-menu-teeth-build } first

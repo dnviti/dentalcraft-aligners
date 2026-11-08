@@ -216,6 +216,33 @@ impl FindTeethSettings {
     }
 }
 
+/// Parameters of "Separate teeth and gum" (the plugin's `rw_faces`,
+/// `rw_eta_convex`, `rw_sigma`): the values
+/// `aligners.preparation.segmentation.automatic` uses for a parameter it is
+/// not given (the menu leaf, `aligners.auto`, the check of the separated
+/// teeth). Their ranges are checked by the segmentation
+/// (`dca_algo::segmentation::Params::validate`) when they are changed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SegmentationSettings {
+    /// Faces of the simplified scan of the first separation (default 30000).
+    pub target_faces: usize,
+    /// Weight of the convex edges in the fold measure (default 0.2).
+    pub eta_convex: f64,
+    /// Sharpness of the fold weights (default 1.0).
+    pub sigma: f64,
+}
+
+impl Default for SegmentationSettings {
+    fn default() -> Self {
+        Self {
+            target_faces: 30_000,
+            eta_convex: 0.2,
+            sigma: 1.0,
+        }
+    }
+}
+
 /// General settings of the module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -234,6 +261,8 @@ pub struct Settings {
     pub study_base: StudyBaseSettings,
     /// "Find the teeth": third molars and teeth known to be missing.
     pub find_teeth: FindTeethSettings,
+    /// "Separate teeth and gum": the separation parameters.
+    pub segmentation: SegmentationSettings,
 }
 
 impl Default for Settings {
@@ -246,6 +275,7 @@ impl Default for Settings {
             clearance_mm: 0.0,
             study_base: StudyBaseSettings::default(),
             find_teeth: FindTeethSettings::default(),
+            segmentation: SegmentationSettings::default(),
         }
     }
 }
@@ -280,6 +310,26 @@ mod tests {
             s.find_teeth.leaf_params(),
             serde_json::json!({ "third_molars": true, "missing": [35, 45] })
         );
+    }
+
+    #[test]
+    fn settings_saved_without_segmentation_load_the_defaults() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("segmentation");
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.segmentation, SegmentationSettings::default());
+        assert_eq!(
+            (
+                s.segmentation.target_faces,
+                s.segmentation.eta_convex,
+                s.segmentation.sigma
+            ),
+            (30_000, 0.2, 1.0)
+        );
+        // a field saved alone keeps the defaults of the others
+        let s: Settings = serde_json::from_str(r#"{"segmentation":{"sigma":2.5}}"#).unwrap();
+        assert_eq!(s.segmentation.sigma, 2.5);
+        assert_eq!(s.segmentation.target_faces, 30_000);
     }
 
     #[test]

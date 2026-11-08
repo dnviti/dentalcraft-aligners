@@ -21,6 +21,11 @@
 //! when the arch has a stored gingiva (`aligners.preparation.gingiva`,
 //! [`dca_algo::export::GumDeform`]); otherwise it stays where it is.
 //!
+//! The outputs of `export-stl` and `report` carry the doubts the check of
+//! the separated teeth left in the case (`segmentation_doubts`, by arch) and
+//! a warning for each arch that has some (`warnings`); the report lists them
+//! first among its notes, as the plugin's export and report warn.
+//!
 //! # Where the meshes come from
 //!
 //! [`mesh_provider`]: when every arch with aligners has its closed teeth and
@@ -282,7 +287,47 @@ fn run_export(
     ctx.check_cancelled()?;
     let report = export::run(&input, &params).map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
-    Ok((state.clone(), out))
+    Ok((state.clone(), with_doubts(out, &data)))
+}
+
+/// `out` (an object) with the doubts the check of the separated teeth left
+/// in the case (`segmentation_doubts`, by arch) and a warning for each arch
+/// that has some (`warnings`), as the plugin's export warns: the aligners
+/// must not be delivered before the tooth marks and their numbers are
+/// checked.
+fn with_doubts(mut out: serde_json::Value, data: &AlignersState) -> serde_json::Value {
+    let (doubts, warnings) = messages::segmentation_doubts(data);
+    if let serde_json::Value::Object(m) = &mut out {
+        m.insert("segmentation_doubts".to_owned(), doubts);
+        m.insert("warnings".to_owned(), serde_json::json!(warnings));
+    }
+    out
+}
+
+/// The notes of the report for the doubts of the case (first in its notes):
+/// one per arch, with the doubts the plugin's report shows (at most six).
+fn doubt_notes(data: &AlignersState) -> Vec<Note> {
+    [Arch::Upper, Arch::Lower]
+        .into_iter()
+        .filter_map(|arch| {
+            let doubts = data
+                .segmentation_doubts
+                .get(&arch.role())
+                .filter(|d| !d.is_empty())?;
+            Some(Note {
+                arch: Some(arch),
+                stage: None,
+                aligner: false,
+                key: "rpt-note-doubts",
+                detail: doubts
+                    .iter()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            })
+        })
+        .collect()
 }
 
 // ---- report: the full export ---------------------------------------------------------------------------------
@@ -357,7 +402,7 @@ fn run_report(
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
     let case = CaseInfo {
         meshes,
-        notes,
+        notes: doubt_notes(&data).into_iter().chain(notes).collect(),
         ..case
     };
     let control = package::Control {
@@ -367,7 +412,7 @@ fn run_report(
     let report = package::run_cancellable(&input, &case, provider.as_ref(), &params, &control)
         .map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
-    Ok((state.clone(), out))
+    Ok((state.clone(), with_doubts(out, &data)))
 }
 
 // ---- print check -------------------------------------------------------------------------------------------------
@@ -679,6 +724,59 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dca-export-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn the_doubts_of_the_check_are_a_warning_of_the_export_and_of_the_report() {
+        let mut s = staged_both();
+        let (_, out) = exec(
+            "aligners.output.export-stl",
+            &s,
+            json!({ "dir": temp("no-doubts").display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(out["warnings"], json!([]));
+        assert_eq!(out["segmentation_doubts"], json!({}));
+        let mut d = aligners_data(&s).unwrap();
+        d.segmentation_doubts
+            .insert(ScanRole::Lower, vec!["46 is only 2.1 mm wide".to_owned()]);
+        s.set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(d));
+
+        let dir = temp("doubts");
+        let (_, out) = exec(
+            "aligners.output.export-stl",
+            &s,
+            json!({ "dir": dir.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(
+            out["segmentation_doubts"],
+            json!({ "lower": ["46 is only 2.1 mm wide"] })
+        );
+        let w = out["warnings"][0].as_str().unwrap();
+        assert!(
+            w.contains("lower arch") && w.contains("46 is only 2.1 mm wide"),
+            "{w}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // the report says it first among its notes, in its language
+        let (_, out) = exec(
+            "aligners.output.report",
+            &s,
+            json!({ "dir": dir.display().to_string(), "lang": "en" }),
+        )
+        .unwrap();
+        assert_eq!(out["warnings"].as_array().unwrap().len(), 1);
+        let note = out["notes"][0].as_str().unwrap();
+        assert!(
+            note.starts_with("to check before delivery") && note.contains("46 is only 2.1 mm wide"),
+            "{note}"
+        );
+        let report = std::fs::read_to_string(dir.join("report.html")).unwrap();
+        assert!(report.contains("to check before delivery"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(temp("no-doubts"));
     }
 
     #[test]

@@ -46,7 +46,9 @@
 //!
 //! The first step that fails stops the pipeline: the error names the step
 //! and the case is left as it was (the command is one undoable change). The
-//! output lists every step with its seconds and its output.
+//! output lists every step with its seconds and its output. What the check
+//! of the separated teeth left implausible on each arch is in
+//! `segmentation_doubts` (by arch) and one warning per arch in `warnings`.
 //!
 //! The menu leaf "Run everything automatically" runs it with no parameters.
 //! The other leaves run the stages one at a time.
@@ -480,11 +482,19 @@ fn run_auto(
             ),
         );
     }
+    // what the check of the separated teeth left implausible: the aligners
+    // must not be delivered before the tooth marks are checked
+    let (doubts, doubt_warnings) = match current.module_data::<AlignersState>(MODULE_ID) {
+        Some(d) => messages::segmentation_doubts(d),
+        None => (json!({}), Vec::new()),
+    };
+    warnings.extend(doubt_warnings);
     ctx.set_fraction(1.0);
     let out = json!({
         "steps": records,
         "arch_check": arch_check,
         "warnings": warnings,
+        "segmentation_doubts": doubts,
         "seconds": t0.elapsed().as_secs_f64(),
     });
     Ok((current, out))
@@ -568,6 +578,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CommandError::Invalid(m) if m.contains("parameters")));
+    }
+
+    #[test]
+    fn kept_marks_that_cannot_place_the_arch_stop_the_run_at_the_separation() {
+        let mut s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({"arch": "lower"}),
+        )
+        .unwrap()
+        .0;
+        let mut data = s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+        data.seeds.truncate(3);
+        s.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        let err = exec("aligners.auto", &s, json!({"seeds": "keep"})).unwrap_err();
+        let CommandError::Invalid(m) = err else {
+            panic!("not a refusal: {err:?}");
+        };
+        let step = messages::tr("aligners-menu-preparation-segmentation-automatic", &[]);
+        assert!(m.starts_with(&format!("Stopped at {step}")), "{m}");
+        assert!(
+            m.contains("lower arch") && m.contains("fewer than 4"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn the_separation_of_the_run_uses_the_settings_of_the_case() {
+        let mut s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({"arch": "lower"}),
+        )
+        .unwrap()
+        .0;
+        let mut data = s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+        // a value outside the sliders (a project edited by hand): the run
+        // stops at the separation, which took it from the settings
+        data.settings.segmentation.target_faces = 4321;
+        s.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        let err = exec("aligners.auto", &s, json!({"seeds": "keep"})).unwrap_err();
+        let CommandError::Invalid(m) = err else {
+            panic!("not a refusal: {err:?}");
+        };
+        let step = messages::tr("aligners-menu-preparation-segmentation-automatic", &[]);
+        assert!(m.starts_with(&format!("Stopped at {step}")), "{m}");
+        assert!(m.contains("target_faces") && m.contains("4321"), "{m}");
     }
 
     #[test]

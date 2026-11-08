@@ -455,18 +455,15 @@ pub struct Output {
     pub already_aligned: bool,
 }
 
-/// Computes the world frame of the reference scan.
+/// Computes the world frame of the reference scan. Without usable seeds the
+/// arch frame is estimated from the mesh ([`FrameSource::Mesh`]); use
+/// [`run_from_seeds`] where that guess is not acceptable.
 pub fn run(input: &Input<'_>, _params: &Params) -> Result<Output, FrameError> {
     if input.vertices.is_empty() {
         return Err(FrameError::DegenerateMesh);
     }
-    let arch_seeds: Vec<Seed> = input
-        .seeds
-        .iter()
-        .filter(|s| Arch::of(s.fdi) == input.arch)
-        .copied()
-        .collect();
-    let centroid = input.vertices.iter().copied().sum::<DVec3>() / input.vertices.len() as f64;
+    let arch_seeds = arch_seeds(input);
+    let centroid = centroid(input.vertices);
     let (source, arch_frame, centre) = match arch_frame_from_seeds(&arch_seeds, centroid) {
         Ok(f) => (FrameSource::Seeds, f, arch_centre(&f, &arch_seeds)),
         Err(_) => {
@@ -474,15 +471,48 @@ pub fn run(input: &Input<'_>, _params: &Params) -> Result<Output, FrameError> {
             (FrameSource::Mesh, f, c)
         }
     };
-    let from_case = world_delta(&arch_frame, input.arch, centre);
-    Ok(Output {
-        arch: input.arch,
+    Ok(output(input.arch, source, arch_frame, centre))
+}
+
+/// Like [`run`], but the arch frame must come from the seeds of the arch, as
+/// in the plugin's `case_core.compute_frame`: with fewer than 4 seeds, or
+/// none on a side or on the incisors, it is
+/// [`FrameError::TooFewSeeds`] / [`FrameError::SeedsOnOneSide`] and nothing
+/// is guessed from the mesh.
+pub fn run_from_seeds(input: &Input<'_>, _params: &Params) -> Result<Output, FrameError> {
+    if input.vertices.is_empty() {
+        return Err(FrameError::DegenerateMesh);
+    }
+    let arch_seeds = arch_seeds(input);
+    let arch_frame = arch_frame_from_seeds(&arch_seeds, centroid(input.vertices))?;
+    let centre = arch_centre(&arch_frame, &arch_seeds);
+    Ok(output(input.arch, FrameSource::Seeds, arch_frame, centre))
+}
+
+/// The seeds of the arch of the input.
+fn arch_seeds(input: &Input<'_>) -> Vec<Seed> {
+    input
+        .seeds
+        .iter()
+        .filter(|s| Arch::of(s.fdi) == input.arch)
+        .copied()
+        .collect()
+}
+
+fn centroid(vertices: &[DVec3]) -> DVec3 {
+    vertices.iter().copied().sum::<DVec3>() / vertices.len() as f64
+}
+
+fn output(arch: Arch, source: FrameSource, arch_frame: ArchFrame, centre: DVec3) -> Output {
+    let from_case = world_delta(&arch_frame, arch, centre);
+    Output {
+        arch,
         source,
         arch_frame,
         centre,
         already_aligned: is_identity(&from_case),
         from_case,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -876,6 +906,69 @@ mod tests {
             .unwrap();
             assert_eq!(ignored.source, FrameSource::Mesh);
         }
+    }
+
+    #[test]
+    fn run_from_seeds_never_falls_back_to_the_mesh() {
+        let (v, seeds) = demo_input(Arch::Lower, true);
+        let run_with = |seeds: &[Seed]| {
+            run_from_seeds(
+                &Input {
+                    arch: Arch::Lower,
+                    vertices: &v,
+                    seeds,
+                },
+                &Params::default(),
+            )
+        };
+        // with usable seeds it is `run`
+        let strict = run_with(&seeds).unwrap();
+        let lenient = run(
+            &Input {
+                arch: Arch::Lower,
+                vertices: &v,
+                seeds: &seeds,
+            },
+            &Params::default(),
+        )
+        .unwrap();
+        assert_eq!(strict.source, FrameSource::Seeds);
+        assert_eq!(strict, lenient);
+        // fewer than 4 seeds, other-arch seeds only, one side, no incisors
+        assert_eq!(run_with(&seeds[..3]), Err(FrameError::TooFewSeeds));
+        assert_eq!(run_with(&[]), Err(FrameError::TooFewSeeds));
+        let other = demo_input(Arch::Upper, true).1;
+        assert_eq!(run_with(&other), Err(FrameError::TooFewSeeds));
+        let right: Vec<Seed> = seeds.iter().filter(|s| s.fdi.is_right()).copied().collect();
+        assert_eq!(run_with(&right), Err(FrameError::SeedsOnOneSide));
+        let no_ant: Vec<Seed> = seeds
+            .iter()
+            .filter(|s| anatomy::index(s.fdi) > 3)
+            .copied()
+            .collect();
+        assert_eq!(run_with(&no_ant), Err(FrameError::SeedsOnOneSide));
+        // the lenient stage still answers for the same seeds
+        let guessed = run(
+            &Input {
+                arch: Arch::Lower,
+                vertices: &v,
+                seeds: &seeds[..3],
+            },
+            &Params::default(),
+        )
+        .unwrap();
+        assert_eq!(guessed.source, FrameSource::Mesh);
+        assert_eq!(
+            run_from_seeds(
+                &Input {
+                    arch: Arch::Lower,
+                    vertices: &[],
+                    seeds: &seeds,
+                },
+                &Params::default()
+            ),
+            Err(FrameError::DegenerateMesh)
+        );
     }
 
     #[test]

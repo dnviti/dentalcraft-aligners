@@ -13,6 +13,14 @@
 //! hand) the problems are only reported. `aligners.auto` runs it after the
 //! segmentation, correcting the arches whose seeds it proposed.
 //!
+//! New seeds drop what was computed from the old ones
+//! ([`dca_model::AlignersState::replace_arch_seeds`]), as the automatic
+//! numbering does, and the separations run with the parameters of the case
+//! settings; the ids of what went are in the output (`invalidated`). The
+//! problems and the notes left on each checked arch are kept in the case
+//! (`segmentation_doubts`, the plugin's `segmentation_doubts`): the export,
+//! the report and `aligners.auto` warn about them.
+//!
 //! An arch with no arch curve (not a dental arch) is not checked: it is
 //! reported in `skipped` and the command goes on, as in the plugin.
 
@@ -32,10 +40,10 @@ use serde_json::{Map, Value, json};
 use super::auto::{Step, run_step};
 use super::messages::{self, tr};
 use super::reconstruct::{aligners_data, arch_name};
+use super::segmentation::{SEGMENT, in_cleared_order};
 
 /// Id of the check.
 pub(crate) const CHECK: &str = "aligners.preparation.segmentation.check";
-const SEGMENT: &str = "aligners.preparation.segmentation.automatic";
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -106,23 +114,53 @@ fn seeds_of(state: &CaseState, arch: Arch) -> Result<Vec<(Fdi, DVec3)>, CommandE
         .collect())
 }
 
+/// Puts `seeds` in the place of the seeds of `arch`; what the old seeds gave
+/// goes, and its ids are returned (without `labels`, which the separation
+/// that follows makes again).
 fn put_seeds(
     state: &mut CaseState,
     arch: Arch,
     seeds: &[(Fdi, DVec3)],
-) -> Result<(), CommandError> {
+) -> Result<Vec<&'static str>, CommandError> {
     let mut data = aligners_data(state)?;
-    data.seeds.retain(|s| Arch::of(s.fdi) != arch);
-    data.seeds
-        .extend(seeds.iter().map(|&(fdi, position)| Seed { fdi, position }));
+    let seeds: Vec<Seed> = seeds
+        .iter()
+        .map(|&(fdi, position)| Seed { fdi, position })
+        .collect();
+    let mut dropped = data.replace_arch_seeds(arch.role(), &seeds);
+    dropped.retain(|&id| id != "labels");
     state.set_module(MODULE_ID, ModuleState::new(data));
-    Ok(())
+    Ok(dropped)
 }
 
-/// The arch segmented again from its seeds.
-fn segment(state: &mut CaseState, arch: Arch, k: usize, ctx: &JobCtx) -> Result<(), CommandError> {
+/// The arch segmented again from its seeds (with the parameters of the case
+/// settings); the ids of what the old labels gave and went.
+fn segment(
+    state: &mut CaseState,
+    arch: Arch,
+    k: usize,
+    ctx: &JobCtx,
+) -> Result<Vec<&'static str>, CommandError> {
     let step = Step::new(SEGMENT, json!({ "arch": arch_name(arch) }));
-    *state = run_step(state, &step, k, ctx)?.0;
+    let (next, record) = run_step(state, &step, k, ctx)?;
+    *state = next;
+    let ids = record["output"]["invalidated"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Ok(in_cleared_order(ids))
+}
+
+/// Keeps the problems and the notes of the check of `arch` in the case (none:
+/// the arch has no doubts).
+fn keep_doubts(state: &mut CaseState, arch: Arch, doubts: Vec<String>) -> Result<(), CommandError> {
+    let mut data = aligners_data(state)?;
+    if doubts.is_empty() {
+        data.segmentation_doubts.remove(&arch.role());
+    } else {
+        data.segmentation_doubts.insert(arch.role(), doubts);
+    }
+    state.set_module(MODULE_ID, ModuleState::new(data));
     Ok(())
 }
 
@@ -193,11 +231,13 @@ fn check(scan: &Scan, arch: Arch, data: &autoseed::ArchData) -> Report {
     seed_check::check_teeth(&scan.vertices, &scan.tris, &scan.labels, arch, data)
 }
 
-/// The check (and the corrections) of one arch.
+/// The check (and the corrections) of one arch; the ids of what the
+/// corrections dropped go to `invalidated`.
 fn check_arch(
     state: &mut CaseState,
     arch: Arch,
     params: &CheckParams,
+    invalidated: &mut Vec<&'static str>,
     ctx: &JobCtx,
 ) -> Result<Option<Value>, CommandError> {
     let Some(scan) = scan_of(state, arch)? else {
@@ -226,10 +266,10 @@ fn check_arch(
             let seeds = seeds_of(state, arch)?;
             let new =
                 seed_check::apply_corrections(&cur.vertices, &cur.labels, &seeds, &acts, &data);
-            put_seeds(state, arch, &new)?;
+            invalidated.extend(put_seeds(state, arch, &new)?);
             done.extend(acts.iter().map(describe_action));
             actions.extend(acts);
-            segment(state, arch, k, ctx)?;
+            invalidated.extend(segment(state, arch, k, ctx)?);
             k += 1;
             rounds += 1;
             rep = check(&scan_of(state, arch)?.expect("segmented"), arch, &data);
@@ -275,20 +315,24 @@ fn check_arch(
                         &[("list", &list.join(", "))],
                     ));
                 }
-                put_seeds(state, arch, &renamed)?;
-                segment(state, arch, k, ctx)?;
+                invalidated.extend(put_seeds(state, arch, &renamed)?);
+                invalidated.extend(segment(state, arch, k, ctx)?);
                 rep = check(&scan_of(state, arch)?.expect("segmented"), arch, &data);
             }
         }
     }
     let issues = seed_check::report_issues(&rep);
+    let problems: Vec<String> = issues.iter().map(describe_issue).collect();
+    // what is left implausible stays in the case, for the export to warn
+    let doubts = problems.iter().chain(&notes).cloned().collect();
+    keep_doubts(state, arch, doubts)?;
     Ok(Some(json!({
         "rounds": rounds,
         "actions": actions,
         "renumbered": renumbered,
         "corrections": done,
         "issues": issues,
-        "problems": issues.iter().map(describe_issue).collect::<Vec<_>>(),
+        "problems": problems,
         "notes": notes,
         "spans": rep.spans,
     })))
@@ -303,8 +347,9 @@ fn run_check(
     let mut next = state.clone();
     let mut out = Map::new();
     let mut skipped = Vec::new();
+    let mut invalidated = Vec::new();
     for arch in params.arch.arches() {
-        match check_arch(&mut next, arch, &params, ctx)? {
+        match check_arch(&mut next, arch, &params, &mut invalidated, ctx)? {
             None if params.arch != Which::All => return Err(messages::not_segmented(arch)),
             None => {}
             Some(v) if v["skipped"] == true => skipped.push(arch_name(arch)),
@@ -316,7 +361,16 @@ fn run_check(
     if out.is_empty() && skipped.is_empty() {
         return Err(messages::none_segmented());
     }
+    // the blobs of the dropped colours, solids and gingiva go too
+    let before = state.referenced_blobs();
+    let after = next.referenced_blobs();
+    let stale: Vec<_> = before.difference(&after).copied().collect();
+    crate::manual::common::finish_blobs(&mut next, &stale);
     out.insert("skipped".to_owned(), json!(skipped));
+    out.insert(
+        "invalidated".to_owned(),
+        json!(in_cleared_order(invalidated)),
+    );
     Ok((next, Value::Object(out)))
 }
 
@@ -420,5 +474,80 @@ mod tests {
             .clone()
             .unwrap();
         assert!(labels.iter().all(|&l| l != 48), "segmented again");
+    }
+
+    #[test]
+    fn what_the_check_leaves_is_kept_in_the_case_until_the_arch_is_separated_or_painted() {
+        let s = with_fragment();
+        let (next, out) = exec(CHECK, &s, json!({ "arch": "lower" })).unwrap();
+        let list = |v: &Value| -> Vec<String> { serde_json::from_value(v.clone()).unwrap() };
+        let mut expect = list(&out["lower"]["problems"]);
+        expect.extend(list(&out["lower"]["notes"]));
+        let d = aligners_data(&next).unwrap();
+        let kept = &d.segmentation_doubts[&ScanRole::Lower];
+        assert!(!kept.is_empty());
+        assert_eq!(*kept, expect);
+        // nothing went: the seeds are only checked
+        assert_eq!(out["invalidated"], json!([]));
+        // they are the warning of the export and of the whole run
+        let (by_arch, warnings) = messages::segmentation_doubts(&d);
+        assert_eq!(by_arch, json!({ "lower": kept }));
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("lower arch") && warnings[0].contains(&kept[0]),
+            "{}",
+            warnings[0]
+        );
+        // a new separation clears them
+        let (again, _) = exec(SEGMENT, &next, json!({ "arch": "lower" })).unwrap();
+        assert!(
+            aligners_data(&again)
+                .unwrap()
+                .segmentation_doubts
+                .is_empty()
+        );
+        // and so does a colour painted by hand (a point of 46 to the gingiva)
+        let tooth = next
+            .blobs
+            .require(&d.labels[&ScanRole::Lower])
+            .unwrap()
+            .vertex_labels
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|&l| l == 46)
+            .unwrap();
+        let (painted, _) = exec(
+            "aligners.preparation.segmentation.manual-brush",
+            &next,
+            json!({ "arch": "lower", "label": 0, "vertices": [tooth] }),
+        )
+        .unwrap();
+        assert!(
+            aligners_data(&painted)
+                .unwrap()
+                .segmentation_doubts
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn corrected_seeds_drop_the_3d_teeth_of_the_arch_and_say_so() {
+        let mut s = with_fragment();
+        let mut d = aligners_data(&s).unwrap();
+        let crown = s.blobs.insert(dc_mesh::TriMesh::new(
+            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y],
+            vec![[0, 1, 2]],
+        ));
+        for seed in d.seeds.clone() {
+            d.crowns.insert(seed.fdi, crown);
+        }
+        s.set_module(MODULE_ID, ModuleState::new(d));
+        let (next, out) = exec(CHECK, &s, json!({ "arch": "lower", "correct": true })).unwrap();
+        assert_eq!(out["invalidated"], json!(["crowns"]));
+        let d = aligners_data(&next).unwrap();
+        assert!(d.crowns.is_empty());
+        assert!(next.blobs.get(&crown).is_none());
+        assert!(!crate::done::leaf_done(&next, "aligners.teeth.build"));
     }
 }

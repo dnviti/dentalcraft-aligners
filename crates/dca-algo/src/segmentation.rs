@@ -41,6 +41,7 @@ mod solve;
 mod transfer;
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use dc_case::Fdi;
 use dc_geom::qem::{self, DecimateParams};
@@ -54,21 +55,98 @@ use crate::anatomy::Arch;
 /// Label of the gingiva (internal label space and FDI labels alike).
 const GUM: i64 = 0;
 
-/// Errors of the segmentation.
+/// Range of [`Params::target_faces`] (the plugin's `rw_faces`).
+pub const TARGET_FACES_RANGE: RangeInclusive<usize> = 5_000..=200_000;
+/// Range of [`Params::eta_convex`] (the plugin's `rw_eta_convex`).
+pub const ETA_CONVEX_RANGE: RangeInclusive<f64> = 0.01..=1.0;
+/// Range of [`Params::sigma`] (the plugin's `rw_sigma`).
+pub const SIGMA_RANGE: RangeInclusive<f64> = 0.1..=10.0;
+
+/// Which mesh of the segmentation a [`SegmentationError::BadMesh`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshPart {
+    /// The scan of the arch.
+    Scan,
+    /// The simplified scan of the first separation.
+    Simplified,
+}
+
+/// What is wrong with a mesh of the segmentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshFault {
+    /// No triangles.
+    NoTriangles,
+    /// A triangle refers to a vertex that does not exist.
+    IndexOutOfRange,
+    /// A vertex has a NaN or infinite coordinate.
+    NotFinite,
+}
+
+/// Errors of the segmentation. The messages are for logs; the commands
+/// report the variants in the language of the app.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SegmentationError {
-    /// The input is not usable (empty mesh, indices out of range...).
-    #[error("{0}")]
-    Invalid(String),
+    /// A mesh is not usable.
+    #[error("the {0:?} mesh is not usable: {1:?}")]
+    BadMesh(MeshPart, MeshFault),
+    /// A seed has a NaN or infinite coordinate.
+    #[error("a seed is not finite")]
+    SeedNotFinite,
     /// No seed of the arch: nothing to segment.
     #[error("this arch has no tooth marks: find the teeth or mark them first")]
     NoSeeds,
+    /// `target_faces` is outside [`TARGET_FACES_RANGE`].
+    #[error("target_faces {0} is outside 5000..=200000")]
+    TargetFacesRange(usize),
+    /// `eta_convex` is outside [`ETA_CONVEX_RANGE`].
+    #[error("eta_convex {0} is outside 0.01..=1")]
+    EtaConvexRange(f64),
+    /// `sigma` is outside [`SIGMA_RANGE`].
+    #[error("sigma {0} is outside 0.1..=10")]
+    SigmaRange(f64),
     /// The simplification failed.
     #[error("simplification of the scan failed: {0}")]
     Decimate(String),
+    /// The transfer of the labels to the full scan failed.
+    #[error("transfer of the labels failed: {0}")]
+    Transfer(String),
+    /// The progress callback of [`run_with_progress`] asked to stop.
+    #[error("cancelled")]
+    Cancelled,
 }
 
-/// Parameters of the segmentation command.
+/// The sub-steps of [`run_with_progress`], in the order they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Phase {
+    /// The scan simplified for the first separation.
+    Simplify,
+    /// The random walk on the simplified scan.
+    FirstSeparation,
+    /// The labels carried to the full scan and cleaned.
+    Transfer,
+    /// The boundaries refined at full resolution.
+    Borders,
+    /// The last clean-up of the labels.
+    Cleanup,
+}
+
+impl Phase {
+    /// Every sub-step, in order.
+    pub const ALL: [Phase; 5] = [
+        Phase::Simplify,
+        Phase::FirstSeparation,
+        Phase::Transfer,
+        Phase::Borders,
+        Phase::Cleanup,
+    ];
+
+    /// Position of the sub-step in [`Phase::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Parameters of the segmentation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Params {
@@ -94,6 +172,23 @@ impl Default for Params {
             sigma: 1.0,
             refine: true,
         }
+    }
+}
+
+impl Params {
+    /// Checks the ranges of the plugin's sliders: `target_faces` 5000-200000,
+    /// `eta_convex` 0.01-1, `sigma` 0.1-10 (a NaN is out of range).
+    pub fn validate(&self) -> Result<(), SegmentationError> {
+        if !TARGET_FACES_RANGE.contains(&self.target_faces) {
+            return Err(SegmentationError::TargetFacesRange(self.target_faces));
+        }
+        if !ETA_CONVEX_RANGE.contains(&self.eta_convex) {
+            return Err(SegmentationError::EtaConvexRange(self.eta_convex));
+        }
+        if !SIGMA_RANGE.contains(&self.sigma) {
+            return Err(SegmentationError::SigmaRange(self.sigma));
+        }
+        Ok(())
     }
 }
 
@@ -251,7 +346,7 @@ pub fn transfer_labels(
         face_labels,
         transfer::TIE_MM,
     )
-    .map_err(SegmentationError::Invalid)
+    .map_err(SegmentationError::Transfer)
 }
 
 /// The vertex nearest to every seed (first one on ties).
@@ -318,21 +413,20 @@ pub fn decimate(
     ))
 }
 
-fn check_mesh(vertices: &[DVec3], tris: &[[u32; 3]], what: &str) -> Result<(), SegmentationError> {
+fn check_mesh(
+    vertices: &[DVec3],
+    tris: &[[u32; 3]],
+    part: MeshPart,
+) -> Result<(), SegmentationError> {
+    let bad = |fault| Err(SegmentationError::BadMesh(part, fault));
     if tris.is_empty() {
-        return Err(SegmentationError::Invalid(format!(
-            "the {what} has no triangles"
-        )));
+        return bad(MeshFault::NoTriangles);
     }
     if tris.iter().flatten().any(|&i| i as usize >= vertices.len()) {
-        return Err(SegmentationError::Invalid(format!(
-            "the {what} has a triangle index out of range"
-        )));
+        return bad(MeshFault::IndexOutOfRange);
     }
     if vertices.iter().any(|p| !p.is_finite()) {
-        return Err(SegmentationError::Invalid(format!(
-            "the {what} has a vertex that is not finite"
-        )));
+        return bad(MeshFault::NotFinite);
     }
     Ok(())
 }
@@ -342,7 +436,27 @@ fn check_mesh(vertices: &[DVec3], tris: &[[u32; 3]], what: &str) -> Result<(), S
 /// refinement (when `params.refine`) and the last clean-up, as
 /// `case_teeth.segment_iter`.
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SegmentationError> {
-    check_mesh(input.vertices, input.tris, "scan")?;
+    run_with_progress(input, params, &mut |_| true)
+}
+
+/// [`run`] with a callback told every sub-step ([`Phase`]) before it starts;
+/// the segmentation stops with [`SegmentationError::Cancelled`] when it
+/// returns `false`. Without `params.refine` the `Borders` step is not run
+/// and not reported.
+pub fn run_with_progress(
+    input: &Input<'_>,
+    params: &Params,
+    progress: &mut dyn FnMut(Phase) -> bool,
+) -> Result<Output, SegmentationError> {
+    let mut enter = |phase| {
+        if progress(phase) {
+            Ok(())
+        } else {
+            Err(SegmentationError::Cancelled)
+        }
+    };
+    params.validate()?;
+    check_mesh(input.vertices, input.tris, MeshPart::Scan)?;
     let seeds: Vec<(Fdi, DVec3)> = input
         .seeds
         .iter()
@@ -353,34 +467,38 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SegmentationErr
         return Err(SegmentationError::NoSeeds);
     }
     if seeds.iter().any(|s| !s.1.is_finite()) {
-        return Err(SegmentationError::Invalid(
-            "a seed is not finite".to_owned(),
-        ));
+        return Err(SegmentationError::SeedNotFinite);
     }
+    enter(Phase::Simplify)?;
     let (vd, td) = match input.decimated {
         Some((v, t)) => (v.to_vec(), t.to_vec()),
         None => decimate(input.vertices, input.tris, params.target_faces)?,
     };
-    check_mesh(&vd, &td, "simplified scan")?;
+    check_mesh(&vd, &td, MeshPart::Simplified)?;
     let face_params = FaceParams {
         eta_convex: params.eta_convex,
         sigma: params.sigma,
         ..FaceParams::default()
     };
+    enter(Phase::FirstSeparation)?;
     let (flab, diagnostics) = segment_faces(&vd, &td, &seeds, input.arch, &face_params);
+    enter(Phase::Transfer)?;
     let edges = unique_edges(input.tris);
     let vl = transfer_labels(input.vertices, &edges, &vd, &td, &flab)?;
     let seed_v = seed_vertices(input.vertices, &seeds);
     let labels_transfer = clean_vertex_labels(&vl, &edges, &seed_v, 2);
     let labels = if params.refine {
+        enter(Phase::Borders)?;
         let refined = refine_boundaries(
             input.vertices,
             input.tris,
             &labels_transfer,
             &RefineParams::default(),
         );
+        enter(Phase::Cleanup)?;
         clean_vertex_labels(&refined, &edges, &seed_v, 2)
     } else {
+        enter(Phase::Cleanup)?;
         labels_transfer.clone()
     };
     let mut present: Vec<u16> = labels.iter().copied().filter(|&l| l != 0).collect();
@@ -432,9 +550,120 @@ mod tests {
             arch: Arch::Upper,
             ..input
         };
-        assert!(matches!(
+        assert_eq!(
             run(&input, &Params::default()),
-            Err(SegmentationError::Invalid(_))
-        ));
+            Err(SegmentationError::BadMesh(
+                MeshPart::Scan,
+                MeshFault::IndexOutOfRange
+            ))
+        );
+    }
+
+    #[test]
+    fn params_outside_the_slider_ranges_are_refused() {
+        let ok = Params::default();
+        assert_eq!(ok.validate(), Ok(()));
+        for n in [5_000, 200_000] {
+            assert_eq!(
+                Params {
+                    target_faces: n,
+                    ..ok
+                }
+                .validate(),
+                Ok(())
+            );
+        }
+        for n in [4_999, 200_001, 0] {
+            assert_eq!(
+                Params {
+                    target_faces: n,
+                    ..ok
+                }
+                .validate(),
+                Err(SegmentationError::TargetFacesRange(n))
+            );
+        }
+        for e in [0.01, 1.0] {
+            assert_eq!(
+                Params {
+                    eta_convex: e,
+                    ..ok
+                }
+                .validate(),
+                Ok(())
+            );
+        }
+        for e in [0.0, 0.009, 1.01, f64::NAN] {
+            assert!(matches!(
+                Params {
+                    eta_convex: e,
+                    ..ok
+                }
+                .validate(),
+                Err(SegmentationError::EtaConvexRange(_))
+            ));
+        }
+        for s in [0.1, 10.0] {
+            assert_eq!(Params { sigma: s, ..ok }.validate(), Ok(()));
+        }
+        for s in [0.0, 0.09, 10.5, f64::INFINITY] {
+            assert!(matches!(
+                Params { sigma: s, ..ok }.validate(),
+                Err(SegmentationError::SigmaRange(_))
+            ));
+        }
+        // `run` enforces them before looking at the mesh
+        let v = [DVec3::ZERO, DVec3::X, DVec3::Y];
+        let t = [[0u32, 1, 2]];
+        let seeds = [(Fdi::new(41).unwrap(), DVec3::ZERO)];
+        let input = Input {
+            arch: Arch::Lower,
+            vertices: &v,
+            tris: &t,
+            seeds: &seeds,
+            decimated: None,
+        };
+        let bad = Params { sigma: 0.0, ..ok };
+        assert_eq!(run(&input, &bad), Err(SegmentationError::SigmaRange(0.0)));
+    }
+
+    #[test]
+    fn every_sub_step_is_announced_and_a_stop_between_them_ends_the_run() {
+        let demo = crate::demo::run(&crate::demo::Params {
+            arch: Arch::Lower,
+            ..crate::demo::Params::default()
+        });
+        let vertices: Vec<DVec3> = demo.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+        let seeds: Vec<(Fdi, DVec3)> = demo.seeds.iter().map(|s| (s.fdi, s.position)).collect();
+        let input = Input {
+            arch: Arch::Lower,
+            vertices: &vertices,
+            tris: &demo.mesh.tris,
+            seeds: &seeds,
+            decimated: None,
+        };
+        let params = Params {
+            target_faces: 5_000,
+            ..Params::default()
+        };
+        // the whole run: every sub-step, in order
+        let mut seen = Vec::new();
+        let out = run_with_progress(&input, &params, &mut |p| {
+            seen.push(p);
+            true
+        })
+        .unwrap();
+        assert_eq!(seen, Phase::ALL);
+        assert!(out.teeth > 0);
+        // a stop at any sub-step: nothing after it runs
+        for stop in Phase::ALL {
+            let mut seen = Vec::new();
+            let r = run_with_progress(&input, &params, &mut |p| {
+                seen.push(p);
+                p != stop
+            });
+            assert_eq!(r, Err(SegmentationError::Cancelled), "{stop:?}");
+            assert_eq!(seen, Phase::ALL[..=stop.index()], "{stop:?}");
+        }
     }
 }
