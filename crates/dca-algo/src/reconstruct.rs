@@ -117,6 +117,12 @@ pub enum ReconstructError {
     /// The tooth has no crown surface to close.
     #[error("tooth {0} has no crown surface")]
     NoCrown(u16),
+    /// Every closing of the tooth gave vertices that are not finite numbers.
+    #[error("tooth {0} could not be closed: every closing gives non-finite vertices")]
+    NotFinite(u16),
+    /// The caller asked to stop; nothing was produced.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Parameters of the reconstruction.
@@ -245,16 +251,20 @@ pub struct Output {
 
 /// Closes every tooth of `input.axes` (in parallel).
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, ReconstructError> {
-    run_with_progress(input, params, &|_, _| {})
+    run_with_progress(input, params, &|_, _| {}, &|| false)
 }
 
 /// [`run`], calling `progress(done, total)` each time a tooth is closed
 /// (from the worker threads, in completion order; `total` is the number of
-/// teeth of `input.axes`).
+/// teeth of `input.axes`). `cancelled` is asked before every tooth starts
+/// and once more when all are closed: once it says `true` no further tooth
+/// is started and the result is [`ReconstructError::Cancelled`] (a tooth
+/// already being closed is finished first).
 pub fn run_with_progress(
     input: &Input<'_>,
     params: &Params,
     progress: &(dyn Fn(usize, usize) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Output, ReconstructError> {
     check(input)?;
     let edges = unique_edges(input.tris);
@@ -263,6 +273,9 @@ pub fn run_with_progress(
     let teeth: Result<Vec<(Fdi, ClosedTooth)>, ReconstructError> = fdis
         .par_iter()
         .map(|&f| {
+            if cancelled() {
+                return Err(ReconstructError::Cancelled);
+            }
             let axis = input.axes[&f];
             let t = closed_tooth_with(input, &edges, f, axis, params).map(|t| (f, t));
             let k = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -270,6 +283,9 @@ pub fn run_with_progress(
             t
         })
         .collect();
+    if cancelled() {
+        return Err(ReconstructError::Cancelled);
+    }
     Ok(Output {
         teeth: teeth?.into_iter().collect(),
     })
@@ -299,7 +315,9 @@ fn check(input: &Input<'_>) -> Result<(), ReconstructError> {
 /// Closed solid of one tooth (`closed_tooth`). The crown is closed along its
 /// long axis; when that solid folds through itself, the other closing axes
 /// are tried and the solid with the fewest crossing faces, then the least
-/// rebuilt surface, is kept.
+/// rebuilt surface, is kept. Unlike the plugin, a solid with a non-finite
+/// vertex is never kept (its crossings cannot be counted); when no closing
+/// gives a finite solid the tooth fails with [`ReconstructError::NotFinite`].
 pub fn closed_tooth(
     input: &Input<'_>,
     fdi: Fdi,
@@ -323,53 +341,96 @@ fn closed_tooth_with(
         return Err(ReconstructError::NoCrown(f));
     }
     let others = neighbour_points(input.vertices, input.labels, f, &patch.vertices, 3.0);
-    /// ((crossings, filled), vertices, triangles, axis index) of the best solid.
-    type Best = ((usize, usize), Vec<DVec3>, Vec<[u32; 3]>, usize);
-    let mut best: Option<Best> = None;
-    let mut last = Stats::default();
     let axes = closing_axes(&patch.vertices, &patch.tris, axis);
     let attempt = |k: usize| {
-        let (vt, tt, n_fill, stats) = close_crown(&patch, axes[k], params, &others);
-        let folds = geom::self_intersections(&vt, &tt);
-        (vt, tt, n_fill, stats, folds)
+        let (v, t, filled, stats) = close_crown(&patch, axes[k], params, &others);
+        Attempt::new(v, t, filled, stats)
     };
     // the long axis first; when that solid folds, the other axes together
     // (each attempt is independent, the choice below is the sequential one)
     let first = attempt(0);
-    let rest: Vec<_> = if first.4 == 0 {
+    let rest: Vec<_> = if first.folds == Some(0) {
         Vec::new()
     } else {
         (1..axes.len()).into_par_iter().map(attempt).collect()
     };
-    for (k, (vt, tt, n_fill, stats, folds)) in std::iter::once(first).chain(rest).enumerate() {
-        last = stats;
-        if best.as_ref().is_none_or(|b| (folds, n_fill) < b.0) {
-            best = Some(((folds, n_fill), vt, tt, k));
-        }
-        if folds == 0 {
-            break;
-        }
-    }
-    let Some(((folds, n_fill), vt, tt, k)) = best else {
-        return Err(ReconstructError::NoCrown(f));
+    let (best, last) = choose(std::iter::once(first).chain(rest));
+    let Some((k, best)) = best else {
+        return Err(ReconstructError::NotFinite(f));
     };
     Ok(ClosedTooth {
-        vertices: vt,
-        tris: tt,
         info: ClosedInfo {
             crown_vertices: patch.vertices.len(),
-            fill_vertices: n_fill,
+            fill_vertices: best.filled,
             bridge_vertices: patch.bridge.iter().filter(|&&b| b).count(),
             thin_vertices: patch.thin.iter().filter(|&&b| b).count(),
             closing_axis: k,
-            crossing_faces: folds,
+            crossing_faces: best.folds.unwrap_or_default(),
             convex_held: last.convex,
             despiked: last.despiked,
             sharp_left: last.sharp_left,
             contact_filled: last.contact_filled,
             tapered: last.tapered,
         },
+        vertices: best.vertices,
+        tris: best.tris,
     })
+}
+
+/// One closing of the crown along one axis.
+#[derive(Debug)]
+struct Attempt {
+    vertices: Vec<DVec3>,
+    tris: Vec<[u32; 3]>,
+    /// Vertices added to close it.
+    filled: usize,
+    stats: Stats,
+    /// Faces crossing another face; `None` when a vertex is not finite (the
+    /// solid is unusable and its crossings cannot be counted).
+    folds: Option<usize>,
+}
+
+impl Attempt {
+    fn new(vertices: Vec<DVec3>, tris: Vec<[u32; 3]>, filled: usize, stats: Stats) -> Self {
+        let folds = vertices
+            .iter()
+            .all(|p| p.is_finite())
+            .then(|| geom::self_intersections(&vertices, &tris));
+        Self {
+            vertices,
+            tris,
+            filled,
+            stats,
+            folds,
+        }
+    }
+}
+
+/// The choice of `closed_tooth` among the attempts in axis order: the
+/// fewest crossing faces, then the fewest added vertices; the first without
+/// crossings ends the search. An attempt with a non-finite vertex is never
+/// kept. Returns the axis index and the attempt kept (`None` when every
+/// attempt is unusable) and the counters of the last attempt looked at (the
+/// plugin reports those).
+fn choose(attempts: impl IntoIterator<Item = Attempt>) -> (Option<(usize, Attempt)>, Stats) {
+    let mut best: Option<(usize, Attempt)> = None;
+    let mut last = Stats::default();
+    for (k, a) in attempts.into_iter().enumerate() {
+        last = a.stats;
+        let Some(folds) = a.folds else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(_, b)| (folds, a.filled) < (b.folds.unwrap_or(usize::MAX), b.filled))
+        {
+            best = Some((k, a));
+        }
+        if folds == 0 {
+            break;
+        }
+    }
+    (best, last)
 }
 
 /// Scanned vertices of the other crowns within `reach` of the box of the
@@ -1053,5 +1114,116 @@ mod tests {
         let p = Params::default();
         assert!((p.neck_depth_mm - 1.66).abs() < 1e-12);
         assert_eq!(p.apex_mm, 3.0);
+    }
+
+    /// A closed tetrahedron (no crossings), a solid with two crossing faces,
+    /// and the tetrahedron with one vertex not a number; the counters carry
+    /// `tag` to tell the attempts apart.
+    fn attempt(kind: &str, filled: usize, tag: usize) -> Attempt {
+        let tetra = || {
+            (
+                vec![DVec3::ZERO, DVec3::X, DVec3::Y, DVec3::Z],
+                vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]],
+            )
+        };
+        let (v, t) = match kind {
+            "closed" => tetra(),
+            "folded" => (
+                vec![
+                    DVec3::new(0.0, 0.0, 0.0),
+                    DVec3::new(2.0, 0.0, 0.0),
+                    DVec3::new(0.0, 2.0, 0.0),
+                    DVec3::new(0.5, 0.5, -1.0),
+                    DVec3::new(0.5, 0.5, 1.0),
+                    DVec3::new(1.5, 1.5, 1.0),
+                ],
+                vec![[0, 1, 2], [3, 4, 5]],
+            ),
+            _ => {
+                let (mut v, t) = tetra();
+                v[3] = DVec3::new(f64::NAN, 0.0, f64::INFINITY);
+                (v, t)
+            }
+        };
+        let stats = Stats {
+            despiked: tag,
+            ..Stats::default()
+        };
+        Attempt::new(v, t, filled, stats)
+    }
+
+    #[test]
+    fn an_attempt_with_non_finite_vertices_is_never_kept() {
+        let nan = attempt("nan", 1, 1);
+        assert_eq!(nan.folds, None);
+        assert_eq!(attempt("folded", 0, 0).folds, Some(2));
+        // the NaN solid adds the fewest vertices and shows no crossing: the
+        // choice skips it and goes on to the next axis
+        let (best, last) = choose([attempt("folded", 9, 0), nan, attempt("closed", 5, 2)]);
+        let (k, best) = best.expect("a finite attempt");
+        assert_eq!((k, best.folds, best.filled), (2, Some(0), 5));
+        assert!(best.vertices.iter().all(|p| p.is_finite()));
+        assert_eq!(last.despiked, 2);
+        // a folded finite solid is still better than a NaN one
+        let (best, last) = choose([attempt("nan", 0, 0), attempt("folded", 9, 1)]);
+        assert_eq!(best.map(|(k, b)| (k, b.folds)), Some((1, Some(2))));
+        assert_eq!(last.despiked, 1);
+        // nothing usable: no solid, the counters of the last attempt
+        let (best, last) = choose([attempt("nan", 0, 0), attempt("nan", 0, 1)]);
+        assert!(best.is_none());
+        assert_eq!(last.despiked, 1);
+    }
+
+    #[test]
+    fn the_choice_is_the_plugins_on_finite_attempts() {
+        // fewest crossings, then fewest added vertices; no crossings ends it
+        let (best, last) = choose([
+            attempt("folded", 9, 0),
+            attempt("folded", 3, 1),
+            attempt("closed", 7, 2),
+            attempt("closed", 1, 3),
+        ]);
+        assert_eq!(best.map(|(k, b)| (k, b.filled)), Some((2, 7)));
+        assert_eq!(last.despiked, 2);
+        let (best, _) = choose([attempt("folded", 9, 0), attempt("folded", 3, 1)]);
+        assert_eq!(best.map(|(k, b)| (k, b.filled)), Some((1, 3)));
+    }
+
+    /// Three teeth asked on a scan that has none of them: every tooth fails
+    /// with `NoCrown`, unless the run is cancelled first.
+    #[test]
+    fn a_cancelled_run_stops_between_teeth() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+        let vertices = [DVec3::ZERO, DVec3::X, DVec3::Y];
+        let tris = [[0, 1, 2]];
+        let labels = [0u16; 3];
+        let axes: BTreeMap<Fdi, DVec3> = [11, 12, 13]
+            .into_iter()
+            .map(|n| (Fdi::new(n).unwrap(), DVec3::Z))
+            .collect();
+        let input = Input {
+            vertices: &vertices,
+            tris: &tris,
+            labels: &labels,
+            axes: &axes,
+        };
+        let params = Params::default();
+        let run = |progress: &(dyn Fn(usize, usize) + Sync),
+                   cancelled: &(dyn Fn() -> bool + Sync)| {
+            run_with_progress(&input, &params, progress, cancelled)
+        };
+        assert!(matches!(
+            run(&|_, _| {}, &|| false),
+            Err(ReconstructError::NoCrown(_))
+        ));
+        // asked before the first tooth: none is started
+        let started = AtomicUsize::new(0);
+        let r = run(&|_, _| _ = started.fetch_add(1, Relaxed), &|| true);
+        assert!(matches!(r, Err(ReconstructError::Cancelled)), "{r:?}");
+        assert_eq!(started.load(Relaxed), 0);
+        // asked after the first tooth: the run is cancelled, not failed
+        let first = AtomicBool::new(false);
+        let r = run(&|_, _| first.store(true, Relaxed), &|| first.load(Relaxed));
+        assert!(matches!(r, Err(ReconstructError::Cancelled)), "{r:?}");
     }
 }

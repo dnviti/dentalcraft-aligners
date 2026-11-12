@@ -291,16 +291,22 @@ fn dots<const L: usize>(a: &[f64], b: &[f64], n: usize) -> [f64; L] {
     })
 }
 
+/// How many iterations of [`pcg_solve_many_par`] pass between two asks of
+/// its `cancelled` (an iteration reads the matrix once: milliseconds).
+const CANCEL_EVERY: usize = 8;
+
 /// `dc_geom::sparse::pcg_solve_many(a, bs, Some(x0), params)` for `L`
 /// right-hand sides iterated together in parallel passes over the rows
 /// (the matrix read once per iteration for all of them), with the same
-/// operations per right-hand side and the same bits.
+/// operations per right-hand side and the same bits. `cancelled` is asked
+/// every few iterations; once `true` the solve stops and returns `None`.
 pub fn pcg_solve_many_par<const L: usize>(
     a: &CsrMatrix,
     bs: &[Vec<f64>; L],
     x0: &[Vec<f64>; L],
     params: &PcgParams,
-) -> [Vec<f64>; L] {
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<[Vec<f64>; L]> {
     use dc_geom::sparse::exact_dot as edot;
     use rayon::prelude::*;
     let n = a.n;
@@ -335,6 +341,9 @@ pub fn pcg_solve_many_par<const L: usize>(
     loop {
         if res.iter().all(|&r| r < params.tolerance) || it >= params.max_iterations {
             break;
+        }
+        if it.is_multiple_of(CANCEL_EVERY) && cancelled() {
+            return None;
         }
         ap.par_chunks_mut(CH * L).enumerate().for_each(|(k, out)| {
             for (j, o) in out.as_chunks_mut::<L>().0.iter_mut().enumerate() {
@@ -382,7 +391,9 @@ pub fn pcg_solve_many_par<const L: usize>(
             });
         it += 1;
     }
-    std::array::from_fn(|c| (0..n).map(|i| x[i * L + c]).collect())
+    Some(std::array::from_fn(|c| {
+        (0..n).map(|i| x[i * L + c]).collect()
+    }))
 }
 
 #[cfg(test)]
@@ -438,7 +449,9 @@ mod tests {
             &[bs[0].clone(), bs[1].clone(), bs[2].clone()],
             &[x0[0].clone(), x0[1].clone(), x0[2].clone()],
             &p,
-        );
+            &|| false,
+        )
+        .unwrap();
         let bits =
             |x: &[Vec<f64>]| -> Vec<u64> { x.iter().flatten().map(|v| v.to_bits()).collect() };
         assert_eq!(bits(&ours), bits(&theirs.x));

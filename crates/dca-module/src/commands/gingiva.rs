@@ -58,8 +58,12 @@ fn run_gingiva(
             &scan.labels,
             &params,
             &progress,
+            &|| ctx.is_cancelled(),
         )
-        .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
+        .map_err(|e| match e {
+            gingiva::GingivaError::Cancelled => CommandError::Cancelled,
+            e => CommandError::Failed(format!("{} arch: {e}", arch_name(arch))),
+        })?;
         ctx.check_cancelled()?;
         for p in &mut g.vertices {
             *p = scan.to_case.transform_point3(*p);
@@ -184,5 +188,21 @@ mod tests {
             .filter(|&i| w.get(i, j) == 0.0 && moved[i] == g.vertices[i])
             .count();
         assert!(still > g.vertices.len() / 2, "{still}");
+    }
+
+    #[test]
+    fn cancelling_the_gingiva_returns_cancelled_and_stores_nothing() {
+        let state = super::super::reconstruct::golden_state("demo_lower_mild");
+        let before = state.module_data::<AlignersState>(MODULE_ID).cloned();
+        let r = super::super::reconstruct::run_cancelled_at_first_progress(ID, &state, Value::Null);
+        assert!(
+            matches!(r, Err(CommandError::Cancelled)),
+            "{:?}",
+            r.map(|o| o.1)
+        );
+        assert_eq!(
+            state.module_data::<AlignersState>(MODULE_ID).cloned(),
+            before
+        );
     }
 }

@@ -515,7 +515,9 @@ pub fn min_distances(p: &[DVec3], s: &[DVec3]) -> Vec<f64> {
 /// Pairs `(i, j)`, `i < j`, of triangles that cross each other and share no
 /// vertex (`printcheck.self_intersecting_pairs` with the exact float64 test
 /// of the golden shim: some edge of one triangle crosses the other, coplanar
-/// pairs ignored), sorted.
+/// pairs ignored), sorted. A triangle with a non-finite corner cannot be
+/// tested and is left out: its box would never end the sweep, which would
+/// then compare it with every later triangle.
 pub fn self_intersecting_pairs(v: &[DVec3], tris: &[[u32; 3]]) -> Vec<(u32, u32)> {
     use rayon::prelude::*;
     let n = tris.len();
@@ -530,9 +532,8 @@ pub fn self_intersecting_pairs(v: &[DVec3], tris: &[[u32; 3]]) -> Vec<(u32, u32)
         })
         .collect();
     // sweep along x: candidates whose boxes overlap
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    order.sort_unstable_by(|&a, &b| boxes[a as usize].0.x.total_cmp(&boxes[b as usize].0.x));
-    let mut pairs: Vec<(u32, u32)> = (0..n)
+    let order = sweep_order(v, tris, &boxes);
+    let mut pairs: Vec<(u32, u32)> = (0..order.len())
         .into_par_iter()
         .with_min_len(512)
         .flat_map_iter(|k| {
@@ -561,6 +562,18 @@ pub fn self_intersecting_pairs(v: &[DVec3], tris: &[[u32; 3]]) -> Vec<(u32, u32)
         .collect();
     pairs.sort_unstable();
     pairs
+}
+
+/// The triangles of the sweep of [`self_intersecting_pairs`] by the lower
+/// x of their boxes: only those with finite corners, so that every box
+/// compared has finite bounds and the sweep stops at the first box past the
+/// current one.
+fn sweep_order(v: &[DVec3], tris: &[[u32; 3]], boxes: &[(DVec3, DVec3)]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..tris.len() as u32)
+        .filter(|&i| tris[i as usize].iter().all(|&k| v[k as usize].is_finite()))
+        .collect();
+    order.sort_unstable_by(|&a, &b| boxes[a as usize].0.x.total_cmp(&boxes[b as usize].0.x));
+    order
 }
 
 /// Number of triangles that cross another triangle sharing no vertex with
@@ -742,6 +755,51 @@ mod tests {
         ];
         let t = vec![[0, 1, 2], [3, 4, 5]];
         assert_eq!(self_intersecting_pairs(&v, &t), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn non_finite_triangles_stay_out_of_the_sweep() {
+        // the crossing pair of the test above, then triangles with a NaN
+        // (both signs: -NaN sorts before every box) or an infinite corner
+        let mut v = vec![
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(2.0, 0.0, 0.0),
+            DVec3::new(0.0, 2.0, 0.0),
+            DVec3::new(0.5, 0.5, -1.0),
+            DVec3::new(0.5, 0.5, 1.0),
+            DVec3::new(1.5, 1.5, 1.0),
+        ];
+        let nan = DVec3::splat(f64::NAN);
+        v.extend([nan, -nan, DVec3::new(f64::INFINITY, 0.0, 0.0)]);
+        v.extend([
+            DVec3::new(f64::NEG_INFINITY, 1.0, 1.0),
+            DVec3::new(0.2, 0.2, 0.5),
+        ]);
+        let t = vec![
+            [6, 7, 8],
+            [0, 1, 2],
+            [7, 3, 4],
+            [8, 9, 1],
+            [3, 4, 5],
+            [0, 6, 10],
+            [9, 4, 10],
+        ];
+        let boxes: Vec<(DVec3, DVec3)> = t
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]);
+                (a.min(b).min(c), a.max(b).max(c))
+            })
+            .collect();
+        let order = sweep_order(&v, &t, &boxes);
+        assert_eq!(order, vec![1, 4]);
+        assert!(
+            order
+                .iter()
+                .all(|&i| boxes[i as usize].0.is_finite() && boxes[i as usize].1.is_finite())
+        );
+        assert_eq!(self_intersecting_pairs(&v, &t), vec![(1, 4)]);
+        assert_eq!(self_intersections(&v, &t), 2);
     }
 
     #[test]

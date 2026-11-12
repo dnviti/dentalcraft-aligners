@@ -75,6 +75,9 @@ pub enum GingivaError {
     /// The input is not usable.
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// The caller asked to stop; nothing was produced.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Parameters of the gingiva.
@@ -268,14 +271,16 @@ pub fn interdental(labels: &[u16], edges: &[[u32; 2]], n_total: usize) -> Vec<bo
 
 /// Harmonic positions of the `inner` vertices (all others fixed), and the
 /// solution `u` of `L u = 1` (`u = 0` on the fixed vertices), which grows
-/// with the distance from the margin (`_solve_membrane`).
+/// with the distance from the margin (`_solve_membrane`); `None` when
+/// `cancelled` says so during the solve.
 fn solve_membrane(
     vs: &[DVec3],
     edges: &[[u32; 2]],
     inner: &[bool],
     eps: f64,
     maxiter: usize,
-) -> (Vec<usize>, Vec<DVec3>, Vec<f64>) {
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<(Vec<usize>, Vec<DVec3>, Vec<f64>)> {
     let n = vs.len();
     let deg: Vec<f64> = geom::edge_degree(edges, n)
         .into_iter()
@@ -342,11 +347,11 @@ fn solve_membrane(
     // the four right-hand sides iterated together in parallel passes
     // (the same bits as `pcg_solve_many`)
     let a = solve::csr_from_triplets(nf, &trip);
-    let sol = solve::pcg_solve_many_par(&a, &bs, &x0, &params);
+    let sol = solve::pcg_solve_many_par(&a, &bs, &x0, &params, cancelled)?;
     let x = (0..nf)
         .map(|k| DVec3::new(sol[0][k], sol[1][k], sol[2][k]))
         .collect();
-    (fidx, x, sol[3].clone())
+    Some((fidx, x, sol[3].clone()))
 }
 
 /// Gingiva of the whole scan without holes (`gum_surface`): the scan cut
@@ -358,19 +363,30 @@ pub fn gum_surface(
     labels: &[u16],
     params: &Params,
 ) -> Result<GumSurface, GingivaError> {
-    gum_surface_with_progress(v, tris, labels, params, &|_| {})
+    gum_surface_with_progress(v, tris, labels, params, &|_| {}, &|| false)
 }
 
 /// [`gum_surface`], calling `progress(fraction)` (`0` to `1`) as its stages
 /// end: the margin cut, the membrane solve (most of the time), the col.
+/// `cancelled` is asked between the stages and every few iterations of the
+/// membrane solve; once `true` the result is [`GingivaError::Cancelled`].
 pub fn gum_surface_with_progress(
     v: &[DVec3],
     tris: &[[u32; 3]],
     labels: &[u16],
     params: &Params,
     progress: &(dyn Fn(f32) + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<GumSurface, GingivaError> {
     check(v, tris, labels)?;
+    let stop = || {
+        if cancelled() {
+            Err(GingivaError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    stop()?;
     let n = v.len();
     let edges = unique_edges(tris);
     let ind: Vec<f64> = labels
@@ -381,7 +397,9 @@ pub fn gum_surface_with_progress(
         .into_iter()
         .map(|x| x - 0.5)
         .collect();
+    stop()?;
     let cut = geom::cut_mesh(v, tris, &phi, T_MIN);
+    stop()?;
     let n2 = cut.vertices.len();
     // crown side: tooth of every vertex (scan gingiva engulfed by the smoothing takes its neighbours' tooth)
     let mut lab_c: Vec<Option<u16>> = (0..n)
@@ -397,6 +415,7 @@ pub fn gum_surface_with_progress(
             }
         })
         .collect();
+    stop()?;
     if lab_c.iter().any(|l| l.is_none()) {
         fill_unassigned(&mut lab_c, &edges, 500);
     }
@@ -412,11 +431,16 @@ pub fn gum_surface_with_progress(
     for i in 0..n {
         membrane[i] = phi[i] > 0.0;
     }
+    stop()?;
     let e2 = unique_edges(&cut.tris);
     let mut vr = cut.vertices.clone();
     if membrane.iter().any(|&m| m) {
         progress(0.1);
-        let (fidx, x, u) = solve_membrane(&cut.vertices, &e2, &membrane, 1e-4, 3000);
+        let Some((fidx, x, u)) =
+            solve_membrane(&cut.vertices, &e2, &membrane, 1e-4, 3000, cancelled)
+        else {
+            return Err(GingivaError::Cancelled);
+        };
         // depth: u ~ (graph distance)^2 / 4 in edge units -> distance in mm
         let lens: Vec<f64> = e2
             .iter()
@@ -431,6 +455,7 @@ pub fn gum_surface_with_progress(
             vr[i] = p;
         }
     }
+    stop()?;
     progress(0.85);
     let col: Vec<bool> = interdental(labels, &edges, n2)
         .into_iter()
@@ -1002,5 +1027,57 @@ mod tests {
         };
         let back = GumSurface::from_mesh(&g.to_mesh()).unwrap();
         assert_eq!(back, g);
+    }
+
+    /// A flat grid with a labelled square (a crown) in the middle.
+    fn flat_crown(n: usize) -> (Vec<DVec3>, Vec<[u32; 3]>, Vec<u16>) {
+        let id = |i: usize, j: usize| (i * n + j) as u32;
+        let v = (0..n * n)
+            .map(|k| DVec3::new((k / n) as f64 * 0.5, (k % n) as f64 * 0.5, 0.0))
+            .collect();
+        let mut tris = Vec::new();
+        for i in 0..n - 1 {
+            for j in 0..n - 1 {
+                tris.push([id(i, j), id(i + 1, j), id(i + 1, j + 1)]);
+                tris.push([id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
+            }
+        }
+        let labels = (0..n * n)
+            .map(|k| {
+                u16::from(
+                    (n / 4..3 * n / 4).contains(&(k / n)) && (n / 4..3 * n / 4).contains(&(k % n)),
+                ) * 41
+            })
+            .collect();
+        (v, tris, labels)
+    }
+
+    #[test]
+    fn a_cancelled_gum_stops_between_stages_and_inside_the_solve() {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        let (v, t, l) = flat_crown(40);
+        let params = Params::default();
+        let run = |progress: &(dyn Fn(f32) + Sync), cancelled: &(dyn Fn() -> bool + Sync)| {
+            gum_surface_with_progress(&v, &t, &l, &params, progress, cancelled)
+        };
+        let g = run(&|_| {}, &|| false).unwrap();
+        assert!(g.membrane.iter().any(|&m| m));
+        // before anything is done
+        assert!(matches!(
+            run(&|_| {}, &|| true),
+            Err(GingivaError::Cancelled)
+        ));
+        // from the moment the membrane solve starts (`progress(0.1)`): only
+        // the solver loop can see it
+        let solving = AtomicBool::new(false);
+        let r = run(&|x| solving.store(x >= 0.1, Relaxed), &|| {
+            solving.load(Relaxed)
+        });
+        assert!(matches!(r, Err(GingivaError::Cancelled)), "{r:?}");
+        // the solver itself, asked at the first iteration
+        let inner: Vec<bool> = l.iter().map(|&x| x != 0).collect();
+        let e = unique_edges(&t);
+        assert!(solve_membrane(&v, &e, &inner, 1e-4, 3000, &|| true).is_none());
+        assert!(solve_membrane(&v, &e, &inner, 1e-4, 3000, &|| false).is_some());
     }
 }

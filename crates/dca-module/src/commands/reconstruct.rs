@@ -209,8 +209,12 @@ fn run_automatic(
             },
             &params,
             &progress,
+            &|| ctx.is_cancelled(),
         )
-        .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
+        .map_err(|e| match e {
+            reconstruct::ReconstructError::Cancelled => CommandError::Cancelled,
+            e => CommandError::Failed(format!("{} arch: {e}", arch_name(arch))),
+        })?;
         ctx.check_cancelled()?;
         data.crowns
             .retain(|f, _| Arch::of(*f) != arch || closed.teeth.contains_key(f));
@@ -276,6 +280,35 @@ fn run_rebuild_tooth(
     next.set_module(MODULE_ID, ModuleState::new(data));
     let out = json!({ "fdi": fdi.get(), "tooth": report(&tooth)? });
     Ok((next, out))
+}
+
+/// Runs `id` on `state` and cancels it as soon as it reports progress (a
+/// tooth closed, a stage of the gingiva done).
+#[cfg(test)]
+pub(crate) fn run_cancelled_at_first_progress(
+    id: &str,
+    state: &CaseState,
+    params: Value,
+) -> Result<CommandOutput, CommandError> {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let ctx = JobCtx::detached();
+    let finished = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while !finished.load(Relaxed) {
+                if ctx.progress().fraction > 0.0 {
+                    ctx.cancel_token().cancel();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        });
+        let r = crate::commands::find(id)
+            .unwrap()
+            .execute(state, &params, &ctx);
+        finished.store(true, Relaxed);
+        r
+    })
 }
 
 /// A case built from a golden fixture (`golden/fixtures/<name>/`): the
@@ -489,5 +522,21 @@ mod tests {
         let (deeper, _) = run(ONE, &next, json!({ "fdi": 21, "neck_depth_mm": 2.5 })).unwrap();
         let d3 = deeper.module_data::<AlignersState>(MODULE_ID).unwrap();
         assert_ne!(d3.crowns[&f], data.crowns[&f]);
+    }
+
+    #[test]
+    fn cancelling_after_the_first_tooth_stores_nothing() {
+        let state = demo_state("lower");
+        let before = state.module_data::<AlignersState>(MODULE_ID).cloned();
+        let r = run_cancelled_at_first_progress(AUTO, &state, Value::Null);
+        assert!(
+            matches!(r, Err(CommandError::Cancelled)),
+            "{:?}",
+            r.map(|o| o.1)
+        );
+        assert_eq!(
+            state.module_data::<AlignersState>(MODULE_ID).cloned(),
+            before
+        );
     }
 }
