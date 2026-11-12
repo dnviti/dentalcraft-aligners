@@ -150,9 +150,10 @@ impl ArchLabels {
 }
 
 /// Stores `labels` as the labels blob of the arch in `next`; the replaced
-/// blob goes to `stale`. The doubts of the check of the separated teeth on
-/// the arch go: the colours were corrected by hand (the plugin's
-/// `segmentation_doubts` are none once the step was done by hand).
+/// blob goes to `stale`. The doubts of the check of the separated teeth and
+/// the result of the last separation on the arch go: the colours were
+/// corrected by hand (the plugin's `segmentation_doubts` are none once the
+/// step was done by hand).
 pub(crate) fn store_labels(
     next: &mut CaseState,
     data: &mut AlignersState,
@@ -165,7 +166,7 @@ pub(crate) fn store_labels(
     labelled.vertex_labels = Some(labels);
     labelled.face_labels = None;
     let r = next.blobs.insert(labelled);
-    data.segmentation_doubts.remove(&arch.role());
+    data.forget_separation(arch.role());
     if let Some(old) = data.labels.insert(arch.role(), r)
         && old != r
     {

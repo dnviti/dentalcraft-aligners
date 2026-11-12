@@ -377,7 +377,7 @@ pub(super) fn run_teeth(
                 d.dirty.retain(|f| !todo.contains(f));
                 // teeth rebuilt by hand (the plugin's `mark_manual(obj,
                 // "denti")`): the doubts of the check on the arch are answered
-                d.segmentation_doubts.remove(&arch.role());
+                d.forget_separation(arch.role());
             }
         }
         let teeth: Vec<u8> = d

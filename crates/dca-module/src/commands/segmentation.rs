@@ -9,6 +9,9 @@
 //! arch's labels blob in the Aligners data (the scan mesh with vertex
 //! labels, as `aligners.demo` stores its ground truth), replacing the
 //! previous labels of that arch. The scans and the seeds are not modified.
+//! The teeth it gave and its seconds are kept per arch in the Aligners data
+//! (`AlignersState::segmentation_runs`), so the inspector shows them after
+//! the case is reopened; they go with the labels they describe.
 //!
 //! What was computed from the old labels of a separated arch goes
 //! ([`AlignersState::clear_label_dependents`]: 3D teeth, gingiva, measures,
@@ -38,7 +41,7 @@ use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
 use dca_algo::frame;
 use dca_algo::segmentation::{self, Phase};
-use dca_model::{AlignersState, CLEARED_IDS, MODULE_ID, SegmentationSettings};
+use dca_model::{AlignersState, CLEARED_IDS, MODULE_ID, SegmentationRun, SegmentationSettings};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -304,6 +307,14 @@ fn run_automatic(
         labelled.face_labels = None;
         let labels_ref = next.blobs.insert(labelled);
         data.labels.insert(role, labels_ref);
+        let seconds = t_arch.elapsed().as_secs_f64();
+        data.segmentation_runs.insert(
+            role,
+            SegmentationRun {
+                teeth: u32::try_from(out.teeth).unwrap_or(u32::MAX),
+                seconds,
+            },
+        );
         let mut per_tooth = Map::new();
         for &l in &out.labels {
             let key = l.to_string();
@@ -318,7 +329,7 @@ fn run_automatic(
                 "vertices": out.labels.len(),
                 "simplified_faces": out.decimated_tris.len(),
                 "teeth": out.teeth,
-                "seconds": t_arch.elapsed().as_secs_f64(),
+                "seconds": seconds,
                 "vertices_per_label": per_tooth,
                 "labels_blob": labels_ref.to_hex(),
                 "diagnostics": out.diagnostics,
@@ -422,6 +433,11 @@ mod tests {
         let d = next.module_data::<AlignersState>(MODULE_ID).unwrap();
         assert!(d.crowns.is_empty() && d.gingiva.is_empty() && d.dirty.is_empty());
         assert!(d.segmentation_doubts.is_empty());
+        // the case keeps the teeth and the time of the run, as the output says them
+        let stored = d.segmentation_runs[&ScanRole::Lower];
+        assert_eq!(stored.teeth, 14);
+        assert_eq!(stored.seconds, lower);
+        assert_eq!(d.segmentation_runs.len(), 1);
         // their blobs go with them: the scan and the new labels are left
         assert_eq!(next.blobs.len(), 2);
         // nothing more to drop on a second run

@@ -138,7 +138,7 @@ pub(crate) fn run_rebuild(
     }
     data.dirty.remove(&f);
     // a tooth rebuilt by hand: the doubts of the check on the arch are answered
-    data.segmentation_doubts.remove(&arch.role());
+    data.forget_separation(arch.role());
     // what the setup and the staging computed for the tooth is out of date
     let moved =
         data.setup.poses.contains_key(&f) || data.stages.iter().any(|s| s.poses.contains_key(&f));
