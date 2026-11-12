@@ -158,6 +158,15 @@ impl Stage {
     }
 }
 
+/// What one automatic separation of an arch gave.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SegmentationRun {
+    /// Teeth it separated.
+    pub teeth: u32,
+    /// How long it took (s).
+    pub seconds: f64,
+}
+
 /// Everything the Aligners module keeps in a case.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -205,6 +214,22 @@ pub struct AlignersState {
     /// into the mesh: nothing undoes it when an arch is replaced, so
     /// [`AlignersState::clear_arch`] reports it once, as `bite_registered`.
     pub bite_registered: bool,
+    /// What the check of the separated teeth
+    /// (`aligners.preparation.segmentation.check`) left implausible in each
+    /// arch, in words (its problems, then its notes): the plugin's
+    /// `segmentation_doubts`. The export and the report warn about them
+    /// (the aligners must not be delivered without checking the tooth marks
+    /// and their numbers). They go when the arch is separated again, its
+    /// colours are corrected by hand, its teeth are rebuilt by hand, or what
+    /// depends on its labels is cleared.
+    pub segmentation_doubts: BTreeMap<ScanRole, Vec<String>>,
+    /// The last automatic separation of each arch
+    /// (`aligners.preparation.segmentation.automatic`): how many teeth it
+    /// gave and how long it took, for the line the inspector shows. It goes
+    /// with the labels it describes ([`AlignersState::forget_separation`]):
+    /// when the arch is separated again, its colours are corrected by hand,
+    /// its teeth are rebuilt by hand, or the labels are cleared or replaced.
+    pub segmentation_runs: BTreeMap<ScanRole, SegmentationRun>,
 }
 
 /// Ids [`AlignersState::clear_arch`] (and so the `scan_replaced` hook) can
@@ -317,12 +342,47 @@ impl AlignersState {
     ///
     /// Call it whenever the seeds of an arch change (automatic numbering,
     /// manual marks): the tooth labels (and the teeth flagged for a rebuild),
-    /// tooth frames, measures, closed crowns and gingiva of the arch, its
-    /// space analysis, the setup, its poses in every stage and its ramps no
+    /// and everything [`AlignersState::clear_label_dependents`] drops, no
     /// longer describe the teeth the seeds name. The results that need both
     /// arches (Bolton, complexity score, automatic ramps) go with them, as in
     /// [`AlignersState::clear_arch`], which is this plus the arch's own entries.
     pub fn clear_seed_dependents(&mut self, role: ScanRole) -> Vec<&'static str> {
+        if role == ScanRole::Bite {
+            return Vec::new();
+        }
+        let n = self.dirty.len();
+        let labels = self.labels.remove(&role).is_some();
+        let mut cleared = self.clear_label_dependents(role);
+        if labels || self.dirty.len() != n {
+            cleared.insert(0, "labels");
+        }
+        cleared
+    }
+
+    /// Forgets what the separation and the check of the arch `role` left in
+    /// the case: the doubts and the result of the last run (teeth and
+    /// seconds). Call it whenever the colours of the arch are replaced or
+    /// corrected by other means than a separation, so the case never says
+    /// more than the labels it holds.
+    pub fn forget_separation(&mut self, role: ScanRole) {
+        self.segmentation_doubts.remove(&role);
+        self.segmentation_runs.remove(&role);
+    }
+
+    /// Drops what is computed from the labels of the arch `role`, keeping
+    /// the labels themselves, and returns the ids of the groups that held
+    /// data, in the order of [`CLEARED_IDS`] (never `labels`). A bite role
+    /// clears nothing.
+    ///
+    /// Call it when the labels of an arch are made again from the seeds (the
+    /// automatic separation): the teeth flagged for a rebuild, the tooth
+    /// frames, measures, closed crowns and gingiva of the arch, its space
+    /// analysis, the setup, its poses in every stage and its ramps describe
+    /// the old teeth, and the results that need both arches (Bolton,
+    /// complexity score, automatic ramps) go with them. The doubts of the
+    /// check of the separated teeth and the result of the last separation of
+    /// the arch go too, without an id (they were about the old labels).
+    pub fn clear_label_dependents(&mut self, role: ScanRole) -> Vec<&'static str> {
         let other = match role {
             ScanRole::Upper => ScanRole::Lower,
             ScanRole::Lower => ScanRole::Upper,
@@ -335,10 +395,8 @@ impl AlignersState {
             }
         };
 
-        let n = self.dirty.len();
         self.dirty.retain(|f| !in_arch(*f, role));
-        let labels = self.labels.remove(&role).is_some();
-        note("labels", labels || self.dirty.len() != n);
+        self.forget_separation(role);
 
         note("tooth_frames", drop_teeth(&mut self.tooth_frames, role));
         note("tooth_geometry", drop_teeth(&mut self.tooth_geometry, role));
@@ -591,6 +649,99 @@ mod tests {
         // asking does not change anything
         assert_eq!(st.seed_dependents(ScanRole::Upper), outdated);
         assert_eq!(st, expect);
+    }
+
+    #[test]
+    fn label_dependents_go_and_the_labels_and_seeds_stay() {
+        let mut st = sample();
+        let f11 = Fdi::new(11).unwrap();
+        st.dirty.insert(f11);
+        st.crowns.insert(f11, BlobRef::of_bytes(b"crown"));
+        st.segmentation_doubts
+            .insert(ScanRole::Upper, vec!["11 is narrow".to_owned()]);
+        st.segmentation_doubts
+            .insert(ScanRole::Lower, vec!["41 is wide".to_owned()]);
+        let before = st.clone();
+        // the other arch: nothing of the upper one goes
+        assert!(st.clear_label_dependents(ScanRole::Lower).is_empty());
+        assert!(!st.segmentation_doubts.contains_key(&ScanRole::Lower));
+        assert!(st.crowns.contains_key(&f11) && st.dirty.contains(&f11));
+        let cleared = st.clear_label_dependents(ScanRole::Upper);
+        assert_eq!(
+            cleared,
+            ["tooth_frames", "crowns", "diagnosis", "setup", "stages"]
+        );
+        assert_eq!(st.labels, before.labels);
+        assert_eq!(st.seeds, before.seeds);
+        assert!(st.crowns.is_empty() && st.dirty.is_empty() && st.stages.is_empty());
+        assert!(st.segmentation_doubts.is_empty());
+        // the seeds' dependents are the labels plus these
+        let mut all = vec!["labels"];
+        all.extend(&cleared);
+        assert_eq!(before.seed_dependents(ScanRole::Upper), all);
+        assert!(st.clear_label_dependents(ScanRole::Bite).is_empty());
+    }
+
+    #[test]
+    fn a_case_saved_without_doubts_loads_with_none() {
+        let mut json = serde_json::to_value(sample()).unwrap();
+        json.as_object_mut().unwrap().remove("segmentation_doubts");
+        let back: AlignersState = serde_json::from_value(json).unwrap();
+        assert!(back.segmentation_doubts.is_empty());
+    }
+
+    #[test]
+    fn the_separation_result_round_trips_and_an_old_case_loads_without_it() {
+        let mut st = sample();
+        st.segmentation_runs.insert(
+            ScanRole::Upper,
+            SegmentationRun {
+                teeth: 14,
+                seconds: 9.6,
+            },
+        );
+        let json = serde_json::to_value(&st).unwrap();
+        assert_eq!(json["segmentation_runs"]["upper"]["teeth"], 14);
+        let back: AlignersState = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, st);
+        // a case saved before the field existed
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("segmentation_runs");
+        let back: AlignersState = serde_json::from_value(old).unwrap();
+        assert!(back.segmentation_runs.is_empty());
+    }
+
+    #[test]
+    fn what_clears_the_separation_result_of_an_arch_leaves_the_other() {
+        let run = SegmentationRun {
+            teeth: 14,
+            seconds: 3.0,
+        };
+        let both = || {
+            let mut st = AlignersState::default();
+            st.segmentation_runs.insert(ScanRole::Upper, run);
+            st.segmentation_runs.insert(ScanRole::Lower, run);
+            st
+        };
+        let mut st = both();
+        st.forget_separation(ScanRole::Upper);
+        assert!(!st.segmentation_runs.contains_key(&ScanRole::Upper));
+        assert!(st.segmentation_runs.contains_key(&ScanRole::Lower));
+        let mut st = both();
+        st.clear_arch(ScanRole::Lower);
+        assert!(!st.segmentation_runs.contains_key(&ScanRole::Lower));
+        assert!(st.segmentation_runs.contains_key(&ScanRole::Upper));
+        let mut st = both();
+        st.clear_seed_dependents(ScanRole::Upper);
+        assert!(!st.segmentation_runs.contains_key(&ScanRole::Upper));
+        let mut st = both();
+        st.clear_label_dependents(ScanRole::Lower);
+        assert!(!st.segmentation_runs.contains_key(&ScanRole::Lower));
+        assert!(st.segmentation_runs.contains_key(&ScanRole::Upper));
+        // a bite role clears nothing
+        let mut st = both();
+        st.clear_label_dependents(ScanRole::Bite);
+        assert_eq!(st, both());
     }
 
     #[test]

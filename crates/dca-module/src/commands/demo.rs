@@ -46,6 +46,7 @@ fn run_demo(
     // blobs of the scan and labels this one replaces
     let mut stale: Vec<_> = next.case.scan(role).map(|s| s.mesh).into_iter().collect();
     stale.extend(data.labels.remove(&role));
+    data.forget_separation(role);
     next.case.scans.retain(|s| s.role != role);
     data.seeds
         .retain(|s| dca_algo::anatomy::Arch::of(s.fdi) != demo.arch);

@@ -21,12 +21,12 @@ pub use bite::{
 };
 pub use migrate::{ModelError, migrate};
 pub use settings::{
-    FindTeethSettings, PerioStage, Settings, StagingPattern, StagingSettings, StudyBaseSettings,
-    StudyBaseStyle, TrimMode, TrimParams,
+    FindTeethSettings, PerioStage, SegmentationSettings, Settings, StagingPattern, StagingSettings,
+    StudyBaseSettings, StudyBaseStyle, TrimMode, TrimParams,
 };
 pub use state::{
-    AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed, Setup, Stage,
-    ToothFrame, ToothMeasures,
+    AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed, SegmentationRun,
+    Setup, Stage, ToothFrame, ToothMeasures,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 

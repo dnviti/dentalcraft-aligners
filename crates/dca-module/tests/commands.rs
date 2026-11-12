@@ -102,6 +102,7 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.output.report",
     "aligners.settings.study-models",
     "aligners.settings.find-teeth",
+    "aligners.settings.segmentation",
 ];
 
 #[test]

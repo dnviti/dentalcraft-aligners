@@ -430,6 +430,11 @@ static TABLE: &[(&str, &str, &str)] = &[
         "full resolution kept: the reduction within {0} folded the surface",
         "tenuta la risoluzione piena: la riduzione entro {0} piegava la superficie",
     ),
+    (
+        "rpt-note-doubts",
+        "to check before delivery: the automatic analysis left teeth that are not plausible ({0}); check the tooth marks and their numbers, or correct the teeth by hand",
+        "da verificare prima della consegna: l'analisi automatica ha lasciato denti non plausibili ({0}); controllare i segni dei denti e la loro numerazione, o correggere i denti a mano",
+    ),
 ];
 
 /// The text of `key` in `lang`; the key itself when there is no such entry.

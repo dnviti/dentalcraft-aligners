@@ -373,7 +373,12 @@ pub(super) fn run_teeth(
         stages_cleared |= st;
         match mode {
             Mode::All => d.dirty.retain(|f| Arch::of(*f) != arch),
-            Mode::Some(todo) => d.dirty.retain(|f| !todo.contains(f)),
+            Mode::Some(todo) => {
+                d.dirty.retain(|f| !todo.contains(f));
+                // teeth rebuilt by hand (the plugin's `mark_manual(obj,
+                // "denti")`): the doubts of the check on the arch are answered
+                d.forget_separation(arch.role());
+            }
         }
         let teeth: Vec<u8> = d
             .crowns

@@ -62,8 +62,8 @@ fn run_frame(
         vertices: &vertices,
         seeds: &seeds,
     };
-    let out =
-        dca_algo::frame::run(&input, &params).map_err(|e| CommandError::Failed(e.to_string()))?;
+    let out = dca_algo::frame::run(&input, &params)
+        .map_err(|e| crate::commands::messages::frame_error(arch, &e))?;
     ctx.check_cancelled()?;
     let mut next = state.clone();
     next.case.world_frame.from_case = out.from_case;

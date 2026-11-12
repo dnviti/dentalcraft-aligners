@@ -169,6 +169,27 @@ fn painting_vertices_changes_exactly_those_labels_and_undo_restores_them() {
 }
 
 #[test]
+fn painting_by_hand_drops_the_result_of_the_separation_of_the_arch() {
+    let mut state = demo();
+    let mut d = al(&state).clone();
+    for role in [ScanRole::Lower, ScanRole::Upper] {
+        d.segmentation_runs.insert(
+            role,
+            dca_model::SegmentationRun {
+                teeth: 14,
+                seconds: 2.0,
+            },
+        );
+    }
+    state.set_module(MODULE_ID, dc_case::ModuleState::new(d));
+    let pick: Vec<u32> = region(&labels(&state), 36).into_iter().take(5).collect();
+    let (after, _) = ok(BRUSH, &state, json!({ "label": 35, "vertices": pick }));
+    // the painted arch no longer has the colours the run gave; the other keeps its line
+    assert!(!al(&after).segmentation_runs.contains_key(&ScanRole::Lower));
+    assert!(al(&after).segmentation_runs.contains_key(&ScanRole::Upper));
+}
+
+#[test]
 fn a_dab_paints_the_ball_and_erase_sends_a_tooth_back_to_the_gingiva() {
     let state = demo();
     let before = labels(&state);

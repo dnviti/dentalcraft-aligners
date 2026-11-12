@@ -4,9 +4,10 @@
 //! Fed the oracle's simplified mesh (`decimated.dcm`, Blender's Decimate) and
 //! its seeds, the face labels, the transferred labels and the final vertex
 //! labels must agree with the oracle on at least 99 % of the faces / vertices
-//! (PLAN section 5). One case runs by default; all six, and the full
-//! pipeline with our own simplification against the ground truth, run with
-//! `cargo test --release -p dca-algo --test segmentation_oracle -- --ignored --nocapture`.
+//! (PLAN section 5). All six cases, and the full pipeline with our own
+//! simplification against the ground truth, run by default; use
+//! `cargo test --release -p dca-algo --test segmentation_oracle -- --nocapture`
+//! to see the per-case numbers.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -167,16 +168,18 @@ fn segmentation_matches_the_oracle_on_one_case() {
     assert_agrees("demo_lower_mild");
 }
 
+// CI runs `cargo test --workspace --release`. Measured in release: 1.3-2.7 s per case,
+// about 10 s for the six cases (about 20 s in debug).
 #[test]
-#[ignore = "1.5-2.5 s per case in release, about 20 s in debug: run with --release --ignored"]
 fn segmentation_matches_the_oracle_on_every_case() {
     for name in CASES {
         assert_agrees(name);
     }
 }
 
+// Full pipeline with our own simplification. Measured in release: 1.9-2.6 s per case,
+// about 12 s for the six cases; run in parallel with the test above, about 27 s together.
 #[test]
-#[ignore = "full pipeline with our own simplification: run with --release --ignored"]
 fn full_pipeline_agrees_with_the_ground_truth() {
     for name in CASES {
         let c = load(name);

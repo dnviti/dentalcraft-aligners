@@ -22,14 +22,14 @@
 //!         id: "aligners.preparation.segmentation.automatic",
 //!         label: "aligners-menu-preparation-segmentation-automatic",
 //!         doc: "aligners-cmd-segmentation-automatic-doc",
-//!         params: dca_algo::segmentation::Params,
+//!         params: AutomaticParams,
 //!         run: run_automatic,
 //!     }]
 //! }
 //!
 //! fn run_automatic(
 //!     state: &CaseState,
-//!     params: dca_algo::segmentation::Params,
+//!     params: AutomaticParams,
 //!     ctx: &JobCtx,
 //! ) -> Result<CommandOutput, CommandError> { ... }
 //! ```

@@ -106,7 +106,15 @@ aligners-cmd-autoseed-numbering = Numera i denti
 aligners-cmd-autoseed-numbering-doc = Trova i denti di ogni scansione d'arcata e mette un punto dente numerato (FDI) sulla faccia occlusale di ogni dente, al posto dei punti dente di quell'arcata. Il profilo delle corone lungo l'arcata è confrontato con le larghezze tipiche dei denti per ogni numero plausibile di molari; un dente dentro l'arcata può mancare. La proposta va verificata. Non riesce se trova meno di 4 denti: segna i denti a mano. Con arch all ogni arcata è numerata per conto suo: quella che non riesce tiene i suoi punti dente ed è elencata in failed con il motivo, e il comando non riesce solo se non riesce nessuna arcata. Ciò che i vecchi punti dente decidevano è elencato in dropped; i denti che si sa mancare vengono letti, non salvati. Parametri: arch (all, upper o lower), third_molars (possono esserci i terzi molari, predefinito false), missing (numeri FDI dei denti che si sa mancare), ends (dente distale imposto del lato destro e sinistro, posizioni da 5 a 8, per esempio [7, 7]; predefinito scelto dai dati).
 
 ## ---- commands: segmentation ----
-aligners-cmd-segmentation-automatic-doc = Assegna ogni punto della scansione a un dente (numero FDI) o alla gengiva (0), partendo dai punti dente. La scansione viene portata nella posizione della sua arcata e semplificata a circa 30 000 facce; una prima separazione segue le pieghe della superficie da un disco attorno a ogni punto dente e viene ripetuta con ogni punto spostato al centro della sua corona. I colori dei denti vengono trasferiti alla scansione completa, ripuliti (un solo pezzo connesso per dente) e i loro confini rifiniti alla massima risoluzione. Sono salvati nel caso e sostituiscono i precedenti dell'arcata; le scansioni e i punti dente non vengono modificati. Richiede i punti dente e rifiuta una scansione la cui arcata è ancora provvisoria: confermala prima. Parametri: arch (upper o lower, predefinito tutte le arcate con punti dente), target_faces, eta_convex, sigma, refine.
+aligners-cmd-segmentation-automatic-doc = Assegna ogni punto della scansione a un dente (numero FDI) o alla gengiva (0), partendo dai punti dente. La scansione viene portata nella posizione della sua arcata e semplificata a circa 30 000 facce; una prima separazione segue le pieghe della superficie da un disco attorno a ogni punto dente e viene ripetuta con ogni punto spostato al centro della sua corona. I colori dei denti vengono trasferiti alla scansione completa, ripuliti (un solo pezzo connesso per dente) e i loro confini rifiniti alla massima risoluzione. Sono salvati nel caso e sostituiscono i precedenti dell'arcata; le scansioni e i punti dente non vengono modificati. Ciò che era stato ricavato dai vecchi colori dell'arcata (denti 3D, gengiva, misure, analisi, posizione finale, allineatori, i dubbi del controllo) viene cancellato ed elencato in invalidated. Richiede i punti dente e rifiuta una scansione la cui arcata è ancora provvisoria: confermala prima. Rifiuta anche un'arcata con meno di 4 punti dente, o senza punti su entrambi i lati e sugli incisivi, perché non se ne può ricavare la posizione: nulla viene modificato e l'errore nomina l'arcata. Parametri: arch (upper o lower, predefinito tutte le arcate con punti dente), target_faces (da 5000 a 200000), eta_convex (da 0.01 a 1), sigma (da 0.1 a 10), tutti e tre presi per default dalle impostazioni del caso (aligners.settings.segmentation), refine (predefinito true). Restituisce, per arcata, teeth e seconds, e in totale teeth, seconds e invalidated.
+aligners-cmd-segmentation-settings = Impostazioni di Separa denti e gengiva
+aligners-cmd-segmentation-settings-doc = Cambia i parametri di separazione salvati nel caso: target_faces (dettaglio della scansione semplificata, da 5000 a 200000, predefinito 30000), eta_convex (sensibilità dei bordi dei denti, da 0.01 a 1, predefinito 0.2), sigma (levigatura dei bordi, da 0.1 a 10, predefinito 1.0). Un campo non indicato resta com'è. Sono i valori che Separa denti e gengiva usa quando un parametro non è indicato: dal menu, in Trova tutto automaticamente e nel controllo dei denti separati. Un valore fuori dal suo intervallo viene rifiutato e nulla cambia. Restituisce i tre valori.
+aligners-seg-step-simplify = Scansione semplificata
+aligners-seg-step-first = Prima separazione
+aligners-seg-step-transfer = Colori dei denti sulla scansione completa
+aligners-seg-step-borders = Bordi alla piena risoluzione
+aligners-seg-step-cleanup = Pulizia
+aligners-warn-segmentation-doubts = Controlla i denti dell'arcata { $arch } prima della consegna: l'analisi automatica ha lasciato denti non plausibili ({ $list }). Controlla i segni dei denti e la loro numerazione, o correggi i denti a mano.
 
 ## ---- commands: teeth ----
 aligners-cmd-teeth-frames = Assi e larghezze dei denti
@@ -298,6 +306,21 @@ aligners-err-seed-arch-not-found = nessuna arcata dentale trovata nella scansion
 aligners-err-seed-too-few = trovati solo { $found } denti sull'arcata { $arch }: metti i punti dente a mano con { aligners-menu-preparation-numbering-place-seeds }
 aligners-err-seed-bad-ends = l'ultimo dente di ogni lato deve essere il numero 5, 6, 7 o 8
 aligners-err-seed-bad-tooth = { $fdi } non è un numero di dente valido
+aligners-err-frame-too-few-seeds = l'arcata { $arch } ha meno di 4 punti dente: per posizionare l'arcata ne servono almeno 4 (incisivi e molari); mettili con { aligners-menu-preparation-numbering-place-seeds } oppure lascia che li trovi il programma con { aligners-menu-teeth-find }
+aligners-err-frame-one-side = per posizionare l'arcata { $arch } servono punti dente su entrambi i lati e sugli incisivi; mettili con { aligners-menu-preparation-numbering-place-seeds } oppure lascia che li trovi il programma con { aligners-menu-teeth-find }
+aligners-err-frame-degenerate = la scansione dell'arcata { $arch } è vuota o danneggiata
+aligners-err-seg-part-scan = scansione
+aligners-err-seg-part-simplified = scansione semplificata
+aligners-err-seg-fault-no-triangles = non ha triangoli
+aligners-err-seg-fault-index = un triangolo usa un punto che non esiste
+aligners-err-seg-fault-not-finite = un punto ha una posizione non valida
+aligners-err-seg-bad-mesh = la { $part } dell'arcata { $arch } non è utilizzabile: { $fault }
+aligners-err-seg-seed-not-finite = un punto dente dell'arcata { $arch } ha una posizione non valida
+aligners-err-seg-decimate = non è stato possibile semplificare la scansione dell'arcata { $arch }: { $detail }
+aligners-err-seg-transfer = non è stato possibile portare i colori dei denti dell'arcata { $arch } sulla scansione completa: { $detail }
+aligners-err-seg-target-faces = target_faces deve essere un numero tra 5000 e 200000 (ricevuto { $value })
+aligners-err-seg-eta-convex = eta_convex deve essere un numero tra 0.01 e 1 (ricevuto { $value })
+aligners-err-seg-sigma = sigma deve essere un numero tra 0.1 e 10 (ricevuto { $value })
 aligners-err-auto-keep-seeds = l'arcata { $arch } non ha punti dente: segna i denti, oppure lascia che li trovi il programma
 aligners-err-no-aligners = non ci sono ancora allineatori: esegui prima { aligners-menu-planning-aligners }
 aligners-err-no-measured-teeth = nessuna arcata ha i denti misurati: esegui prima { aligners-menu-teeth-build }

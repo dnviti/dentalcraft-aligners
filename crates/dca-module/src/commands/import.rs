@@ -260,11 +260,12 @@ fn detection_failed(name: &str, detail: &str) -> ImportWarning {
 ///
 /// The plugin does not trust the first and the last path
 /// (`case_auto.auto_steps`, the sources starting with "forma"): it treats the
-/// scan as a lower arch, then after the segmentation compares the crown
+/// scan as a lower arch, then after the reconstruction compares the crown
 /// widths and restarts as an upper arch when they fit better. That
-/// verification loop is NOT ported: it needs the segmentation and the teeth
-/// stage. For now the guess of [`autoseed::detect_arch`] is kept, settled,
-/// and the user is told to check it. When the loop lands, this goes.
+/// verification loop is ported in `aligners.auto` (`commands::auto`, output
+/// `arch_check`), which runs the pipeline; the import itself only has the
+/// guess of [`autoseed::detect_arch`], which it keeps, settled, telling the
+/// user to check it.
 fn detected_source(source: ArchSource) -> RoleSource {
     if source.to_be_checked() {
         RoleSource::DetectedUnsure
