@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.3](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.2...v0.2.0-alpha.3) (2026-11-12)
+
+
+### Features
+
+* **aligners:** separate teeth and gum ([#7](https://github.com/dnviti-personal-org/dentalcraft-aligners/issues/7)) ([885a485](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/885a485ea61c3042838eadfd7956e3232888ff54))
+
 ## [0.2.0-alpha.2](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.1...v0.2.0-alpha.2) (2026-11-08)
 
 
