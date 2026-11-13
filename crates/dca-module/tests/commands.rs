@@ -20,7 +20,7 @@ fn ftl_ids(lang: Lang) -> BTreeSet<String> {
 #[test]
 fn a_leaf_is_ready_if_and_only_if_its_command_is_registered() {
     let module = AlignersModule::new();
-    for leaf in tree::leaves() {
+    for leaf in tree::leaves().into_iter().chain(tree::tools()) {
         let expected = if commands::is_registered(leaf.id) {
             MenuStatus::Ready
         } else {
@@ -65,7 +65,8 @@ fn descendants(node: &'static tree::Node) -> impl Iterator<Item = &'static tree:
     })
 }
 
-/// The commands that left the menu: CLI and MCP only, ids unchanged.
+/// The commands that left the menu: CLI and MCP only, ids unchanged (the
+/// manual tools, [`tree::tools`], have a node of their own).
 const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.frame",
     "aligners.demo",
@@ -118,18 +119,18 @@ fn what_left_the_menu_stays_registered_with_its_own_label() {
         );
         assert!(en.contains(spec.label_key), "{id}");
     }
-    // every command is a leaf of the menu or one of these: nothing is lost
+    // every command is a leaf of the menu, a tool or one of these: nothing is lost
     let leaves = tree::leaves();
     assert_eq!(
         commands::all().len(),
-        leaves.len() + OUT_OF_THE_MENU.len(),
-        "a command is neither in the menu nor in OUT_OF_THE_MENU"
+        leaves.len() + tree::tools().len() + OUT_OF_THE_MENU.len(),
+        "a command is neither in the menu, nor a tool, nor in OUT_OF_THE_MENU"
     );
 }
 
 #[test]
-fn a_leaf_and_its_command_have_the_same_label() {
-    for leaf in tree::leaves() {
+fn a_leaf_or_a_tool_and_its_command_have_the_same_label() {
+    for leaf in tree::leaves().into_iter().chain(tree::tools()) {
         let spec = commands::find(leaf.id).unwrap_or_else(|| panic!("{} has no command", leaf.id));
         assert_eq!(spec.label_key, leaf.label_key, "{}", leaf.id);
     }

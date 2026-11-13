@@ -55,7 +55,7 @@ fn ids_are_unique_and_follow_the_naming_scheme() {
 // The Ready / Stub status of leaves and groups follows the command registry:
 // see tests/commands.rs.
 #[test]
-fn every_leaf_is_a_unique_command() {
+fn every_leaf_and_every_tool_is_a_unique_command() {
     let module = AlignersModule::new();
     let leaves = tree::leaves();
     assert_eq!(leaves.len(), TREE.len(), "the agreed tree");
@@ -63,8 +63,14 @@ fn every_leaf_is_a_unique_command() {
     let command_ids: Vec<_> = module.commands().iter().map(|c| c.id).collect();
     let unique: BTreeSet<_> = command_ids.iter().collect();
     assert_eq!(unique.len(), command_ids.len(), "duplicate command ids");
-    assert_eq!(command_ids, module.menu().command_ids());
-    assert_eq!(command_ids, leaves.iter().map(|n| n.id).collect::<Vec<_>>());
+    // the leaves in menu order, then the tools of the inspectors
+    let (menu, tools) = command_ids.split_at(leaves.len());
+    assert_eq!(menu, module.menu().command_ids());
+    assert_eq!(menu, leaves.iter().map(|n| n.id).collect::<Vec<_>>());
+    assert_eq!(
+        tools,
+        tree::tools().iter().map(|n| n.id).collect::<Vec<_>>()
+    );
     for c in module.commands() {
         assert!(c.id.starts_with("aligners."));
         assert!(c.tooltip_key.is_some());
@@ -105,8 +111,8 @@ fn no_empty_groups_and_the_spec_groups_exist() {
     for g in groups {
         assert!(!g.children.is_empty(), "empty group {}", g.id);
     }
-    // the menu is multi-level
-    assert!(module_depth() >= 2);
+    // two levels: the groups and their functions
+    assert_eq!(module_depth(), 1);
 }
 
 fn module_depth() -> usize {
@@ -151,36 +157,6 @@ const TREE: &[(&str, &str, &str, &str)] = &[
         "Denti 3D",
     ),
     (
-        "aligners.teeth.manual",
-        "aligners.preparation.numbering.place-seeds",
-        "Mark a tooth",
-        "Segna un dente",
-    ),
-    (
-        "aligners.teeth.manual",
-        "aligners.preparation.numbering.renumber",
-        "Change a tooth number",
-        "Cambia il numero di un dente",
-    ),
-    (
-        "aligners.teeth.manual",
-        "aligners.preparation.numbering.mark-missing",
-        "Missing tooth",
-        "Dente assente",
-    ),
-    (
-        "aligners.teeth.manual",
-        "aligners.preparation.segmentation.manual-brush",
-        "Tooth brush",
-        "Pennello dei denti",
-    ),
-    (
-        "aligners.teeth.manual",
-        "aligners.preparation.segmentation.clean-borders",
-        "Clean borders",
-        "Pulisci i bordi",
-    ),
-    (
         "aligners.diagnosis",
         "aligners.diagnosis.space-analysis",
         "Case analysis",
@@ -197,12 +173,6 @@ const TREE: &[(&str, &str, &str, &str)] = &[
         "aligners.planning.setup.automatic",
         "Final position",
         "Posizione finale",
-    ),
-    (
-        "aligners.planning",
-        "aligners.planning.movements",
-        "Move a tooth",
-        "Sposta un dente",
     ),
     (
         "aligners.planning",
@@ -246,12 +216,47 @@ fn the_menu_is_the_agreed_tree() {
         let path = menu.path_to(id).unwrap();
         assert_eq!(path[path.len() - 2], *group, "{id}");
     }
-    // the corrections are one level down, under Teeth
+    // no sub-group: the corrections are tools of the inspectors, not entries
+    assert_eq!(module_depth(), 1);
+    for tool in tree::tools() {
+        assert!(menu.find(tool.id).is_none(), "{} is in the menu", tool.id);
+    }
+}
+
+#[test]
+fn the_manual_tools_are_registered_commands_out_of_the_menu() {
+    let tools: Vec<_> = tree::tools().iter().map(|n| n.id).collect();
     assert_eq!(
-        menu.path_to("aligners.teeth.manual").unwrap(),
-        ["aligners.teeth", "aligners.teeth.manual"]
+        tools,
+        [
+            "aligners.preparation.numbering.place-seeds",
+            "aligners.preparation.numbering.delete-seed",
+            "aligners.preparation.numbering.renumber",
+            "aligners.preparation.numbering.mark-missing",
+            "aligners.preparation.segmentation.manual-brush",
+            "aligners.preparation.segmentation.clean-borders",
+            "aligners.planning.movements",
+        ]
     );
-    assert_eq!(module_depth(), 2);
+    for tool in tree::tools() {
+        assert!(tool.is_leaf(), "{}", tool.id);
+        assert_eq!(tool.status(), MenuStatus::Ready, "{}", tool.id);
+        assert!(tree::find(tool.id).is_none(), "{}", tool.id);
+        // the CLI and the MCP server list and run it with its parameters
+        let spec = dca_module::commands::find(tool.id).unwrap();
+        assert_eq!(spec.label_key, tool.label_key, "{}", tool.id);
+        assert_eq!(spec.schema()["type"], "object", "{}", tool.id);
+    }
+    // a click never runs a tool: invoking it is refused, nothing is queued
+    let jobs = JobSystem::new(1).unwrap();
+    let state = Arc::new(CaseState::default());
+    let mut ctx = ModuleCtx::new(&state, &jobs);
+    let mut m = AlignersModule::new();
+    for id in tools {
+        assert!(m.invoke(id, &mut ctx).is_err(), "{id}");
+    }
+    let (cmds, toasts) = ctx.finish();
+    assert!(cmds.is_empty() && toasts.is_empty());
 }
 
 #[test]
@@ -283,8 +288,8 @@ fn the_shell_is_told_what_to_ask_before_a_leaf_runs() {
 }
 
 /// What the menu shows as the progress of the case: the eight steps of the
-/// workflow, in menu order. Everything else is a shortcut, a correction, an
-/// export or a follow-up.
+/// workflow, in menu order. Everything else is a shortcut, an export or a
+/// follow-up (the corrections are tools of the inspectors, not entries).
 const STEPS: [&str; 8] = [
     "aligners.case.import-scans",
     "aligners.teeth.find",
@@ -302,18 +307,12 @@ fn eight_steps_count_and_nothing_else() {
     assert_eq!(menu.step_ids(), STEPS);
     for not_a_step in [
         "aligners.auto",
-        "aligners.planning.movements",
         "aligners.output.export-all",
         "aligners.output.study-models",
         "aligners.followup.tracking",
         "aligners.followup.visits",
     ] {
         assert!(!menu.step_ids().contains(&not_a_step), "{not_a_step}");
-    }
-    for (group, id, ..) in TREE {
-        if *group == "aligners.teeth.manual" {
-            assert!(!STEPS.contains(id), "{id}");
-        }
     }
 }
 
@@ -346,7 +345,7 @@ fn translations_cover_every_key_in_both_languages() {
     assert_eq!(en, it);
 
     let mut used: BTreeSet<String> = BTreeSet::new();
-    for n in tree::all_nodes() {
+    for n in tree::all_nodes().into_iter().chain(tree::tools()) {
         for key in [n.label_key, n.desc_key] {
             assert!(en.contains(key), "{key} missing in en");
             assert!(it.contains(key), "{key} missing in it");
@@ -358,7 +357,10 @@ fn translations_cover_every_key_in_both_languages() {
         .iter()
         .filter(|k| k.starts_with("aligners-menu-") || k.starts_with("aligners-desc-"))
     {
-        assert!(used.contains(key), "{key} is not used by the menu tree");
+        assert!(
+            used.contains(key),
+            "{key} is used by no menu entry and no tool"
+        );
     }
     assert!(en.contains(NAME_KEY) && en.contains("aligners-status-stub"));
 }
@@ -374,7 +376,7 @@ fn labels_resolve_in_english_and_italian() {
         assert_eq!(dc_i18n::tr(key), *en);
     }
     assert_eq!(dc_i18n::tr(NOT_AVAILABLE_KEY), "Not available yet");
-    for n in tree::all_nodes() {
+    for n in tree::all_nodes().into_iter().chain(tree::tools()) {
         for key in [n.label_key, n.desc_key] {
             let text = dc_i18n::tr(key);
             assert!(!text.trim().is_empty() && text != key, "en {key}");
@@ -408,7 +410,7 @@ fn labels_resolve_in_english_and_italian() {
     for (key, _, it) in GROUP_LABELS {
         assert_eq!(dc_i18n::tr(key), *it);
     }
-    for n in tree::all_nodes() {
+    for n in tree::all_nodes().into_iter().chain(tree::tools()) {
         for key in [n.label_key, n.desc_key] {
             let text = dc_i18n::tr(key);
             assert!(!text.trim().is_empty() && text != key, "it {key}");
@@ -420,10 +422,13 @@ fn labels_resolve_in_english_and_italian() {
     assert_unique(spec_labels());
     assert!(refused_ends().contains("5, 6, 7 o 8"));
 
-    // the inspector shows the translated description of a leaf
-    let label = dc_i18n::tr(tree::find("aligners.followup.tracking").unwrap().label_key);
-    let texts = render_inspector_texts(Some("aligners.followup.tracking"));
-    assert!(texts.contains(&label), "{texts:?}");
+    // the inspector of a group shows its translated title and description
+    // (the shell draws the ones of a leaf)
+    let group = tree::find("aligners.followup").unwrap();
+    let texts = render_inspector_texts(Some(group.id));
+    for key in [group.label_key, group.desc_key] {
+        assert!(texts.contains(&dc_i18n::tr(key)), "{texts:?}");
+    }
 
     dc_i18n::set_language(Lang::En).unwrap();
 }
@@ -441,11 +446,6 @@ fn assert_unique(labels: Vec<(String, &str)>) {
 const GROUP_LABELS: &[(&str, &str, &str)] = &[
     ("aligners-menu-case", "Case", "Caso"),
     ("aligners-menu-teeth", "Teeth", "Denti"),
-    (
-        "aligners-menu-teeth-manual",
-        "Manual corrections",
-        "Correzioni a mano",
-    ),
     ("aligners-menu-diagnosis", "Diagnosis", "Diagnosi"),
     ("aligners-menu-planning", "Plan", "Piano"),
     ("aligners-menu-production", "Production", "Produzione"),
@@ -625,13 +625,22 @@ fn render_inspector_texts(selected: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// The leaves whose parameters the module draws in the inspector.
+const WITH_PARAMETERS: [&str; 2] = ["aligners.output.study-models", "aligners.teeth.find"];
+
 #[test]
 fn inspector_renders_every_item_without_panicking() {
     let out = run_inspector(None);
     assert!(!out.shapes.is_empty());
     for n in tree::all_nodes() {
-        let out = run_inspector(Some(n.id));
-        assert!(!out.shapes.is_empty(), "nothing drawn for {}", n.id);
+        let texts = render_inspector_texts(Some(n.id));
+        // a group shows its title and description; a leaf only its
+        // parameters, the shell draws the rest of its inspector
+        if n.is_leaf() && !WITH_PARAMETERS.contains(&n.id) {
+            assert!(texts.is_empty(), "{}: {texts:?}", n.id);
+        } else {
+            assert!(!texts.is_empty(), "nothing drawn for {}", n.id);
+        }
     }
 }
 
@@ -649,7 +658,7 @@ fn no_page_shows_controls_that_do_nothing() {
         let texts = render_inspector_texts(Some(n.id)).join("\n");
         assert!(!texts.contains("0.33"), "{}: {texts}", n.id);
         assert!(!texts.contains("0.25"), "{}: {texts}", n.id);
-        if !["aligners.output.study-models", "aligners.teeth.find"].contains(&n.id) {
+        if !WITH_PARAMETERS.contains(&n.id) {
             assert_eq!(inputs, 0, "{}", n.id);
         }
     }

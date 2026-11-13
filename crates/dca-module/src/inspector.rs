@@ -1,7 +1,9 @@
 //! The inspector of the Aligners module: title and description of the
-//! selected menu entry, a "not available yet" notice for placeholders and,
-//! for the study models, their base settings (stored in the case through the
-//! `aligners.settings.study-models` command).
+//! selected group (the overview when nothing is selected), a "not available
+//! yet" notice for placeholders and the parameters of the study models, their
+//! base settings (stored in the case through the
+//! `aligners.settings.study-models` command). The shell draws the rest of the
+//! inspector of a leaf.
 
 use dc_i18n::tr;
 use dc_module_api::{MenuStatus, ModuleCtx};
@@ -10,7 +12,8 @@ use egui::{Button, DragValue, Grid, RichText, Ui};
 
 use crate::tree;
 
-/// Draws the inspector for the entry `selected` (the overview when `None`).
+/// Draws the title and description of the entry `selected` (the overview
+/// when `None`).
 pub fn show(ui: &mut Ui, selected: Option<&str>) {
     let Some(node) = selected.and_then(tree::find) else {
         ui.heading(tr("aligners-name"));
@@ -50,14 +53,13 @@ pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit
         }
         *base = current.clone();
     }
-    ui.add_space(8.0);
-    ui.separator();
     ui.strong(tr("aligners-study-settings"));
     Grid::new("aligners-study-grid")
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
-            ui.label(tr("aligners-study-style"));
+            // every field is named by its label (screen readers)
+            let label = ui.label(tr("aligners-study-style"));
             let style_key = |st: StudyBaseStyle| match st {
                 StudyBaseStyle::European => "aligners-study-style-european",
                 StudyBaseStyle::Abo => "aligners-study-style-abo",
@@ -68,7 +70,9 @@ pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit
                     for st in [StudyBaseStyle::European, StudyBaseStyle::Abo] {
                         ui.selectable_value(&mut s.style, st, tr(style_key(st)));
                     }
-                });
+                })
+                .response
+                .labelled_by(label.id);
             ui.end_row();
             let abo = s.style == StudyBaseStyle::Abo;
             let rows: [(&str, &mut f64, std::ops::RangeInclusive<f64>, bool); 9] = [
@@ -123,8 +127,9 @@ pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit
                 ),
             ];
             for (key, value, range, enabled) in rows {
-                ui.add_enabled(enabled, egui::Label::new(tr(key)));
-                ui.add_enabled(enabled, DragValue::new(value).range(range).speed(0.1));
+                let label = ui.add_enabled(enabled, egui::Label::new(tr(key)));
+                ui.add_enabled(enabled, DragValue::new(value).range(range).speed(0.1))
+                    .labelled_by(label.id);
                 ui.end_row();
             }
         });
@@ -147,9 +152,4 @@ pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit
             *s = current.clone();
         }
     });
-}
-
-/// `true` for the study-models entry.
-pub fn is_study_models(selected: Option<&str>) -> bool {
-    selected == Some(crate::commands::study_base::STUDY_MODELS_ID)
 }
