@@ -41,6 +41,13 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
             run: crate::manual::seeds::run_seed,
         },
         stage_command! {
+            id: "aligners.preparation.numbering.delete-seed",
+            label: "aligners-menu-preparation-numbering-delete-seed",
+            doc: "aligners-cmd-manual-delete-seed-doc",
+            params: crate::manual::seeds::DeleteSeedParams,
+            run: crate::manual::seeds::run_delete_seed,
+        },
+        stage_command! {
             id: "aligners.preparation.numbering.sequence",
             label: "aligners-cmd-numbering-sequence",
             doc: "aligners-cmd-numbering-sequence-doc",
