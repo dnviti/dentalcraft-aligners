@@ -224,6 +224,7 @@ fn run_automatic(
             data.crowns.insert(*f, blob);
             teeth.insert(f.to_string(), report(tooth)?);
         }
+        data.record_teeth_basis(arch.role());
         out.insert(
             arch_name(arch).to_owned(),
             json!({ "teeth": teeth, "seconds": t0.elapsed().as_secs_f64() }),
