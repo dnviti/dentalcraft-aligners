@@ -193,14 +193,14 @@ pub fn untangle(
 ) -> Vec<DVec3> {
     let n = v.len();
     let mut v = v.to_vec();
-    let deg: Vec<f64> = geom::edge_degree(edges, n)
-        .into_iter()
-        .map(|d| d.max(1) as f64)
-        .collect();
+    // the umbrella of every vertex: its neighbours in the order the edges
+    // list them, so each sum below adds the same terms in the same order
+    let lap = Umbrella::new(edges, n);
+    let mut crossings = geom::Crossings::new(&v, tris);
     let mut last: Option<usize> = None;
     let mut best: Option<(usize, Vec<DVec3>)> = None;
     for rnd in 0..=rounds {
-        let pairs = geom::self_intersecting_pairs(&v, tris);
+        let pairs = crossings.pairs();
         if best.as_ref().is_none_or(|b| pairs.len() < b.0) {
             best = Some((pairs.len(), v.clone()));
         }
@@ -208,7 +208,7 @@ pub fn untangle(
             break;
         }
         let mut touched = vec![false; n];
-        for &(a, b) in &pairs {
+        for &(a, b) in pairs {
             for f in [a, b] {
                 for &i in &tris[f as usize] {
                     touched[i as usize] = true;
@@ -238,18 +238,21 @@ pub fn untangle(
             sel = (0..n).map(|i| grow[i] && movable[i]).collect();
         }
         let idx: Vec<usize> = (0..n).filter(|&i| sel[i]).collect();
+        // Jacobi steps: every mean from the positions before the step
+        let mut acc = vec![DVec3::ZERO; idx.len()];
         for _ in 0..iterations {
-            let mut acc = vec![DVec3::ZERO; n];
-            for e in edges {
-                acc[e[0] as usize] += v[e[1] as usize];
+            for (a, &i) in acc.iter_mut().zip(&idx) {
+                let mut s = DVec3::ZERO;
+                for &j in lap.neighbours(i) {
+                    s += v[j as usize];
+                }
+                *a = s;
             }
-            for e in edges {
-                acc[e[1] as usize] += v[e[0] as usize];
-            }
-            for &i in &idx {
-                v[i] = 0.5 * v[i] + 0.5 * (acc[i] / deg[i]);
+            for (a, &i) in acc.iter().zip(&idx) {
+                v[i] = 0.5 * v[i] + 0.5 * (*a / lap.deg[i]);
             }
         }
+        crossings.moved(&v, &idx);
     }
     best.map_or(v, |b| b.1)
 }
