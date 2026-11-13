@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 # kept in sync by release-please (extra-files, jsonpath $.workspace.package.version)
-version = "0.2.0-alpha.3"
+version = "0.2.0-alpha.4"
 edition = "2024"
 rust-version = "1.99"
 license = "LicenseRef-Proprietary"
