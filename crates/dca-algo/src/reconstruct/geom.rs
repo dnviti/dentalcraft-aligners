@@ -515,24 +515,30 @@ pub fn min_distances(p: &[DVec3], s: &[DVec3]) -> Vec<f64> {
 /// Pairs `(i, j)`, `i < j`, of triangles that cross each other and share no
 /// vertex (`printcheck.self_intersecting_pairs` with the exact float64 test
 /// of the golden shim: some edge of one triangle crosses the other, coplanar
-/// pairs ignored), sorted.
+/// pairs ignored), sorted. A triangle with a non-finite corner cannot be
+/// tested and is left out: its box would never end the sweep, which would
+/// then compare it with every later triangle.
 pub fn self_intersecting_pairs(v: &[DVec3], tris: &[[u32; 3]]) -> Vec<(u32, u32)> {
-    use rayon::prelude::*;
-    let n = tris.len();
-    if n < 2 {
+    if tris.len() < 2 {
         return Vec::new();
     }
-    let boxes: Vec<(DVec3, DVec3)> = tris
-        .iter()
-        .map(|t| {
-            let (a, b, c) = (v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]);
-            (a.min(b).min(c), a.max(b).max(c))
-        })
-        .collect();
-    // sweep along x: candidates whose boxes overlap
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    order.sort_unstable_by(|&a, &b| boxes[a as usize].0.x.total_cmp(&boxes[b as usize].0.x));
-    let mut pairs: Vec<(u32, u32)> = (0..n)
+    let boxes: Vec<(DVec3, DVec3)> = tris.iter().map(|t| tri_box(v, t)).collect();
+    let order = sweep_order(v, tris, &boxes);
+    sweep_pairs(v, tris, &boxes, &order, |_, _| true)
+}
+
+/// The crossing pairs, sorted, found by a sweep along x over the triangles
+/// `order` (sorted by the lower x of their `boxes`): the candidates are the
+/// pairs whose boxes overlap, those `want` says yes to.
+fn sweep_pairs(
+    v: &[DVec3],
+    tris: &[[u32; 3]],
+    boxes: &[(DVec3, DVec3)],
+    order: &[u32],
+    want: impl Fn(usize, usize) -> bool + Sync,
+) -> Vec<(u32, u32)> {
+    use rayon::prelude::*;
+    let mut pairs: Vec<(u32, u32)> = (0..order.len())
         .into_par_iter()
         .with_min_len(512)
         .flat_map_iter(|k| {
@@ -544,6 +550,9 @@ pub fn self_intersecting_pairs(v: &[DVec3], tris: &[[u32; 3]]) -> Vec<(u32, u32)
                 let (lo2, hi2) = boxes[j];
                 if lo2.x > hi.x {
                     break;
+                }
+                if !want(i, j) {
+                    continue;
                 }
                 if lo2.y > hi.y || hi2.y < lo.y || lo2.z > hi.z || hi2.z < lo.z {
                     continue;
@@ -563,6 +572,18 @@ pub fn self_intersecting_pairs(v: &[DVec3], tris: &[[u32; 3]]) -> Vec<(u32, u32)
     pairs
 }
 
+/// The triangles of the sweep of [`self_intersecting_pairs`] by the lower
+/// x of their boxes: only those with finite corners, so that every box
+/// compared has finite bounds and the sweep stops at the first box past the
+/// current one.
+fn sweep_order(v: &[DVec3], tris: &[[u32; 3]], boxes: &[(DVec3, DVec3)]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..tris.len() as u32)
+        .filter(|&i| tris[i as usize].iter().all(|&k| v[k as usize].is_finite()))
+        .collect();
+    order.sort_unstable_by(|&a, &b| boxes[a as usize].0.x.total_cmp(&boxes[b as usize].0.x));
+    order
+}
+
 /// Number of triangles that cross another triangle sharing no vertex with
 /// it (`mu.self_intersections`).
 pub fn self_intersections(v: &[DVec3], tris: &[[u32; 3]]) -> usize {
@@ -573,6 +594,149 @@ pub fn self_intersections(v: &[DVec3], tris: &[[u32; 3]]) -> usize {
     f.sort_unstable();
     f.dedup();
     f.len()
+}
+
+/// Bounding box of a triangle, as [`self_intersecting_pairs`] compares them.
+fn tri_box(v: &[DVec3], t: &[u32; 3]) -> (DVec3, DVec3) {
+    let (a, b, c) = (v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]);
+    (a.min(b).min(c), a.max(b).max(c))
+}
+
+/// The crossing pairs of [`self_intersecting_pairs`] kept up to date while
+/// a few vertices move at a time (`untangle`): after [`Crossings::moved`]
+/// only the pairs with a triangle at a moved vertex are tested again, as the
+/// others have the same corners and so the same result. [`Crossings::pairs`]
+/// is always `self_intersecting_pairs` of the current positions.
+pub struct Crossings<'a> {
+    tris: &'a [[u32; 3]],
+    /// Triangles of vertex `i`: `vt[vt_start[i]..vt_start[i + 1]]`.
+    vt_start: Vec<usize>,
+    vt: Vec<u32>,
+    boxes: Vec<(DVec3, DVec3)>,
+    /// The triangles with finite corners (the ones compared), by the lower x
+    /// of their boxes, then by number.
+    order: Vec<(f64, u32)>,
+    pairs: Vec<(u32, u32)>,
+}
+
+fn by_x(a: &(f64, u32), b: &(f64, u32)) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0).then(a.1.cmp(&b.1))
+}
+
+impl<'a> Crossings<'a> {
+    /// The crossing pairs of `tris` at the positions `v`.
+    pub fn new(v: &[DVec3], tris: &'a [[u32; 3]]) -> Self {
+        let n = v.len();
+        let mut vt_start = vec![0usize; n + 1];
+        for t in tris {
+            for &i in t {
+                vt_start[i as usize + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            vt_start[i + 1] += vt_start[i];
+        }
+        let mut fill = vt_start.clone();
+        let mut vt = vec![0u32; vt_start[n]];
+        for (f, t) in tris.iter().enumerate() {
+            for &i in t {
+                vt[fill[i as usize]] = f as u32;
+                fill[i as usize] += 1;
+            }
+        }
+        let boxes: Vec<(DVec3, DVec3)> = tris.iter().map(|t| tri_box(v, t)).collect();
+        let mut order: Vec<(f64, u32)> = (0..tris.len() as u32)
+            .filter(|&i| tris[i as usize].iter().all(|&k| v[k as usize].is_finite()))
+            .map(|i| (boxes[i as usize].0.x, i))
+            .collect();
+        order.sort_unstable_by(by_x);
+        let ids: Vec<u32> = order.iter().map(|e| e.1).collect();
+        let pairs = sweep_pairs(v, tris, &boxes, &ids, |_, _| true);
+        Self {
+            tris,
+            vt_start,
+            vt,
+            boxes,
+            order,
+            pairs,
+        }
+    }
+
+    /// Crossing pairs `(i, j)`, `i < j`, sorted.
+    pub fn pairs(&self) -> &[(u32, u32)] {
+        &self.pairs
+    }
+
+    /// The vertices `moved` now lie at `v` (the others where they were).
+    pub fn moved(&mut self, v: &[DVec3], moved: &[usize]) {
+        let tris = self.tris;
+        let mut dirty = vec![false; tris.len()];
+        let mut changed: Vec<u32> = Vec::new();
+        for &i in moved {
+            for &f in &self.vt[self.vt_start[i]..self.vt_start[i + 1]] {
+                if !dirty[f as usize] {
+                    dirty[f as usize] = true;
+                    changed.push(f);
+                }
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        for &f in &changed {
+            self.boxes[f as usize] = tri_box(v, &tris[f as usize]);
+        }
+        let finite = |f: u32| tris[f as usize].iter().all(|&k| v[k as usize].is_finite());
+        let mut new: Vec<(f64, u32)> = changed
+            .iter()
+            .filter(|&&f| finite(f))
+            .map(|&f| (self.boxes[f as usize].0.x, f))
+            .collect();
+        new.sort_unstable_by(by_x);
+        // the order without the changed triangles, merged with their new places
+        let kept: Vec<(f64, u32)> = self
+            .order
+            .iter()
+            .filter(|e| !dirty[e.1 as usize])
+            .copied()
+            .collect();
+        let mut order = Vec::with_capacity(kept.len() + new.len());
+        let (mut a, mut b) = (0, 0);
+        while a < kept.len() && b < new.len() {
+            if by_x(&kept[a], &new[b]).is_le() {
+                order.push(kept[a]);
+                a += 1;
+            } else {
+                order.push(new[b]);
+                b += 1;
+            }
+        }
+        order.extend_from_slice(&kept[a..]);
+        order.extend_from_slice(&new[b..]);
+        self.order = order;
+        // the pairs with a changed triangle lie in the box around the changed
+        // ones: the sweep over the triangles there, those pairs only
+        let boxes = &self.boxes;
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        for &(_, f) in &new {
+            lo = lo.min(boxes[f as usize].0);
+            hi = hi.max(boxes[f as usize].1);
+        }
+        let near: Vec<u32> = self
+            .order
+            .iter()
+            .map(|e| e.1)
+            .filter(|&f| {
+                let (a, b) = boxes[f as usize];
+                a.cmple(hi).all() && b.cmpge(lo).all()
+            })
+            .collect();
+        self.pairs
+            .retain(|&(a, b)| !dirty[a as usize] && !dirty[b as usize]);
+        let found = sweep_pairs(v, tris, boxes, &near, |i, j| dirty[i] || dirty[j]);
+        self.pairs.extend(found);
+        self.pairs.sort_unstable();
+    }
 }
 
 fn edge_hits_tri(p0: DVec3, p1: DVec3, a: DVec3, b: DVec3, c: DVec3) -> bool {
@@ -742,6 +906,117 @@ mod tests {
         ];
         let t = vec![[0, 1, 2], [3, 4, 5]];
         assert_eq!(self_intersecting_pairs(&v, &t), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn non_finite_triangles_stay_out_of_the_sweep() {
+        // the crossing pair of the test above, then triangles with a NaN
+        // (both signs: -NaN sorts before every box) or an infinite corner
+        let mut v = vec![
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(2.0, 0.0, 0.0),
+            DVec3::new(0.0, 2.0, 0.0),
+            DVec3::new(0.5, 0.5, -1.0),
+            DVec3::new(0.5, 0.5, 1.0),
+            DVec3::new(1.5, 1.5, 1.0),
+        ];
+        let nan = DVec3::splat(f64::NAN);
+        v.extend([nan, -nan, DVec3::new(f64::INFINITY, 0.0, 0.0)]);
+        v.extend([
+            DVec3::new(f64::NEG_INFINITY, 1.0, 1.0),
+            DVec3::new(0.2, 0.2, 0.5),
+        ]);
+        let t = vec![
+            [6, 7, 8],
+            [0, 1, 2],
+            [7, 3, 4],
+            [8, 9, 1],
+            [3, 4, 5],
+            [0, 6, 10],
+            [9, 4, 10],
+        ];
+        let boxes: Vec<(DVec3, DVec3)> = t
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]);
+                (a.min(b).min(c), a.max(b).max(c))
+            })
+            .collect();
+        let order = sweep_order(&v, &t, &boxes);
+        assert_eq!(order, vec![1, 4]);
+        assert!(
+            order
+                .iter()
+                .all(|&i| boxes[i as usize].0.is_finite() && boxes[i as usize].1.is_finite())
+        );
+        assert_eq!(self_intersecting_pairs(&v, &t), vec![(1, 4)]);
+        assert_eq!(self_intersections(&v, &t), 2);
+    }
+
+    #[test]
+    fn crossings_follow_moved_vertices_like_a_full_search() {
+        // two crumpled sheets through each other; a few vertices move at a
+        // time, some to a non-finite position and back
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let m = 20usize;
+        let mut v = Vec::new();
+        for s in 0..2 {
+            for j in 0..m {
+                for i in 0..m {
+                    let (x, y) = (i as f64 * 0.25, j as f64 * 0.25);
+                    v.push(if s == 0 {
+                        DVec3::new(x, y, (x * 1.3).sin() * (y * 0.9).cos() + 0.3 * rnd())
+                    } else {
+                        DVec3::new(y + 0.1 * rnd(), x, 0.2 * rnd() - 0.1)
+                    });
+                }
+            }
+        }
+        let mut t = Vec::new();
+        for s in 0..2 {
+            let o = (s * m * m) as u32;
+            for j in 0..m - 1 {
+                for i in 0..m - 1 {
+                    let a = o + (j * m + i) as u32;
+                    let (b, c, d) = (a + 1, a + m as u32, a + m as u32 + 1);
+                    t.push([a, b, d]);
+                    t.push([a, d, c]);
+                }
+            }
+        }
+        let mut c = Crossings::new(&v, &t);
+        assert!(c.pairs().len() > 50, "{}", c.pairs().len());
+        assert_eq!(c.pairs(), self_intersecting_pairs(&v, &t).as_slice());
+        let n = v.len();
+        let mut nan_at = None;
+        for step in 0..40 {
+            let mut moved: Vec<usize> = (0..1 + step % 7)
+                .map(|_| (rnd() * n as f64) as usize % n)
+                .collect();
+            for &i in &moved {
+                v[i] += DVec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * 0.6;
+            }
+            if step % 10 == 3 {
+                let i = moved[0];
+                v[i] = DVec3::new(f64::NAN, 0.0, 0.0);
+                nan_at = Some(i);
+            } else if let Some(i) = nan_at.take() {
+                v[i] = DVec3::new(rnd() * 5.0, rnd() * 5.0, 0.0);
+                moved.push(i);
+            }
+            c.moved(&v, &moved);
+            assert_eq!(
+                c.pairs(),
+                self_intersecting_pairs(&v, &t).as_slice(),
+                "step {step}"
+            );
+        }
     }
 
     #[test]

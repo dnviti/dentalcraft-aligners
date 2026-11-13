@@ -6,12 +6,13 @@
 //! [`dc_module_api::Module::command_specs`] returns and what the CLI and
 //! the MCP server list.
 //!
-//! The registry also drives the menu: a menu leaf is `Ready` if and only if
-//! a command with the leaf's id is registered here, `Stub` otherwise (see
-//! [`crate::tree::Node::status`]). Most commands are not menu leaves: the
-//! menu holds what the end user needs, and every command stays here, listed
-//! and run by the CLI and the MCP server. A command that is not a leaf has
-//! its own `aligners-cmd-<stage>-<name>` label.
+//! The registry also drives the menu: a menu leaf (or a manual tool, see
+//! [`crate::tree::tools`]) is `Ready` if and only if a command with its id
+//! is registered here, `Stub` otherwise (see [`crate::tree::Node::status`]).
+//! Most commands are not menu leaves: the menu holds the functions the end
+//! user needs, and every command stays here, listed and run by the CLI and
+//! the MCP server. A command that is neither a leaf nor a tool has its own
+//! `aligners-cmd-<stage>-<name>` label.
 //!
 //! Adding a command to a stage:
 //!

@@ -137,6 +137,7 @@ pub(crate) fn run_rebuild(
         store_labels(&mut next, &mut data, &mut stale, arch, &al.scan, labels);
     }
     data.dirty.remove(&f);
+    data.rebuilt_by_hand(arch.role());
     // a tooth rebuilt by hand: the doubts of the check on the arch are answered
     data.forget_separation(arch.role());
     // what the setup and the staging computed for the tooth is out of date

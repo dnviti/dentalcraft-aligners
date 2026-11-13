@@ -26,7 +26,7 @@ pub use settings::{
 };
 pub use state::{
     AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed, SegmentationRun,
-    Setup, Stage, ToothFrame, ToothMeasures,
+    Setup, Stage, TeethBasis, ToothFrame, ToothMeasures,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 

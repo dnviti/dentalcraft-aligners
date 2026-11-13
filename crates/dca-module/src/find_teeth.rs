@@ -1,5 +1,6 @@
-//! "Find the teeth" in the inspector: the options of the leaf and what has
-//! been found (`page_numeri` of the plugin).
+//! "Find the teeth" in the inspector: the parameters of the leaf, which the
+//! shell shows in its section "Parameters", and what has been found
+//! (`page_numeri` of the plugin).
 //!
 //! * the box "Search also the third molars" (`include_third_molars`);
 //! * the field "Missing teeth" (`missing_teeth`): FDI numbers separated by
@@ -9,8 +10,8 @@
 //!
 //! Both options are stored in the case (`Settings::find_teeth`, through the
 //! command `aligners.settings.find-teeth`, one undo step each) and are the
-//! parameters `aligners.teeth.find` gets when the leaf is run from the menu
-//! ([`leaf_params`]).
+//! parameters `aligners.teeth.find` gets when the leaf is run from its
+//! inspector ([`leaf_params`]).
 
 use dc_case::{CaseState, Fdi, ScanRole};
 use dc_i18n::{tr, tr_args};
@@ -129,7 +130,7 @@ fn cell_text(f: Fdi, cell: Cell) -> String {
     tr_args(key, &[("fdi", &f.get().to_string())])
 }
 
-/// The options and the grid, under the text of the leaf.
+/// The options and the grid, in the section "Parameters" of the leaf.
 pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
     let state = ctx.state().clone();
     let current = settings_of(&state);
@@ -140,10 +141,6 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
         }
         edit.base.clone_from(&current.missing);
     }
-
-    ui.add_space(8.0);
-    ui.separator();
-    ui.strong(tr("aligners-find-options"));
 
     let mut third = current.third_molars;
     if ui.checkbox(&mut third, tr("aligners-find-third")).changed() {

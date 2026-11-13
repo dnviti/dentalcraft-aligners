@@ -148,14 +148,22 @@ impl Module for AlignersModule {
         self.select_entry(id);
     }
 
+    /// A group, or nothing selected: its title and description (the
+    /// overview). A leaf: only its parameters, if it has any (Find the teeth,
+    /// Study models); the shell lays out the rest of the inspector of a leaf
+    /// (title, description, status, run button and manual tools) and draws
+    /// this in its section "Parameters".
     fn inspector(&mut self, ui: &mut egui::Ui, ctx: &mut ModuleCtx<'_>) {
         loader();
-        inspector::show(ui, self.selected);
-        if inspector::is_study_models(self.selected) {
-            inspector::study_settings(ui, ctx, &mut self.study_ui);
-        }
-        if self.selected == Some(commands::wrappers::FIND_TEETH) {
-            find_teeth::show(ui, ctx, &mut self.find_ui);
+        match self.selected.and_then(tree::find).filter(|n| n.is_leaf()) {
+            Some(n) if n.id == commands::study_base::STUDY_MODELS_ID => {
+                inspector::study_settings(ui, ctx, &mut self.study_ui);
+            }
+            Some(n) if n.id == commands::wrappers::FIND_TEETH => {
+                find_teeth::show(ui, ctx, &mut self.find_ui);
+            }
+            Some(_) => {}
+            None => inspector::show(ui, self.selected),
         }
     }
 

@@ -14,6 +14,7 @@ const CLEAN: &str = "aligners.preparation.segmentation.clean-borders";
 const RENUMBER: &str = "aligners.preparation.numbering.renumber";
 const MISSING: &str = "aligners.preparation.numbering.mark-missing";
 const SEEDS: &str = "aligners.preparation.numbering.place-seeds";
+const DELETE_SEED: &str = "aligners.preparation.numbering.delete-seed";
 const SEQUENCE: &str = "aligners.preparation.numbering.sequence";
 const CLEAR: &str = "aligners.preparation.numbering.clear-seeds";
 const REBUILD: &str = "aligners.manual.rebuild-tooth";
@@ -118,9 +119,13 @@ fn undoable(state: &CaseState, id: &str, params: Value) -> CaseState {
 }
 
 #[test]
-fn the_manual_commands_are_the_menu_leaves_and_have_schemas() {
-    for id in [BRUSH, CLEAN, RENUMBER, MISSING, SEEDS, ADJUST] {
-        assert!(crate::tree::find(id).is_some(), "{id} is a menu leaf");
+fn the_manual_commands_are_tools_out_of_the_menu_and_have_schemas() {
+    for id in [BRUSH, CLEAN, RENUMBER, MISSING, SEEDS, DELETE_SEED, ADJUST] {
+        assert!(crate::tree::find(id).is_none(), "{id} is not a menu leaf");
+        assert!(
+            crate::tree::tools().iter().any(|t| t.id == id),
+            "{id} is a tool"
+        );
         assert!(crate::commands::is_registered(id), "{id}");
     }
     let rebuild = crate::commands::find(REBUILD).unwrap();
@@ -134,7 +139,15 @@ fn the_manual_commands_are_the_menu_leaves_and_have_schemas() {
         assert!(adjust["properties"][k].is_object(), "adjust parameter {k}");
     }
     // null parameters are refused with a reason, not a panic
-    for id in [BRUSH, RENUMBER, MISSING, SEEDS, REBUILD, ADJUST] {
+    for id in [
+        BRUSH,
+        RENUMBER,
+        MISSING,
+        SEEDS,
+        DELETE_SEED,
+        REBUILD,
+        ADJUST,
+    ] {
         assert!(matches!(
             exec(id, &demo(), Value::Null),
             Err(CommandError::Invalid(_))
@@ -695,6 +708,57 @@ fn seeds_are_added_moved_and_deleted() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn deleting_a_tooth_removes_its_mark_only_and_can_be_undone() {
+    // a measured arch with a tooth already missing
+    let (framed, _) = ok("aligners.teeth.frames", &demo(), Value::Null);
+    let (state, _) = ok(MISSING, &framed, json!({ "fdi": 31 }));
+    let n = al(&state).seeds.len();
+    // one step on the undo stack, undone exactly
+    let deleted = undoable(&state, DELETE_SEED, json!({ "fdi": 36 }));
+    assert_eq!(al(&deleted).seeds.len(), n - 1);
+    assert!(al(&deleted).seeds.iter().all(|s| s.fdi != fdi(36)));
+    // the tooth is not recorded as missing, and the list stays as it was
+    assert_eq!(al(&deleted).missing, al(&state).missing);
+    assert!(!al(&deleted).missing.contains(&fdi(36)));
+    // the same state path as any change of the marks: the dependents of the
+    // arch are kept and reported out of date, as the seed edit reports them
+    let (_, out) = ok(DELETE_SEED, &state, json!({ "fdi": 36 }));
+    let (_, edit) = ok(SEEDS, &state, json!({ "op": "delete", "fdi": 36 }));
+    assert_eq!(out, edit);
+    assert_eq!(out["op"], "delete");
+    assert_eq!(out["arch"], "lower");
+    assert_eq!(out["segmentation_outdated"], true);
+    let outdated = out["invalidated"].as_array().unwrap();
+    for id in ["labels", "tooth_frames"] {
+        assert!(outdated.contains(&json!(id)), "{id} in {outdated:?}");
+    }
+    let mut expect = al(&state).clone();
+    expect.seeds = al(&deleted).seeds.clone();
+    assert_eq!(al(&deleted), &expect, "only the mark changed");
+    // its number can be marked again
+    ok(
+        SEEDS,
+        &deleted,
+        json!({ "op": "add", "fdi": 36, "position": seed(&state, 36).to_array() }),
+    );
+    // a tooth without a mark (deleted, missing, never marked) or a number
+    // that is not a tooth is refused, nothing changes
+    for (from, f) in [(&deleted, 36), (&state, 31), (&state, 18)] {
+        assert!(
+            invalid(exec(DELETE_SEED, from, json!({ "fdi": f }))).contains("no tooth mark"),
+            "{f}"
+        );
+    }
+    for bad in [
+        json!({ "fdi": 99 }),
+        json!({}),
+        json!({ "fdi": 36, "op": "add" }),
+    ] {
+        assert!(exec(DELETE_SEED, &state, bad.clone()).is_err(), "{bad}");
+    }
 }
 
 // ---- numbering in order, clearing the marks ---------------------------------------------------------

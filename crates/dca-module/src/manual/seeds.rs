@@ -1,5 +1,6 @@
 //! Seeds by hand: add, move or delete the seed of a tooth
-//! (`aligners.preparation.numbering.place-seeds`).
+//! (`aligners.preparation.numbering.place-seeds`), or delete it alone
+//! (`aligners.preparation.numbering.delete-seed`, the "Delete a tooth" tool).
 //!
 //! A seed is the centre of the occlusal face of a tooth with its number; the
 //! segmentation starts from the seeds, so the labels of the arch (and what
@@ -7,7 +8,8 @@
 //! (`case_core.add_seed` and `steps.mark_manual`), they are kept: the report
 //! names them in `invalidated` and the user runs the segmentation again.
 //! The position is in case coordinates; the viewport sends the point where
-//! the user clicked on the scan.
+//! the user clicked on the scan. Deleting a seed does not mark the tooth
+//! missing (that is `aligners.preparation.numbering.mark-missing`).
 
 use dc_case::CaseState;
 use dc_command::{CommandError, JobCtx};
@@ -48,6 +50,35 @@ pub(crate) struct SeedParams {
     pub position: Option<[f64; 3]>,
     /// Put the seed on the nearest vertex of the scan (default false).
     pub snap_to_scan: bool,
+}
+
+/// Parameters of delete-seed.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct DeleteSeedParams {
+    /// Number (FDI) of the tooth whose mark is removed (required); its arch
+    /// follows from the number.
+    pub fdi: u8,
+}
+
+/// Removes the seed of one tooth: the seed edit `delete`, so the dependents
+/// of the arch are out of date exactly as after any other change of the
+/// marks, the list of missing teeth stays as it is, and a tooth without a
+/// seed is refused with nothing changed.
+pub(crate) fn run_delete_seed(
+    state: &CaseState,
+    p: DeleteSeedParams,
+    ctx: &JobCtx,
+) -> Result<CommandOutput, CommandError> {
+    run_seed(
+        state,
+        SeedParams {
+            op: SeedOp::Delete,
+            fdi: p.fdi,
+            ..SeedParams::default()
+        },
+        ctx,
+    )
 }
 
 pub(crate) fn run_seed(

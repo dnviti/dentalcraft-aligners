@@ -380,6 +380,8 @@ pub(super) fn run_teeth(
                 d.forget_separation(arch.role());
             }
         }
+        // the 3D teeth of the arch match its colours and marks again
+        d.record_teeth_basis(arch.role());
         let teeth: Vec<u8> = d
             .crowns
             .keys()

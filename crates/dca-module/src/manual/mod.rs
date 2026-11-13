@@ -6,7 +6,8 @@
 //! drives it from `dentalcraft-cli` or the MCP server exactly as the
 //! interface does: the viewport turns a click or a drag into the parameters
 //! of the same command and runs it through the workspace, so it is one step
-//! on the undo stack.
+//! on the undo stack. The app shows them as tools in the inspector of the
+//! function they correct, never as menu entries.
 //!
 //! | Tool | Command |
 //! | --- | --- |
@@ -15,6 +16,7 @@
 //! | renumber or swap a tooth | `aligners.preparation.numbering.renumber` |
 //! | mark a tooth missing or present | `aligners.preparation.numbering.mark-missing` |
 //! | seed edit (add, move, delete) | `aligners.preparation.numbering.place-seeds` |
+//! | delete one tooth mark (not missing) | `aligners.preparation.numbering.delete-seed` |
 //! | number the teeth in order (points and skip steps) | `aligners.preparation.numbering.sequence` |
 //! | clear the tooth marks | `aligners.preparation.numbering.clear-seeds` |
 //! | rebuild one tooth | `aligners.manual.rebuild-tooth` |

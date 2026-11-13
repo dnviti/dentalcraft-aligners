@@ -2,11 +2,9 @@
 //! read from its data: a step is done when every arch of the case has its
 //! result, so undoing a step, or replacing a scan, undoes its tick.
 //!
-//! Some leaves leave no trace in the case and are never done here: moving a
-//! tooth (it changes poses the final position also writes), the two exports
-//! (they write files), the re-plan (it replaces the aligners), the corrections
-//! that add no data (renumber, brush, clean borders) and the whole pipeline,
-//! which is not a step.
+//! Some leaves leave no trace in the case and are never done here: the two
+//! exports (they write files), the re-plan (it replaces the aligners) and the
+//! whole pipeline, which is not a step.
 
 use dc_case::{CaseState, RoleSource, ScanRole};
 use dca_algo::anatomy::Arch;
@@ -41,12 +39,9 @@ pub(crate) fn leaf_done(state: &CaseState, id: &str) -> bool {
         |has: &dyn Fn(Arch) -> bool| !arches.is_empty() && arches.iter().all(|a| has(*a));
     let of = |a: Arch| move |f: &dc_case::Fdi| Arch::of(*f) == a;
     match id {
-        "aligners.teeth.find"
-        | "aligners.preparation.numbering.automatic"
-        | "aligners.preparation.numbering.place-seeds" => {
+        "aligners.teeth.find" | "aligners.preparation.numbering.automatic" => {
             every_arch(&|a| data.seeds.iter().any(|s| Arch::of(s.fdi) == a))
         }
-        "aligners.preparation.numbering.mark-missing" => !data.missing.is_empty(),
         "aligners.preparation.segmentation.automatic" => {
             every_arch(&|a| data.labels.contains_key(&a.role()))
         }

@@ -4,30 +4,35 @@
 //! ([`menu_tree`]), the command list ([`command_descs`]) and the inspector
 //! (title and description by item id). The data is in `tree_data.rs`.
 //!
-//! The menu holds what a dentist or a technician needs; the other registered
-//! commands ([`crate::commands`]) are reachable from the CLI and the MCP
-//! server only, with their own label keys.
+//! The menu holds one leaf per function, grouped by what it is for. A click
+//! on a leaf only selects it: the shell shows its inspector, which runs it
+//! with a button and holds its manual corrections. The commands of those
+//! corrections ([`tools`]) have a node of their own, out of the menu, for
+//! their label, description and key. The other registered commands
+//! ([`crate::commands`]) are reachable from the CLI and the MCP server only,
+//! with their own label keys.
 //!
 //! Naming: a leaf is the command `aligners.<path>`, whatever group shows it
-//! (e.g. `aligners.preparation.segmentation.manual-brush` is under Teeth, so
+//! (e.g. `aligners.preparation.segmentation.automatic` is under Teeth, so
 //! that scripts keep working). Fluent ids cannot contain dots, so the i18n
 //! keys use hyphens:
 //!
-//! | what        | id / key                                              |
-//! |-------------|-------------------------------------------------------|
-//! | command id  | `aligners.preparation.segmentation.manual-brush`      |
-//! | label key   | `aligners-menu-preparation-segmentation-manual-brush` |
-//! | description | `aligners-desc-preparation-segmentation-manual-brush` |
+//! | what        | id / key                                           |
+//! |-------------|----------------------------------------------------|
+//! | command id  | `aligners.preparation.segmentation.automatic`      |
+//! | label key   | `aligners-menu-preparation-segmentation-automatic` |
+//! | description | `aligners-desc-preparation-segmentation-automatic` |
 //!
-//! Groups and sub-menus follow the same scheme (`aligners.teeth`,
-//! `aligners-menu-teeth`) but are not commands.
+//! Groups and the tools follow the same scheme (`aligners.teeth`,
+//! `aligners-menu-teeth`); groups are not commands.
 //!
-//! Status: a leaf is `Ready` if and only if a command with its id is
-//! registered in [`crate::commands`]; otherwise it is a placeholder (`Stub`).
+//! Status: a leaf or a tool is `Ready` if and only if a command with its id
+//! is registered in [`crate::commands`]; otherwise it is a placeholder
+//! (`Stub`).
 
 use dc_module_api::{CommandDesc, LeafInput, MenuItem, MenuStatus, MenuTree};
 
-use crate::tree_data::GROUPS;
+use crate::tree_data::{GROUPS, TOOLS};
 
 /// One entry of the menu: a group or sub-menu (with children) or a leaf
 /// command.
@@ -170,7 +175,13 @@ pub fn groups() -> &'static [Node] {
     GROUPS
 }
 
-/// Every node, depth first, parents before children.
+/// The commands of the manual corrections: not in the menu, shown as tools
+/// in the inspector of the function they correct.
+pub fn tools() -> &'static [Node] {
+    TOOLS
+}
+
+/// Every node of the menu, depth first, parents before children.
 pub fn all_nodes() -> Vec<&'static Node> {
     let mut out = Vec::new();
     for g in GROUPS {
@@ -184,7 +195,7 @@ pub fn leaves() -> Vec<&'static Node> {
     all_nodes().into_iter().filter(|n| n.is_leaf()).collect()
 }
 
-/// Node by id, at any depth.
+/// Node of the menu by id, at any depth (the tools are not menu nodes).
 pub fn find(id: &str) -> Option<&'static Node> {
     all_nodes().into_iter().find(|n| n.id == id)
 }
@@ -194,11 +205,12 @@ pub fn menu_tree() -> MenuTree {
     MenuTree::new(GROUPS.iter().map(Node::to_menu_item).collect())
 }
 
-/// The commands of the module: one per leaf, with the description as
-/// tooltip.
+/// The commands of the module: one per leaf, in menu order, then one per
+/// tool, with the description as tooltip.
 pub fn command_descs() -> Vec<CommandDesc> {
     leaves()
         .into_iter()
+        .chain(TOOLS)
         .map(|n| {
             let mut c = CommandDesc::new(n.id, n.label_key);
             c.tooltip_key = Some(n.desc_key);
