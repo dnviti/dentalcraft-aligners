@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.4](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.3...v0.2.0-alpha.4) (2026-11-13)
+
+
+### Features
+
+* **aligners:** 3D teeth finish, menu grouped by function, delete a tooth mark ([#9](https://github.com/dnviti-personal-org/dentalcraft-aligners/issues/9)) ([69b82ac](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/69b82accaa50979a3dfedb21de451c02681cb830))
+
 ## [0.2.0-alpha.3](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.2...v0.2.0-alpha.3) (2026-11-12)
 
 
