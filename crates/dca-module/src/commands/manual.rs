@@ -69,6 +69,13 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
             run: crate::manual::rebuild::run_rebuild,
         },
         stage_command! {
+            id: "aligners.manual.tooth-region",
+            label: "aligners-cmd-manual-tooth-region",
+            doc: "aligners-cmd-manual-tooth-region-doc",
+            params: crate::manual::region::RegionParams,
+            run: crate::manual::region::run_region,
+        },
+        stage_command! {
             id: "aligners.planning.movements",
             label: "aligners-menu-planning-movements",
             doc: "aligners-cmd-manual-adjust-doc",

@@ -77,6 +77,7 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.preparation.reconstruction.automatic",
     "aligners.preparation.reconstruction.rebuild-tooth",
     "aligners.manual.rebuild-tooth",
+    "aligners.manual.tooth-region",
     "aligners.preparation.numbering.sequence",
     "aligners.preparation.numbering.clear-seeds",
     "aligners.preparation.gingiva",

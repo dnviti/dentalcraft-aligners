@@ -20,6 +20,7 @@
 //! | number the teeth in order (points and skip steps) | `aligners.preparation.numbering.sequence` |
 //! | clear the tooth marks | `aligners.preparation.numbering.clear-seeds` |
 //! | rebuild one tooth | `aligners.manual.rebuild-tooth` |
+//! | the region of a tooth and its margin line (read-only) | `aligners.manual.tooth-region` |
 //! | adjust a tooth (setup or stage) | `aligners.planning.movements` |
 //!
 //! The commands are registered in `commands/manual.rs`. The geometry (brush, crown fill, region check, clean-up, collision
@@ -30,6 +31,7 @@ pub(crate) mod brush;
 pub(crate) mod common;
 pub(crate) mod numbering;
 pub(crate) mod rebuild;
+pub(crate) mod region;
 pub(crate) mod seeds;
 pub(crate) mod sequence;
 
