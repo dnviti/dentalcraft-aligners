@@ -114,6 +114,9 @@ const OUT_OF_THE_MENU: &[&str] = &[
     // the parameters and the reset of the Final position inspector
     "aligners.settings.setup",
     "aligners.planning.setup.reset",
+    // the parameters and "Slow a tooth" of the Aligners inspector
+    "aligners.settings.staging",
+    "aligners.planning.tooth-speed",
     // the gizmo of the viewport on a selected 3D component
     "aligners.components.transform",
 ];

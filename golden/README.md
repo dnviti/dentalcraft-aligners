@@ -107,12 +107,13 @@ anterior, +Z occlusal) = `worldframe.arch_frame.M` applied inversely.
 | `teeth` | `teeth.compute_teeth` | `teeth/teeth.json` | per tooth: centroid, axes, widths, height, contact points, margin, centre of resistance, `rest_frame` (arrays `vidx`/`fidx` are left out) |
 | `diagnosis` | `case_plan.analyze` (extracted); `edits`: `manual.diagnosis_override` (extracted, the plugin's `oa.diagnosis_edit`) | `diagnosis/diagnosis.json` | space analysis, Little index, rotations, largest space, CAT-CAT items and level; `edits`: scenarios of values written by hand (`EDIT_SCENARIOS` in `oracle/stages.py`), per step the values given, those equal to the automatic ones (`reset`) and the diagnosis left (values, Little category, items, score, level, `manuale`) |
 | `setup` | `setup_conservativo.conservative_setup` | `setup/setup.json`, `setup/setup_params.json` | target delta and pose per tooth (teeth that stay are absent from `targets_delta`), IPR, log, arch line; `setup_params.json` is the same with every setup parameter of the plugin's page away from its default (`SETUP_PARAMS` in `oracle/stages.py`, listed in `inputs.settings`; midline BALANCE, since CENTER fails in the plugin on these cases) |
-| `staging` | `reconstruct.closed_tooth`, `staging.plan`, `case_plan.complexity` (extracted) | `staging/staging.json`, `staging/closed_<fdi>.dcm` | `plan`: pattern, `n_stages`, per-stage `q` (6 numbers: tx ty tz, rx ry rz) per tooth, phases, IPR stage, stats; closed crown solids in tooth-local coordinates |
+| `staging` | `reconstruct.closed_tooth`, `staging.plan`, `case_plan.complexity` (extracted), `schedule.build` | `staging/staging.json`, `staging/staging_params.json`, `staging/closed_<fdi>.dcm` | `plan`: pattern, `n_stages`, per-stage `q` (6 numbers: tx ty tz, rx ry rz) per tooth, phases, IPR stage, stats; closed crown solids in tooth-local coordinates; `staging_params.json`: `plans` by pattern (PROPORTIONAL, MAX_VELOCITY, SEQUENTIAL_DISTAL, STRUCTURED), each with every staging parameter of the plugin's page away from its default (`STAGING_PARAMS` in `oracle/stages.py`: perio STAGE1, every limit, contact tolerance, overcorrection, 10 days per aligner), the tooth that needs the most aligners in the default plan slowed to 0.5 (`inputs.speed`, the plugin's `speed_json`), its `plan` and its FIXED and ADAPTIVE `calendar` from 2026-01-05 |
 | `schedule` | `schedule.build`, `stage_intervals`, `to_ics` | `schedule/schedule.json`, `schedule_{fixed,adaptive}.ics` | start date fixed to 2026-01-05; FIXED and ADAPTIVE policies |
 
 Assumptions of `setup`/`staging` (the plugin reads them from the Blender case):
 no tooth locked or left out of the aligner, no drawn arch line, no opposing arch
-or bite, no clinician decision in the classification review, default scene settings.
+or bite, no clinician decision in the classification review, default scene settings
+(except `setup_params.json` and `staging_params.json`, as said above).
 
 ### Label arrays
 

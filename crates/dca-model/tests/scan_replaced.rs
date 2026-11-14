@@ -10,7 +10,7 @@ use dc_case::{
 use dc_mesh::{BadFaceReport, MeshFormat, TriMesh, Units};
 use dca_model::{
     AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Decision, IprStep, MODULE_ID, Ramp,
-    RampKind, Seed, Stage, ToothFrame, ToothMeasures, Visit,
+    RampKind, Seed, Stage, StagingSummary, ToothFrame, ToothMeasures, Visit,
 };
 use glam::{DQuat, DVec3, Vec3};
 use serde_json::Value;
@@ -151,6 +151,15 @@ fn fill_arch(case: &mut CaseState, st: &mut AlignersState, role: ScanRole, tag: 
             });
         }
     }
+    st.staging_results.insert(
+        role,
+        StagingSummary {
+            aligners: 3,
+            slowed: [(a, 0.5)].into(),
+            ..StagingSummary::default()
+        },
+    );
+    st.tooth_speed.insert(a, 0.5);
     st.aligner_bite.ramps.ramps.push(Ramp {
         fdi: a,
         pose: pose(1.0),
@@ -215,6 +224,8 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         assert!(!st.setup.ipr.iter().any(|r| arch(&r.between[0])));
         assert!(!st.setup.lines.contains_key(&role));
         assert!(st.stages.iter().all(|s| !s.poses.keys().any(arch)));
+        assert!(!st.staging_results.contains_key(&role));
+        assert!(!st.tooth_speed.keys().any(arch));
         assert!(
             st.stages
                 .iter()
@@ -257,7 +268,11 @@ fn only_group(id: &str, role: ScanRole) -> AlignersState {
         }
         "complexity" => st.diagnosis.complexity_score = Some(12.0),
         "setup" => st.setup = full.setup,
-        "stages" => st.stages = full.stages,
+        "stages" => {
+            st.stages = full.stages;
+            st.staging_results = full.staging_results;
+            st.tooth_speed = full.tooth_speed;
+        }
         "ramps" => st.aligner_bite.ramps.ramps = full.aligner_bite.ramps.ramps,
         "visits" => st.visits = full.visits,
         other => panic!("unknown id {other}"),

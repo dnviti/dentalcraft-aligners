@@ -104,6 +104,18 @@ impl From<StagingPattern> for Pattern {
     }
 }
 
+impl From<Pattern> for StagingPattern {
+    fn from(p: Pattern) -> Self {
+        match p {
+            Pattern::Auto => StagingPattern::Auto,
+            Pattern::Proportional => StagingPattern::Proportional,
+            Pattern::MaxVelocity => StagingPattern::MaxVelocity,
+            Pattern::SequentialDistal => StagingPattern::SequentialDistal,
+            Pattern::Structured => StagingPattern::Structured,
+        }
+    }
+}
+
 /// Periodontal condition (reduces the movement per aligner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -259,6 +271,7 @@ impl Params {
             pattern: s.pattern.into(),
             collision: s.collision_check,
             collision_tol_mm: s.collision_tol_mm,
+            overcorrection: s.overcorrection,
             ..Self::default()
         }
     }

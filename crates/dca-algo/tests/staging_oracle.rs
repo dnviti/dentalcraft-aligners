@@ -7,16 +7,20 @@
 //! (`staging/closed_<fdi>.dcm`), the rest frames and `md_sign` of
 //! `teeth/teeth.json`, the target deltas and the IPR plan of
 //! `setup/setup.json`, the complexity of the oracle's diagnosis and the
-//! default parameters. Bounds (PLAN section 5): poses within 0.01 mm and
-//! 0.05 degrees; the number of stages, the phases and the IPR timing equal.
-//! The same plan comes out of the target poses as the case stores them
-//! (`Setup::poses`), whatever the sign of their quaternions.
+//! default parameters, or, for `staging/staging_params.json`, every staging
+//! parameter of the plugin's page away from its default (through the case
+//! settings), each explicit pattern and one slowed tooth. Bounds (PLAN
+//! section 5): poses within 0.01 mm and 0.05 degrees; the number of stages,
+//! the phases, the IPR timing and the calendar dates equal. The same plan
+//! comes out of the target poses as the case stores them (`Setup::poses`),
+//! whatever the sign of their quaternions.
 
 use std::path::PathBuf;
 
 use dc_case::Fdi;
 use dca_algo::schedule::{self, Date, Policy};
 use dca_algo::staging::{self, Complexity, IprPlan, Level, Params, Pattern, ToothMove};
+use dca_model::{IntervalPolicy, Settings};
 use glam::{DMat4, DVec3};
 use serde_json::Value;
 
@@ -227,127 +231,274 @@ fn stored_target_poses_of_either_quaternion_sign_give_the_plugins_aligners() {
     }
 }
 
+/// The plan of the port against the plugin's `plan_json` `want`: the
+/// pattern, the number of aligners, the poses of every stage within the
+/// bounds, the aligners each tooth needs, the phases, the IPR timing, the
+/// collisions left, the final overlaps and the statistics per tooth. Returns
+/// the worst pose error (mm, degrees).
+fn assert_plan_matches(case: &str, plan: &staging::Plan, want: &Value) -> (f64, f64) {
+    let n = want["n_stages"].as_u64().unwrap() as u32;
+    assert_eq!(plan.n_stages, n, "{case}: number of aligners");
+    assert_eq!(
+        format!("{:?}", plan.pattern).to_uppercase(),
+        want["pattern"].as_str().unwrap().replace('_', ""),
+        "{case}: pattern"
+    );
+    let (mut worst_mm, mut worst_deg) = (0.0_f64, 0.0_f64);
+    for (f, want_q) in want["q"].as_object().unwrap() {
+        let f = fdi(f.parse().unwrap());
+        let got = &plan.q[&f];
+        let want_q = want_q.as_array().unwrap();
+        assert_eq!(got.len(), want_q.len(), "{case} {f}");
+        for (k, (g, w)) in got.iter().zip(want_q).enumerate() {
+            let (mm, deg) = pose_error(g, &q6(w));
+            worst_mm = worst_mm.max(mm);
+            worst_deg = worst_deg.max(deg);
+            assert!(mm < TOL_MM, "{case} {f} stage {k}: {mm} mm");
+            assert!(deg < TOL_DEG, "{case} {f} stage {k}: {deg} deg");
+        }
+    }
+    // the final movement (after the overcorrection, when it is on)
+    for (f, w) in want["q_final"].as_object().unwrap() {
+        let (mm, deg) = pose_error(&plan.q_final[&fdi(f.parse().unwrap())], &q6(w));
+        assert!(
+            mm < TOL_MM && deg < TOL_DEG,
+            "{case} {f}: final {mm} mm {deg} deg"
+        );
+    }
+    // the aligners each tooth needs and its phases
+    for (f, n) in want["need"].as_object().unwrap() {
+        let f = fdi(f.parse().unwrap());
+        assert_eq!(
+            u64::from(plan.need[&f]),
+            n.as_u64().unwrap(),
+            "{case} {f}: need"
+        );
+    }
+    for (f, phases) in want["phases"].as_object().unwrap() {
+        let f = fdi(f.parse().unwrap());
+        let got = &plan.phases[&f];
+        let phases = phases.as_array().unwrap();
+        assert_eq!(got.len(), phases.len(), "{case} {f}");
+        for (g, w) in got.iter().zip(phases) {
+            let mask: Vec<u64> = w[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_u64().unwrap())
+                .collect();
+            let got_mask: Vec<u64> = (0..6).filter(|&i| g.mask[i]).map(|i| i as u64).collect();
+            assert_eq!(got_mask, mask, "{case} {f}: phase mask");
+            assert_eq!(g.start, w[1].as_i64().unwrap(), "{case} {f}: phase start");
+            assert_eq!(g.n, w[2].as_i64().unwrap(), "{case} {f}: phase length");
+        }
+    }
+    // IPR timing
+    let want_ipr: Vec<(u64, u64, u64)> = want["ipr_stage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r[0].as_u64().unwrap(),
+                r[1].as_u64().unwrap(),
+                r[2].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let got_ipr: Vec<(u64, u64, u64)> = plan
+        .ipr_stage
+        .iter()
+        .map(|r| {
+            (
+                u64::from(r.a.get()),
+                u64::from(r.b.get()),
+                u64::from(r.stage),
+            )
+        })
+        .collect();
+    assert_eq!(got_ipr, want_ipr, "{case}: IPR timing");
+    assert_eq!(
+        plan.unresolved.len(),
+        want["unresolved"].as_array().unwrap().len(),
+        "{case}"
+    );
+    for (g, w) in plan
+        .final_overlap
+        .iter()
+        .zip(want["final_overlap"].as_array().unwrap())
+    {
+        assert_eq!(u64::from(g.a.get()), w[0].as_u64().unwrap());
+        assert!(
+            (g.mm - num(&w[2])).abs() < 5e-3,
+            "{case} {}|{}: {} vs {}",
+            g.a,
+            g.b,
+            g.mm,
+            w[2]
+        );
+    }
+    // the per-tooth statistics
+    for (f, s) in want["stats"].as_object().unwrap() {
+        let f = fdi(f.parse().unwrap());
+        let st = &plan.stats[&f];
+        assert_eq!(
+            u64::from(st.moving_stages),
+            s["moving_stages"].as_u64().unwrap(),
+            "{case} {f}"
+        );
+        assert!((st.cap - num(&s["cap"])).abs() < 1e-12, "{case} {f}: cap");
+        assert!(
+            (st.max_crown_step - num(&s["max_crown_step"])).abs() < 1e-3,
+            "{case} {f}"
+        );
+        for i in 0..6 {
+            assert!(
+                (st.limits[i] - num(&s["limits"][i])).abs() < 1e-12,
+                "{case} {f}: limit {i}"
+            );
+        }
+    }
+    (worst_mm, worst_deg)
+}
+
 #[test]
 fn the_staging_matches_the_plugin_on_the_demo_cases() {
     for case in CASES {
         let c = load(case);
         let plan = plan_of(&c);
-        let want = &c.plan;
-        let n = want["n_stages"].as_u64().unwrap() as u32;
-        assert_eq!(plan.n_stages, n, "{case}: number of aligners");
-        assert_eq!(
-            format!("{:?}", plan.pattern).to_uppercase(),
-            want["pattern"].as_str().unwrap().replace('_', ""),
-            "{case}: pattern"
-        );
-        let (mut worst_mm, mut worst_deg) = (0.0_f64, 0.0_f64);
-        for (f, want_q) in want["q"].as_object().unwrap() {
-            let f = fdi(f.parse().unwrap());
-            let got = &plan.q[&f];
-            let want_q = want_q.as_array().unwrap();
-            assert_eq!(got.len(), want_q.len(), "{case} {f}");
-            for (k, (g, w)) in got.iter().zip(want_q).enumerate() {
-                let (mm, deg) = pose_error(g, &q6(w));
-                worst_mm = worst_mm.max(mm);
-                worst_deg = worst_deg.max(deg);
-                assert!(mm < TOL_MM, "{case} {f} stage {k}: {mm} mm");
-                assert!(deg < TOL_DEG, "{case} {f} stage {k}: {deg} deg");
-            }
-        }
-        // the aligners each tooth needs and its phases
-        for (f, n) in want["need"].as_object().unwrap() {
-            let f = fdi(f.parse().unwrap());
-            assert_eq!(
-                u64::from(plan.need[&f]),
-                n.as_u64().unwrap(),
-                "{case} {f}: need"
-            );
-        }
-        for (f, phases) in want["phases"].as_object().unwrap() {
-            let f = fdi(f.parse().unwrap());
-            let got = &plan.phases[&f];
-            let phases = phases.as_array().unwrap();
-            assert_eq!(got.len(), phases.len(), "{case} {f}");
-            for (g, w) in got.iter().zip(phases) {
-                let mask: Vec<u64> = w[0]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x.as_u64().unwrap())
-                    .collect();
-                let got_mask: Vec<u64> = (0..6).filter(|&i| g.mask[i]).map(|i| i as u64).collect();
-                assert_eq!(got_mask, mask, "{case} {f}: phase mask");
-                assert_eq!(g.start, w[1].as_i64().unwrap(), "{case} {f}: phase start");
-                assert_eq!(g.n, w[2].as_i64().unwrap(), "{case} {f}: phase length");
-            }
-        }
-        // IPR timing
-        let want_ipr: Vec<(u64, u64, u64)> = want["ipr_stage"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| {
-                (
-                    r[0].as_u64().unwrap(),
-                    r[1].as_u64().unwrap(),
-                    r[2].as_u64().unwrap(),
-                )
-            })
-            .collect();
-        let got_ipr: Vec<(u64, u64, u64)> = plan
-            .ipr_stage
-            .iter()
-            .map(|r| {
-                (
-                    u64::from(r.a.get()),
-                    u64::from(r.b.get()),
-                    u64::from(r.stage),
-                )
-            })
-            .collect();
-        assert_eq!(got_ipr, want_ipr, "{case}: IPR timing");
-        assert_eq!(
-            plan.unresolved.len(),
-            want["unresolved"].as_array().unwrap().len(),
-            "{case}"
-        );
-        for (g, w) in plan
-            .final_overlap
-            .iter()
-            .zip(want["final_overlap"].as_array().unwrap())
-        {
-            assert_eq!(u64::from(g.a.get()), w[0].as_u64().unwrap());
-            assert!(
-                (g.mm - num(&w[2])).abs() < 5e-3,
-                "{case} {}|{}: {} vs {}",
-                g.a,
-                g.b,
-                g.mm,
-                w[2]
-            );
-        }
-        // the per-tooth statistics
-        for (f, s) in want["stats"].as_object().unwrap() {
-            let f = fdi(f.parse().unwrap());
-            let st = &plan.stats[&f];
-            assert_eq!(
-                u64::from(st.moving_stages),
-                s["moving_stages"].as_u64().unwrap(),
-                "{case} {f}"
-            );
-            assert!((st.cap - num(&s["cap"])).abs() < 1e-12);
-            assert!(
-                (st.max_crown_step - num(&s["max_crown_step"])).abs() < 1e-3,
-                "{case} {f}"
-            );
-            for i in 0..6 {
-                assert!((st.limits[i] - num(&s["limits"][i])).abs() < 1e-12);
-            }
-        }
+        let (worst_mm, worst_deg) = assert_plan_matches(case, &plan, &c.plan);
         eprintln!(
             "{case}: {} aligners, worst pose error {worst_mm:.2e} mm / {worst_deg:.2e} deg",
             plan.n_stages
         );
+    }
+}
+
+/// The staging settings of the case with the scene settings of the oracle
+/// (`STAGING_PARAMS` of `golden/oracle/stages.py`, the plugin's names) and
+/// the pattern `pattern`.
+fn settings_of(scene: &Value, pattern: &str) -> Settings {
+    let mut s = Settings::default();
+    for (name, v) in scene.as_object().unwrap() {
+        let st = &mut s.staging;
+        match name.as_str() {
+            "perio" => {
+                st.perio =
+                    serde_json::from_value(Value::String(v.as_str().unwrap().to_lowercase()))
+                        .unwrap();
+            }
+            "collision" => st.collision_check = v.as_bool().unwrap(),
+            "overcorrection" => st.overcorrection = v.as_bool().unwrap(),
+            "interval_days" => s.interval_days = v.as_u64().unwrap() as u32,
+            other => {
+                let field = match other {
+                    "step_rotation" | "step_rotation_round" | "step_angular" => {
+                        format!("{other}_deg")
+                    }
+                    _ => format!("{other}_mm"),
+                };
+                assert!(st.set_number(&field, num(v)), "{other}");
+            }
+        }
+    }
+    s.staging.pattern = serde_json::from_value(Value::String(pattern.to_lowercase())).unwrap();
+    assert!(s.staging.out_of_range().is_none());
+    s
+}
+
+/// The calendar of a plan of the port (`schedule::Input` as the case
+/// stores it: the movements of each aligner, the IPR with its amount).
+fn calendar_input(plan: &staging::Plan, ipr: &[IprPlan]) -> schedule::Input {
+    schedule::Input {
+        n_stages: plan.n_stages,
+        n_total: None,
+        q: plan.q.clone(),
+        ipr: plan
+            .ipr_stage
+            .iter()
+            .map(|r| schedule::IprAt {
+                a: r.a,
+                b: r.b,
+                stage: r.stage,
+                mm: ipr
+                    .iter()
+                    .find(|p| p.a == r.a && p.b == r.b)
+                    .map_or(0.0, |p| p.mm),
+            })
+            .collect(),
+        attachments: Vec::new(),
+        offset: 0,
+    }
+}
+
+/// Every staging parameter of the plugin's page away from its default (a
+/// periodontal stage, every limit, the contact tolerance, the
+/// overcorrection), each explicit pattern, the tooth that needs the most
+/// aligners slowed to half its speed, and the FIXED and ADAPTIVE calendars
+/// of 10 days (`staging/staging_params.json`). The settings go through the
+/// case settings as the command reads them.
+#[test]
+fn non_default_settings_and_a_slowed_tooth_match_the_plugin() {
+    for case in CASES {
+        let c = load(case);
+        let want = json(case, "staging/staging_params.json");
+        let inputs = &want["inputs"];
+        let slowed: Vec<(Fdi, f64)> = inputs["speed"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(f, s)| (fdi(f.parse().unwrap()), num(s)))
+            .collect();
+        assert_eq!(slowed.len(), 1, "{case}");
+        let mut moves = c.moves.clone();
+        for m in &mut moves {
+            if let Some((_, s)) = slowed.iter().find(|(f, _)| *f == m.fdi) {
+                m.speed = *s;
+            }
+        }
+        for (pattern, entry) in want["plans"].as_object().unwrap() {
+            let label = format!("{case} {pattern}");
+            let settings = settings_of(&inputs["settings"], pattern);
+            let plan = staging::run(
+                &staging::Input {
+                    moves: &moves,
+                    ipr: &c.ipr,
+                    complexity: c.complexity,
+                },
+                &Params::from_settings(&settings.staging),
+            )
+            .unwrap();
+            let (worst_mm, worst_deg) = assert_plan_matches(&label, &plan, &entry["plan"]);
+            assert_eq!(
+                entry["plan"]["speed"], inputs["speed"],
+                "{label}: the plugin's plan lists the slowed tooth"
+            );
+            let input = calendar_input(&plan, &c.ipr);
+            for (policy, name) in [
+                (IntervalPolicy::Fixed, "FIXED"),
+                (IntervalPolicy::Adaptive, "ADAPTIVE"),
+            ] {
+                let mut s = settings.clone();
+                s.interval_policy = policy;
+                s.start_date = inputs["start_date"].as_str().map(str::to_owned);
+                let cal = schedule::run(
+                    &input,
+                    &schedule::Params {
+                        start_date: s.start_date.clone(),
+                        interval_days: s.interval_days,
+                        policy: s.interval_policy.into(),
+                        ..schedule::Params::default()
+                    },
+                )
+                .unwrap();
+                assert_calendar_matches(&format!("{label} {name}"), &cal, &entry["calendar"][name]);
+            }
+            eprintln!(
+                "{label}: {} aligners, worst pose error {worst_mm:.2e} mm / {worst_deg:.2e} deg",
+                plan.n_stages
+            );
+        }
     }
 }
 
@@ -369,6 +520,48 @@ fn the_pattern_comes_from_the_complexity_when_it_is_auto() {
     )
     .unwrap();
     assert_eq!(plan.pattern, Pattern::Proportional);
+}
+
+/// The calendar of the port against the plugin's (`{intervals, calendar}`
+/// of the oracle): the days of wear of every aligner, the start, the end,
+/// the total days, and the number, dates, treatment day and to-do items of
+/// every row.
+fn assert_calendar_matches(label: &str, cal: &schedule::Calendar, want: &Value) {
+    let want_iv: Vec<u32> = want["intervals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap() as u32)
+        .collect();
+    let got_iv: Vec<u32> = cal.rows.iter().map(|r| r.days).collect();
+    assert_eq!(got_iv, want_iv, "{label}: intervals");
+    let wc = &want["calendar"];
+    assert_eq!(cal.start.to_iso(), wc["start"].as_str().unwrap(), "{label}");
+    assert_eq!(cal.end.to_iso(), wc["end"].as_str().unwrap(), "{label}");
+    assert_eq!(
+        u64::from(cal.total_days),
+        wc["total_days"].as_u64().unwrap(),
+        "{label}"
+    );
+    assert_eq!(
+        cal.rows.len(),
+        wc["rows"].as_array().unwrap().len(),
+        "{label}"
+    );
+    for (r, w) in cal.rows.iter().zip(wc["rows"].as_array().unwrap()) {
+        assert_eq!(u64::from(r.number), w["number"].as_u64().unwrap());
+        assert_eq!(r.passive, w["passive"].as_bool().unwrap(), "{label}");
+        assert_eq!(r.start.to_iso(), w["start"].as_str().unwrap(), "{label}");
+        assert_eq!(r.end.to_iso(), w["end"].as_str().unwrap(), "{label}");
+        assert_eq!(u64::from(r.first_day), w["first_day"].as_u64().unwrap());
+        let todo: Vec<&str> = w["todo"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(r.todo, todo, "{label} aligner {}", r.number);
+    }
 }
 
 /// The wear calendar of the plugin, FIXED and ADAPTIVE, on the oracle's plan.
@@ -426,44 +619,7 @@ fn the_calendar_matches_the_plugin() {
                 ..schedule::Params::default()
             };
             let cal = schedule::run(&input, &params).unwrap();
-            let want = &expected["policies"][name];
-            let want_iv: Vec<u32> = want["intervals"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x.as_u64().unwrap() as u32)
-                .collect();
-            let got_iv: Vec<u32> = cal.rows.iter().map(|r| r.days).collect();
-            assert_eq!(got_iv, want_iv, "{case} {name}: intervals");
-            let wc = &want["calendar"];
-            assert_eq!(cal.start.to_iso(), wc["start"].as_str().unwrap());
-            assert_eq!(
-                cal.end.to_iso(),
-                wc["end"].as_str().unwrap(),
-                "{case} {name}"
-            );
-            assert_eq!(
-                u64::from(cal.total_days),
-                wc["total_days"].as_u64().unwrap()
-            );
-            assert_eq!(cal.rows.len(), wc["rows"].as_array().unwrap().len());
-            for (r, w) in cal.rows.iter().zip(wc["rows"].as_array().unwrap()) {
-                assert_eq!(u64::from(r.number), w["number"].as_u64().unwrap());
-                assert_eq!(
-                    r.start.to_iso(),
-                    w["start"].as_str().unwrap(),
-                    "{case} {name}"
-                );
-                assert_eq!(r.end.to_iso(), w["end"].as_str().unwrap());
-                assert_eq!(u64::from(r.first_day), w["first_day"].as_u64().unwrap());
-                let todo: Vec<&str> = w["todo"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x.as_str().unwrap())
-                    .collect();
-                assert_eq!(r.todo, todo, "{case} {name} aligner {}", r.number);
-            }
+            assert_calendar_matches(&format!("{case} {name}"), &cal, &expected["policies"][name]);
             // the .ics, unfolded, is the plugin's apart from the product lines and the stamp
             let ics = schedule::to_ics(
                 &cal,

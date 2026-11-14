@@ -4,14 +4,19 @@
 //! from its rest position to the setup into aligners, within the velocity
 //! limits of the evidence (or the case's settings, or the overrides of the
 //! command), with collision-free delays and the timing of the IPR. The
-//! aligners are stored in `AlignersState::stages`; the result of the
+//! aligners are stored in `AlignersState::stages`, and what the plan gave
+//! for each arch (aligners, pattern, slowed teeth, collisions left,
+//! overcorrection) in `AlignersState::staging_results`; the result of the
 //! planning (pattern, aligners per tooth, collisions, notes) is returned.
 //!
 //! Inputs from the case: the tooth frames (`aligners.teeth.frames`), the
 //! setup (`Setup::poses`, the final local pose of each tooth in its rest
 //! frame; a tooth without a pose stays at rest; `Setup::ipr`), the labelled
-//! scan (crown points), and the diagnosis (crowding, Little index, score) for
-//! the automatic pattern.
+//! scan (crown points), the diagnosis (crowding, Little index, score) for
+//! the automatic pattern, and the teeth slowed by hand
+//! (`AlignersState::tooth_speed`: their limits per aligner are multiplied by
+//! their speed, as the plugin's `case_plan._moves` gives `speed_json` to its
+//! `ToothMove`).
 //!
 //! The crown points are the closed crowns of the reconstruction
 //! (`AlignersState::crowns`) when the tooth has one, else the labelled
@@ -20,6 +25,13 @@
 //! The two arches have their own series; `stages` holds the longer of the
 //! two and the arch that finishes first repeats its last pose (the passive
 //! aligners of the calendar).
+//!
+//! `aligners.settings.staging` changes the staging and calendar settings of
+//! the case (`Settings::staging`, `interval_days`, `interval_policy`,
+//! `start_date`) inside the ranges of the plugin's sliders.
+//! `aligners.planning.tooth-speed` slows one tooth (the plugin's
+//! `oa.tooth_speed`) and stages its arch again at once when it has a final
+//! position, in the same undo step.
 
 use std::collections::BTreeMap;
 
@@ -29,23 +41,99 @@ use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::{self, Arch};
 use dca_algo::frame;
+use dca_algo::schedule::Date;
 use dca_algo::staging::{self, Complexity, IprPlan, Level, Pattern, Perio, ToothMove};
 use dca_algo::teeth::{self, Which};
-use dca_model::{AlignersState, IprStep, MODULE_ID, Stage};
+use dca_model::{
+    AlignersState, INTERVAL_DAYS, IntervalPolicy, IprStep, MODULE_ID, PerioStage, Stage,
+    StagingPattern, StagingSummary, TOOTH_SPEED,
+};
 use glam::{DMat4, DVec3};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// Id of the automatic staging.
+pub(crate) const STAGING: &str = "aligners.planning.staging.automatic";
+/// Id of the command that changes the staging and calendar settings.
+pub(crate) const STAGING_SETTINGS: &str = "aligners.settings.staging";
+/// Id of "Slow a tooth".
+pub(crate) const TOOTH_SPEED_ID: &str = "aligners.planning.tooth-speed";
+
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
-    vec![stage_command! {
-        id: "aligners.planning.staging.automatic",
-        label: "aligners-cmd-staging-automatic",
-        doc: "aligners-cmd-staging-automatic-doc",
-        params: Params,
-        run: run_automatic,
-    }]
+    vec![
+        stage_command! {
+            id: STAGING,
+            label: "aligners-cmd-staging-automatic",
+            doc: "aligners-cmd-staging-automatic-doc",
+            params: Params,
+            run: run_automatic,
+        },
+        stage_command! {
+            id: STAGING_SETTINGS,
+            label: "aligners-cmd-staging-settings",
+            doc: "aligners-cmd-staging-settings-doc",
+            params: SettingsPatch,
+            run: run_settings,
+        },
+        stage_command! {
+            id: TOOTH_SPEED_ID,
+            label: "aligners-cmd-tooth-speed",
+            doc: "aligners-cmd-tooth-speed-doc",
+            params: ToothSpeedParams,
+            run: run_tooth_speed,
+        },
+    ]
+}
+
+/// Parameters of `aligners.settings.staging`: the settings to change (the
+/// others stay), each inside the range of the plugin's slider.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct SettingsPatch {
+    /// Periodontal condition (`healthy`, `stage1`, `stage2`, `stage3`).
+    perio: Option<PerioStage>,
+    /// Distribution pattern (`auto`, `proportional`, `max_velocity`,
+    /// `sequential_distal`, `structured`).
+    pattern: Option<StagingPattern>,
+    /// Largest translation per aligner (0.05-0.5 mm).
+    step_linear_mm: Option<f64>,
+    /// Largest intrusion or extrusion per aligner (0.05-0.5 mm).
+    step_vertical_mm: Option<f64>,
+    /// Largest rotation per aligner (0.25-4 degrees).
+    step_rotation_deg: Option<f64>,
+    /// Largest rotation per aligner of canines and premolars (0.25-4 degrees).
+    step_rotation_round_deg: Option<f64>,
+    /// Largest torque and tip per aligner (0.1-3 degrees).
+    step_angular_deg: Option<f64>,
+    /// Largest move of any crown point per aligner (0.05-0.6 mm).
+    max_crown_step_mm: Option<f64>,
+    /// Delay the teeth that would collide with a neighbour.
+    collision_check: Option<bool>,
+    /// Contact tolerated between neighbouring crowns (0-0.5 mm).
+    collision_tol_mm: Option<f64>,
+    /// Increase the final movement by the overcorrection fractions.
+    overcorrection: Option<bool>,
+    /// How the days of wear are chosen (`fixed`, `adaptive`).
+    interval_policy: Option<IntervalPolicy>,
+    /// Days each aligner is worn with the fixed calendar (5-21).
+    interval_days: Option<u32>,
+    /// Delivery date of the first aligner, `YYYY-MM-DD`; empty: the day the
+    /// calendar is made.
+    start_date: Option<String>,
+}
+
+/// Parameters of `aligners.planning.tooth-speed`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToothSpeedParams {
+    /// The tooth (FDI number).
+    fdi: u8,
+    /// Relative speed, 0.2 to 1 (0.5: half the movement per aligner); null
+    /// or 1: the normal speed.
+    #[serde(default)]
+    speed: Option<f64>,
 }
 
 /// Parameters of the command: which arches, and overrides of the staging
@@ -279,13 +367,17 @@ fn run_automatic(
                 .get(&f)
                 .map_or([0.0; 6], staging::q_from_pose);
             let frame_arch = to_arch * rest[&f].to_mat4();
-            moves.push(ToothMove::new(
+            let mut m = ToothMove::new(
                 f,
                 frame_arch,
                 q,
                 crowns.remove(&f).unwrap_or_default(),
                 md_sign(&data, &seq, &rest, f),
-            ));
+            );
+            if let Some(&speed) = data.tooth_speed.get(&f) {
+                m.speed = speed;
+            }
+            moves.push(m);
         }
         let ipr: Vec<IprPlan> = data
             .setup
@@ -317,6 +409,26 @@ fn run_automatic(
 
         let new_stages = stages_of_plan(&plan, &ipr);
         merge_arch(&mut data.stages, arch, &new_stages, &seq);
+        // the plugin's `plan["speed"]`: the teeth of the arch not at the normal speed
+        let slowed: BTreeMap<Fdi, f64> = moves
+            .iter()
+            .filter(|m| m.speed != 1.0)
+            .map(|m| (m.fdi, m.speed))
+            .collect();
+        data.staging_results.insert(
+            role,
+            StagingSummary {
+                aligners: plan.n_stages,
+                pattern: plan.pattern.into(),
+                level: json!(complexity.level)
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                slowed: slowed.clone(),
+                collisions_left: plan.unresolved.len() as u32,
+                overcorrection: sp.overcorrection,
+            },
+        );
 
         let mut teeth_out = serde_json::Map::new();
         for (f, st) in &plan.stats {
@@ -334,7 +446,10 @@ fn run_automatic(
             json!({
                 "pattern": plan.pattern,
                 "aligners": plan.n_stages,
+                "level": complexity.level,
                 "teeth": teeth_out,
+                "speed": slowed.iter().map(|(f, s)| (f.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
+                "overcorrection": sp.overcorrection,
                 "ipr_stage": plan.ipr_stage.iter().map(|r| json!({"between": [r.a, r.b], "stage": r.stage})).collect::<Vec<_>>(),
                 "unresolved": plan.unresolved,
                 "final_overlap": plan.final_overlap,
@@ -350,6 +465,155 @@ fn run_automatic(
     next.set_module(MODULE_ID, ModuleState::new(data));
     report.insert("total_aligners".to_owned(), json!(total));
     Ok((next, Value::Object(report)))
+}
+
+fn run_settings(
+    state: &CaseState,
+    patch: SettingsPatch,
+    ctx: &JobCtx,
+) -> Result<CommandOutput, CommandError> {
+    ctx.check_cancelled()?;
+    let mut data = aligners_data(state)?;
+    let mut new = data.settings.staging;
+    macro_rules! set {
+        ($($field:ident),* $(,)?) => {$(
+            if let Some(v) = patch.$field { new.$field = v; }
+        )*};
+    }
+    set!(
+        perio,
+        pattern,
+        step_linear_mm,
+        step_vertical_mm,
+        step_rotation_deg,
+        step_rotation_round_deg,
+        step_angular_deg,
+        max_crown_step_mm,
+        collision_check,
+        collision_tol_mm,
+        overcorrection,
+    );
+    let range = |name: &str, value: String, lo: String, hi: String| {
+        messages::invalid(
+            "aligners-err-staging-settings-range",
+            &[
+                ("name", name),
+                ("value", &value),
+                ("min", &lo),
+                ("max", &hi),
+            ],
+        )
+    };
+    // the sliders' ranges: a value outside them changes nothing
+    if let Some((name, value, lo, hi)) = new.out_of_range() {
+        return Err(range(
+            name,
+            value.to_string(),
+            lo.to_string(),
+            hi.to_string(),
+        ));
+    }
+    let (lo, hi) = INTERVAL_DAYS;
+    let days = patch.interval_days.unwrap_or(data.settings.interval_days);
+    if !(lo..=hi).contains(&days) {
+        return Err(range(
+            "interval_days",
+            days.to_string(),
+            lo.to_string(),
+            hi.to_string(),
+        ));
+    }
+    let start_date = match patch.start_date.as_deref().map(str::trim) {
+        None => data.settings.start_date.clone(),
+        Some("") => None,
+        Some(text) => Some(
+            Date::parse(text)
+                .ok_or_else(|| messages::invalid("aligners-err-start-date", &[("value", text)]))?
+                .to_iso(),
+        ),
+    };
+    data.settings.staging = new;
+    data.settings.interval_days = days;
+    if let Some(p) = patch.interval_policy {
+        data.settings.interval_policy = p;
+    }
+    data.settings.start_date = start_date;
+    let out = json!({
+        "staging": new,
+        "interval_days": data.settings.interval_days,
+        "interval_policy": data.settings.interval_policy,
+        "start_date": data.settings.start_date,
+    });
+    let mut next = state.clone();
+    next.set_module(MODULE_ID, ModuleState::new(data));
+    Ok((next, out))
+}
+
+/// "Slow a tooth" (the plugin's `manual.set_tooth_speed`): the speed is
+/// rounded to two decimals, the normal speed (1, or none) takes the tooth
+/// off the list; the arch is staged again at once when it has a final
+/// position (the plugin stages it again in any case; without a final
+/// position there is nothing to stage).
+fn run_tooth_speed(
+    state: &CaseState,
+    p: ToothSpeedParams,
+    ctx: &JobCtx,
+) -> Result<CommandOutput, CommandError> {
+    ctx.check_cancelled()?;
+    let mut data = aligners_data(state)?;
+    let f = Fdi::new(p.fdi)
+        .ok()
+        .filter(|f| data.tooth_frames.contains_key(f))
+        .ok_or_else(|| {
+            messages::invalid(
+                "aligners-err-tooth-speed-no-tooth",
+                &[("fdi", &p.fdi.to_string())],
+            )
+        })?;
+    let (lo, hi) = TOOTH_SPEED;
+    let speed = match p.speed {
+        None => None,
+        Some(v) if v.is_finite() && (lo - 1e-9..=hi + 1e-9).contains(&v) => {
+            Some((v * 100.0).round() / 100.0).filter(|s| *s < 0.999)
+        }
+        Some(v) => {
+            return Err(messages::invalid(
+                "aligners-err-tooth-speed-range",
+                &[
+                    ("value", &v.to_string()),
+                    ("min", &lo.to_string()),
+                    ("max", &hi.to_string()),
+                ],
+            ));
+        }
+    };
+    match speed {
+        Some(s) => data.tooth_speed.insert(f, s),
+        None => data.tooth_speed.remove(&f),
+    };
+    let arch = Arch::of(f);
+    let staged = data.setup.poses.keys().any(|t| Arch::of(*t) == arch);
+    let mut next = state.clone();
+    next.set_module(MODULE_ID, ModuleState::new(data));
+    let staging = if staged {
+        let params = Params {
+            arch: if arch.is_upper() {
+                Which::Upper
+            } else {
+                Which::Lower
+            },
+            ..Params::default()
+        };
+        let (staged_state, out) = run_automatic(&next, params, ctx)?;
+        next = staged_state;
+        out
+    } else {
+        Value::Null
+    };
+    Ok((
+        next,
+        json!({ "fdi": f, "speed": speed, "restaged": staged, "staging": staging }),
+    ))
 }
 
 /// What the automatic pattern needs: the diagnosis of the arch and the
@@ -680,5 +944,246 @@ pub(crate) mod tests {
             .unwrap()
             .execute(&s, &Value::Null, &ctx);
         assert!(matches!(r, Err(CommandError::Cancelled)), "{r:?}");
+    }
+
+    fn data_of(state: &CaseState) -> AlignersState {
+        aligners_data(state).unwrap()
+    }
+
+    #[test]
+    fn the_settings_are_changed_inside_their_ranges_and_saved() {
+        let s = staged_input("lower", &CaseState::default());
+        let (next, out) = exec(
+            STAGING_SETTINGS,
+            &s,
+            json!({ "perio": "stage2", "pattern": "max_velocity", "step_linear_mm": 0.2,
+                    "overcorrection": true, "collision_check": false, "collision_tol_mm": 0.2,
+                    "interval_policy": "adaptive", "interval_days": 10,
+                    "start_date": " 2026-03-02 " }),
+        )
+        .unwrap();
+        let d = data_of(&next);
+        let st = d.settings.staging;
+        assert_eq!(st.perio, PerioStage::Stage2);
+        assert_eq!(st.pattern, StagingPattern::MaxVelocity);
+        assert_eq!((st.step_linear_mm, st.collision_tol_mm), (0.2, 0.2));
+        assert!(st.overcorrection && !st.collision_check);
+        // the others stay
+        assert_eq!(
+            st.max_crown_step_mm,
+            dca_model::StagingSettings::default().max_crown_step_mm
+        );
+        assert_eq!(d.settings.interval_policy, IntervalPolicy::Adaptive);
+        assert_eq!(d.settings.interval_days, 10);
+        assert_eq!(d.settings.start_date.as_deref(), Some("2026-03-02"));
+        assert_eq!(out["staging"]["pattern"], "max_velocity");
+        assert_eq!(out["start_date"], "2026-03-02");
+        // nothing is computed
+        assert_eq!(d.stages, data_of(&s).stages);
+        assert!(d.staging_results.is_empty());
+        // they go through the case file as they are
+        let back: AlignersState =
+            serde_json::from_value(serde_json::to_value(&d).unwrap()).unwrap();
+        assert_eq!(back.settings, d.settings);
+        // an empty date is the day the calendar is made
+        let (today, _) = exec(STAGING_SETTINGS, &next, json!({ "start_date": "" })).unwrap();
+        assert_eq!(data_of(&today).settings.start_date, None);
+        // out of range, not a date, unknown or of the wrong kind: refused
+        for bad in [
+            json!({ "step_linear_mm": 0.6 }),
+            json!({ "step_angular_deg": 0.05 }),
+            json!({ "collision_tol_mm": -0.1 }),
+            json!({ "max_crown_step_mm": 0.61 }),
+            json!({ "interval_days": 4 }),
+            json!({ "interval_days": 22 }),
+            json!({ "start_date": "soon" }),
+            json!({ "start_date": "2026-02-30" }),
+            json!({ "pattern": "fast" }),
+            json!({ "interval_policy": "weekly" }),
+            json!({ "step_linear": 0.2 }),
+        ] {
+            assert!(
+                matches!(
+                    exec(STAGING_SETTINGS, &next, bad.clone()),
+                    Err(CommandError::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
+        let err = exec(STAGING_SETTINGS, &next, json!({ "interval_days": 30 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("interval_days") && err.contains("21"), "{err}");
+    }
+
+    #[test]
+    fn the_staging_and_the_calendar_read_the_stored_settings() {
+        let s = staged_input("lower", &CaseState::default());
+        let (set, _) = exec(
+            STAGING_SETTINGS,
+            &s,
+            json!({ "pattern": "max_velocity", "overcorrection": true,
+                    "interval_policy": "adaptive", "start_date": "2026-03-02" }),
+        )
+        .unwrap();
+        let (staged, out) = exec(STAGING, &set, Value::Null).unwrap();
+        assert_eq!(out["lower"]["pattern"], "max_velocity");
+        assert_eq!(out["lower"]["overcorrection"], true);
+        // the same as the settings given as overrides
+        let (given, _) = exec(
+            STAGING,
+            &s,
+            json!({ "pattern": "max_velocity", "overcorrection": true }),
+        )
+        .unwrap();
+        assert_eq!(data_of(&staged).stages, data_of(&given).stages);
+        // the result of the arch is stored with the aligners
+        let r = &data_of(&staged).staging_results[&ScanRole::Lower];
+        assert_eq!(
+            r.aligners,
+            out["lower"]["aligners"].as_u64().unwrap() as u32
+        );
+        assert_eq!(r.pattern, StagingPattern::MaxVelocity);
+        assert!(r.overcorrection && r.slowed.is_empty());
+        assert_eq!(r.level, out["lower"]["level"].as_str().unwrap());
+        assert_eq!(
+            r.collisions_left as usize,
+            out["lower"]["unresolved"].as_array().unwrap().len()
+        );
+        // the calendar: the stored start and policy
+        let (_, cal) = exec("aligners.planning.schedule", &staged, Value::Null).unwrap();
+        assert_eq!(cal["lower"]["rows"][0]["start"], "2026-03-02");
+        assert_eq!(cal["lower"]["policy"], "adaptive");
+        // the leaf: the staging, then the calendar of the case
+        let (_, leaf) = exec("aligners.planning.aligners", &set, Value::Null).unwrap();
+        let cal = &leaf["steps"][1]["output"]["lower"];
+        assert_eq!(cal["start"], "2026-03-02", "{leaf}");
+        assert_eq!(cal["policy"], "adaptive");
+        // and what the leaf is given wins
+        let (_, leaf) = exec(
+            "aligners.planning.aligners",
+            &set,
+            json!({ "policy": "fixed", "start_date": "2026-04-06", "interval_days": 7 }),
+        )
+        .unwrap();
+        let cal = &leaf["steps"][1]["output"]["lower"];
+        assert_eq!(
+            (cal["start"].as_str(), cal["policy"].as_str()),
+            (Some("2026-04-06"), Some("fixed"))
+        );
+        assert!(
+            cal["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["days"] == 7)
+        );
+    }
+
+    #[test]
+    fn a_slowed_tooth_needs_more_aligners_and_its_arch_is_staged_again() {
+        let s = staged_input("lower", &CaseState::default());
+        let (planned, out) = exec(STAGING, &s, Value::Null).unwrap();
+        let (f, need) = out["lower"]["teeth"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(f, t)| (f.parse::<u8>().unwrap(), t["aligners"].as_u64().unwrap()))
+            .max_by_key(|(f, n)| (*n, std::cmp::Reverse(*f)))
+            .unwrap();
+        let fdi = Fdi::new(f).unwrap();
+        // 0.504 is kept as 0.5, as the plugin rounds it
+        let (slow, out) = exec(
+            TOOTH_SPEED_ID,
+            &planned,
+            json!({ "fdi": f, "speed": 0.504 }),
+        )
+        .unwrap();
+        assert_eq!(out["speed"], 0.5);
+        assert_eq!(out["restaged"], true);
+        let got = out["staging"]["lower"]["teeth"][f.to_string()]["aligners"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            got > need,
+            "{f}: {got} aligners, {need} at the normal speed"
+        );
+        assert_eq!(out["staging"]["lower"]["speed"][f.to_string()], 0.5);
+        let d = data_of(&slow);
+        assert_eq!(d.tooth_speed, BTreeMap::from([(fdi, 0.5)]));
+        assert_eq!(
+            d.staging_results[&ScanRole::Lower].slowed,
+            BTreeMap::from([(fdi, 0.5)])
+        );
+        assert!(d.stages.len() >= data_of(&planned).stages.len());
+        // the same as the staging of the case with the tooth slowed: the
+        // leaf and Run everything automatically honour it too
+        let (again, _) = exec(STAGING, &slow, Value::Null).unwrap();
+        assert_eq!(data_of(&again).stages, d.stages);
+        // the normal speed takes it off the list, and the aligners come back
+        for reset in [
+            json!({ "fdi": f }),
+            json!({ "fdi": f, "speed": null }),
+            json!({ "fdi": f, "speed": 1.0 }),
+        ] {
+            let (back, out) = exec(TOOTH_SPEED_ID, &slow, reset.clone()).unwrap();
+            assert!(out["speed"].is_null(), "{reset}");
+            let b = data_of(&back);
+            assert!(b.tooth_speed.is_empty());
+            assert_eq!(b.stages, data_of(&planned).stages, "{reset}");
+            assert!(b.staging_results[&ScanRole::Lower].slowed.is_empty());
+        }
+        // out of range or not a tooth of the case: refused
+        for bad in [
+            json!({ "fdi": f, "speed": 0.1 }),
+            json!({ "fdi": f, "speed": 1.5 }),
+            json!({ "fdi": 18, "speed": 0.5 }),
+            json!({ "fdi": 99, "speed": 0.5 }),
+            json!({ "speed": 0.5 }),
+        ] {
+            assert!(
+                matches!(
+                    exec(TOOTH_SPEED_ID, &planned, bad.clone()),
+                    Err(CommandError::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
+        // without a final position the speed is only kept
+        let mut bare = data_of(&s);
+        bare.setup.poses.clear();
+        let mut no_setup = s.clone();
+        no_setup.set_module(MODULE_ID, ModuleState::new(bare));
+        let (kept, out) =
+            exec(TOOTH_SPEED_ID, &no_setup, json!({ "fdi": f, "speed": 0.3 })).unwrap();
+        assert_eq!(out["restaged"], false);
+        assert!(out["staging"].is_null());
+        let k = data_of(&kept);
+        assert_eq!(k.tooth_speed[&fdi], 0.3);
+        assert!(k.stages.is_empty() && k.staging_results.is_empty());
+    }
+
+    #[test]
+    fn the_result_goes_with_the_aligners_of_its_arch() {
+        let s = staged_input("lower", &CaseState::default());
+        let (planned, _) = exec(STAGING, &s, Value::Null).unwrap();
+        let (slow, _) = exec(
+            TOOTH_SPEED_ID,
+            &planned,
+            json!({ "fdi": data_of(&s).tooth_frames.keys().next().unwrap().get(), "speed": 0.5 }),
+        )
+        .unwrap();
+        // kept with the case
+        let d = data_of(&slow);
+        let back: AlignersState =
+            serde_json::from_value(serde_json::to_value(&d).unwrap()).unwrap();
+        assert_eq!(back.staging_results, d.staging_results);
+        assert_eq!(back.tooth_speed, d.tooth_speed);
+        // back to the initial position: the aligners and their result go, the slowed tooth stays
+        let (reset, out) = exec("aligners.planning.setup.reset", &slow, Value::Null).unwrap();
+        assert_eq!(out["cleared"], json!(["setup", "stages"]));
+        let r = data_of(&reset);
+        assert!(r.stages.is_empty() && r.staging_results.is_empty());
+        assert_eq!(r.tooth_speed, d.tooth_speed);
     }
 }

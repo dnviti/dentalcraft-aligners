@@ -22,7 +22,7 @@ use dc_command::{CommandError, JobCtx};
 use dc_i18n::Lang as UiLang;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::export::provider::Quality;
-use dca_algo::schedule::Lang;
+use dca_algo::schedule::{Lang, Policy};
 use dca_algo::teeth::Which;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -181,12 +181,18 @@ fn run_bite(
 pub(crate) struct AlignersParams {
     /// Arches (default all the arches with a final position).
     arch: Which,
-    /// Delivery date of the first aligner, `YYYY-MM-DD` (default today).
+    /// Delivery date of the first aligner, `YYYY-MM-DD` (default: the case
+    /// settings, else today).
     start_date: Option<String>,
     /// Days of wear of each aligner (default: the case settings).
     interval_days: Option<u32>,
+    /// Interval policy, `fixed` or `adaptive` (default: the case settings).
+    policy: Option<Policy>,
 }
 
+/// The staging with the settings of the case (and its slowed teeth), then
+/// the calendar with the start date, days and policy given, or else those
+/// of the case settings.
 fn run_aligners(
     state: &CaseState,
     params: AlignersParams,
@@ -200,6 +206,9 @@ fn run_aligners(
     }
     if let Some(n) = params.interval_days {
         calendar.insert("interval_days".to_owned(), json!(n));
+    }
+    if let Some(p) = params.policy {
+        calendar.insert("policy".to_owned(), json!(p));
     }
     let steps = [
         Step::new(

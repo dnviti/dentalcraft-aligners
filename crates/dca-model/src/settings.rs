@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// How the movement is distributed over the aligners (old `staging.py`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StagingPattern {
     /// Chosen from the complexity of the case.
@@ -22,7 +22,7 @@ pub enum StagingPattern {
 }
 
 /// Periodontal condition; reduces the movement per aligner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PerioStage {
     /// Healthy periodontium.
@@ -48,8 +48,12 @@ impl PerioStage {
     }
 }
 
-/// Limits and options of the staging.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Limits and options of the staging (the plugin's scene settings,
+/// `props.py:470-498`, read by `case_plan.staging_params`), with the
+/// plugin's defaults. The automatic staging uses them for every parameter it
+/// is not given; `aligners.settings.staging` changes them inside the ranges
+/// of the plugin's sliders ([`StagingSettings::NUMBERS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StagingSettings {
     /// Largest translation per aligner (mm).
@@ -73,6 +77,8 @@ pub struct StagingSettings {
     pub collision_check: bool,
     /// Interpenetration of adjacent crowns tolerated at a stage (mm).
     pub collision_tol_mm: f64,
+    /// Increase the final movement by the overcorrection fractions.
+    pub overcorrection: bool,
 }
 
 impl Default for StagingSettings {
@@ -88,9 +94,83 @@ impl Default for StagingSettings {
             pattern: StagingPattern::Auto,
             collision_check: true,
             collision_tol_mm: 0.10,
+            overcorrection: false,
         }
     }
 }
+
+impl StagingSettings {
+    /// The numeric settings with the range of the plugin's slider
+    /// (`props.py`): field name, smallest and largest value.
+    pub const NUMBERS: [(&'static str, f64, f64); 7] = [
+        ("step_linear_mm", 0.05, 0.5),
+        ("step_vertical_mm", 0.05, 0.5),
+        ("step_rotation_deg", 0.25, 4.0),
+        ("step_rotation_round_deg", 0.25, 4.0),
+        ("step_angular_deg", 0.1, 3.0),
+        ("max_crown_step_mm", 0.05, 0.6),
+        ("collision_tol_mm", 0.0, 0.5),
+    ];
+
+    /// The numeric setting `name` (a name of [`StagingSettings::NUMBERS`]).
+    pub fn number(&self, name: &str) -> Option<f64> {
+        let mut copy = *self;
+        copy.number_mut(name).copied()
+    }
+
+    /// Sets the numeric setting `name`; `false` when there is none.
+    pub fn set_number(&mut self, name: &str, v: f64) -> bool {
+        match self.number_mut(name) {
+            Some(slot) => {
+                *slot = v;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The first numeric setting outside its range (or not finite): its
+    /// name, value and range.
+    pub fn out_of_range(&self) -> Option<(&'static str, f64, f64, f64)> {
+        Self::NUMBERS.iter().find_map(|&(name, lo, hi)| {
+            let v = self.number(name)?;
+            (!v.is_finite() || v < lo - 1e-9 || v > hi + 1e-9).then_some((name, v, lo, hi))
+        })
+    }
+
+    fn number_mut(&mut self, name: &str) -> Option<&mut f64> {
+        Some(match name {
+            "step_linear_mm" => &mut self.step_linear_mm,
+            "step_vertical_mm" => &mut self.step_vertical_mm,
+            "step_rotation_deg" => &mut self.step_rotation_deg,
+            "step_rotation_round_deg" => &mut self.step_rotation_round_deg,
+            "step_angular_deg" => &mut self.step_angular_deg,
+            "max_crown_step_mm" => &mut self.max_crown_step_mm,
+            "collision_tol_mm" => &mut self.collision_tol_mm,
+            _ => return None,
+        })
+    }
+}
+
+/// How the days of wear of each aligner are chosen (the plugin's
+/// `interval_policy`, `props.py:728-732`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IntervalPolicy {
+    /// Every aligner for the same number of days (`interval_days`).
+    #[default]
+    Fixed,
+    /// 7 or 14 days, depending on the movements of the aligner.
+    Adaptive,
+}
+
+/// Range of the days each aligner is worn (the plugin's `interval_days`
+/// slider, `props.py:499`).
+pub const INTERVAL_DAYS: (u32, u32) = (5, 21);
+
+/// Relative speed of a slowed tooth (the plugin's `oa.tooth_speed`,
+/// `ops_manual.py:978`): smallest and largest value; 1 is the normal speed.
+pub const TOOTH_SPEED: (f64, f64) = (0.2, 1.0);
 
 /// Shape of the aligner's edge (old `trim_mode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -503,8 +583,14 @@ impl SetupSettings {
 pub struct Settings {
     /// Staging limits and options.
     pub staging: StagingSettings,
-    /// Days each aligner is worn.
+    /// Days each aligner is worn with the fixed calendar
+    /// ([`INTERVAL_DAYS`]).
     pub interval_days: u32,
+    /// How the days of wear of each aligner are chosen.
+    pub interval_policy: IntervalPolicy,
+    /// Delivery date of the first aligner, `YYYY-MM-DD` (the plugin's
+    /// `start_date`); `None` is the day the calendar is made.
+    pub start_date: Option<String>,
     /// Required hours of wear per day.
     pub wear_hours: f64,
     /// Thickness of the aligner shell (mm).
@@ -526,6 +612,8 @@ impl Default for Settings {
         Self {
             staging: StagingSettings::default(),
             interval_days: 14,
+            interval_policy: IntervalPolicy::Fixed,
+            start_date: None,
             wear_hours: 22.0,
             shell_thickness_mm: 1.0,
             clearance_mm: 0.0,
@@ -578,6 +666,57 @@ mod tests {
         assert_eq!(s.number("nothing"), None);
         s.contact_tol_mm = f64::NAN;
         assert_eq!(s.out_of_range().map(|o| o.0), Some("contact_tol_mm"));
+    }
+
+    #[test]
+    fn every_staging_number_has_a_range_and_one_slot() {
+        let mut s = StagingSettings::default();
+        for (name, lo, hi) in StagingSettings::NUMBERS {
+            assert!(lo < hi, "{name}");
+            let v = s.number(name).unwrap();
+            assert!((lo..=hi).contains(&v), "{name} default {v}");
+            assert!(s.set_number(name, hi + 0.01));
+            assert_eq!(s.out_of_range().map(|o| o.0), Some(name));
+            assert!(s.set_number(name, lo - 0.01));
+            assert_eq!(s.out_of_range().map(|o| o.0), Some(name));
+            assert!(s.set_number(name, v));
+        }
+        assert!(s.out_of_range().is_none());
+        assert!(!s.set_number("pattern", 1.0));
+        s.step_angular_deg = f64::INFINITY;
+        assert_eq!(s.out_of_range().map(|o| o.0), Some("step_angular_deg"));
+    }
+
+    #[test]
+    fn staging_and_calendar_settings_saved_without_them_load_the_plugin_defaults() {
+        // a case saved before the overcorrection, the policy and the start date
+        let s: Settings = serde_json::from_str(
+            r#"{"staging":{"step_linear_mm":0.2,"pattern":"max_velocity"},"interval_days":10}"#,
+        )
+        .unwrap();
+        assert_eq!(s.staging.step_linear_mm, 0.2);
+        assert_eq!(s.staging.pattern, StagingPattern::MaxVelocity);
+        assert!(!s.staging.overcorrection);
+        assert_eq!(s.staging.max_crown_step_mm, 0.33);
+        assert_eq!(s.interval_days, 10);
+        assert_eq!(s.interval_policy, IntervalPolicy::Fixed);
+        assert_eq!(s.start_date, None);
+        // and they go through the file as they are
+        let s = Settings {
+            interval_policy: IntervalPolicy::Adaptive,
+            start_date: Some("2026-01-05".to_owned()),
+            staging: StagingSettings {
+                overcorrection: true,
+                perio: PerioStage::Stage2,
+                ..StagingSettings::default()
+            },
+            ..Settings::default()
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["interval_policy"], "adaptive");
+        assert_eq!(v["staging"]["perio"], "stage2");
+        assert_eq!(serde_json::from_value::<Settings>(v).unwrap(), s);
+        assert!((INTERVAL_DAYS.0..=INTERVAL_DAYS.1).contains(&Settings::default().interval_days));
     }
 
     #[test]

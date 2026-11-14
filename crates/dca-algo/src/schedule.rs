@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dc_case::Fdi;
-use dca_model::Stage;
+use dca_model::{IntervalPolicy, Stage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -142,6 +142,15 @@ pub enum Policy {
     Fixed,
     /// 7 or 14 days, depending on the movements of the aligner.
     Adaptive,
+}
+
+impl From<IntervalPolicy> for Policy {
+    fn from(p: IntervalPolicy) -> Self {
+        match p {
+            IntervalPolicy::Fixed => Policy::Fixed,
+            IntervalPolicy::Adaptive => Policy::Adaptive,
+        }
+    }
 }
 
 /// Language of the text of the calendar.

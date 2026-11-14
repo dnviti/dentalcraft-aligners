@@ -6,7 +6,10 @@ use dc_case::{BlobRef, Fdi, Pose, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{AlignerBite, ComponentEdits, RampKind, SCHEMA_VERSION, Settings, TrimParams, Visit};
+use crate::{
+    AlignerBite, ComponentEdits, RampKind, SCHEMA_VERSION, Settings, StagingPattern, TrimParams,
+    Visit,
+};
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
 /// number. Seeds tell the segmentation which teeth exist and where.
@@ -309,6 +312,29 @@ impl Stage {
     }
 }
 
+/// What the last automatic staging of an arch gave (the parts of the
+/// plugin's `plan_json` its page "Allineatori" shows). It goes with the
+/// aligners of the arch it describes.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StagingSummary {
+    /// Aligners of the arch.
+    pub aligners: u32,
+    /// The pattern used (never `auto`: the one the automatic choice took).
+    pub pattern: StagingPattern,
+    /// Complexity level of the case the pattern was chosen from (the name
+    /// `dca_algo::staging::Level` serialises to: `easy`, `moderate`,
+    /// `difficult`, `very_complex`).
+    pub level: String,
+    /// The slowed teeth and their speed (the teeth at the normal speed are
+    /// not listed).
+    pub slowed: BTreeMap<Fdi, f64>,
+    /// Collisions between neighbouring crowns left in the aligners.
+    pub collisions_left: u32,
+    /// The final movement was increased by the overcorrection fractions.
+    pub overcorrection: bool,
+}
+
 /// What one automatic separation of an arch gave.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SegmentationRun {
@@ -345,6 +371,16 @@ pub struct AlignersState {
     pub tooth_geometry: BTreeMap<Fdi, ToothMeasures>,
     /// The aligners, in order.
     pub stages: Vec<Stage>,
+    /// What the last automatic staging of each arch gave (the result line
+    /// of the inspector of "Aligners"). It goes with the aligners of the
+    /// arch.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub staging_results: BTreeMap<ScanRole, StagingSummary>,
+    /// The teeth slowed by hand in the staging and their relative speed
+    /// ([`crate::TOOTH_SPEED`], below 1; the plugin's `speed_json`, set by
+    /// `oa.tooth_speed`): their limits per aligner are multiplied by it.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tooth_speed: BTreeMap<Fdi, f64>,
     /// Trim line parameters.
     pub trim: TrimParams,
     /// Settings.
@@ -795,9 +831,10 @@ impl AlignersState {
     /// Call it when the labels of an arch are made again from the seeds (the
     /// automatic separation): the teeth flagged for a rebuild, the tooth
     /// frames, measures, closed crowns and gingiva of the arch, its space
-    /// analysis, the setup, its poses in every stage and its ramps describe
-    /// the old teeth, and the results that need both arches (Bolton,
-    /// complexity score, automatic ramps) go with them. The doubts of the
+    /// analysis, the setup, its poses in every stage (with the result of its
+    /// last staging and its teeth slowed by hand, under `stages`) and its
+    /// ramps describe the old teeth, and the results that need both arches
+    /// (Bolton, complexity score, automatic ramps) go with them. The doubts of the
     /// check of the separated teeth and the result of the last separation of
     /// the arch go too, without an id (they were about the old labels).
     pub fn clear_label_dependents(&mut self, role: ScanRole) -> Vec<&'static str> {
@@ -849,7 +886,9 @@ impl AlignersState {
             | setup.results.remove(&role).is_some();
         note("setup", held);
 
-        note("stages", self.drop_stages_of(role));
+        // the teeth slowed by hand were teeth of the old labels
+        let slowed = drop_teeth(&mut self.tooth_speed, role);
+        note("stages", self.drop_stages_of(role) | slowed);
 
         let ramps = &mut self.aligner_bite.ramps.ramps;
         let n = ramps.len();
@@ -891,11 +930,13 @@ impl AlignersState {
         cleared
     }
 
-    /// The poses and IPR of the arch `role` leave every stage; `true` when
-    /// some were there. The other arch keeps its own series, not the
-    /// repeats of its last pose that kept up with this arch (the staging's
-    /// `merge_arch`), and the stages left empty go.
+    /// The poses and IPR of the arch `role` leave every stage, with the
+    /// result of its last staging; `true` when some were there. The other
+    /// arch keeps its own series, not the repeats of its last pose that kept
+    /// up with this arch (the staging's `merge_arch`), and the stages left
+    /// empty go.
     fn drop_stages_of(&mut self, role: ScanRole) -> bool {
+        let summary = self.staging_results.remove(&role).is_some();
         let mut held = false;
         for s in &mut self.stages {
             let n = s.ipr.len();
@@ -910,7 +951,7 @@ impl AlignersState {
         }
         self.stages
             .retain(|s| !s.poses.is_empty() || !s.ipr.is_empty());
-        held
+        held || summary
     }
 
     /// Replaces the seeds of the arch `role` with `seeds` (the other arch

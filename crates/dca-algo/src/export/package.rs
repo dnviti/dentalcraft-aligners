@@ -67,8 +67,8 @@ pub struct FullParams {
     pub start_date: Option<String>,
     /// Days of wear of each aligner (default: the one of the case, 14).
     pub interval_days: Option<u32>,
-    /// Interval policy of the calendar.
-    pub policy: Policy,
+    /// Interval policy of the calendar (default fixed).
+    pub policy: Option<Policy>,
     /// Language of the report, the patient programmes and the calendar.
     pub lang: Lang,
     /// Name of the case in the calendar events and the report.
@@ -715,7 +715,7 @@ fn run_inner(
             "title": params.title,
             "start": first.start.to_iso(),
             "interval_days": params.interval_days.unwrap_or(case.state.settings.interval_days),
-            "policy": params.policy,
+            "policy": params.policy.unwrap_or_default(),
             "lang": params.lang,
             "workflow": params.workflow,
             "wear_hours": first.wear_hours,

@@ -87,8 +87,8 @@ pub struct Params {
     pub start_date: Option<String>,
     /// Days of wear of each aligner (default: the evidence value, 14).
     pub interval_days: Option<u32>,
-    /// Interval policy of the calendar.
-    pub policy: Policy,
+    /// Interval policy of the calendar (default fixed).
+    pub policy: Option<Policy>,
     /// Language of the text of the calendar.
     pub lang: Lang,
     /// Name of the case in the calendar events.
@@ -102,7 +102,7 @@ impl Default for Params {
             dir: String::new(),
             start_date: None,
             interval_days: None,
-            policy: cal.policy,
+            policy: None,
             lang: cal.lang,
             title: "aligners".to_owned(),
         }
@@ -460,7 +460,7 @@ fn plan_calendars(
         interval_days: params
             .interval_days
             .unwrap_or_else(|| schedule::Params::default().interval_days),
-        policy: params.policy,
+        policy: params.policy.unwrap_or_default(),
         lang: params.lang,
         ..schedule::Params::default()
     };

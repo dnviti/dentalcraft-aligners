@@ -842,6 +842,8 @@ fn run_replan(
         series.push(st);
     }
     merge_arch(&mut data.stages, arch, &series, &seq);
+    // the result line of the automatic staging described the plan replaced here
+    data.staging_results.remove(&arch.role());
     let total = data.stages.len();
 
     let teeth_out: Map<String, Value> = plan

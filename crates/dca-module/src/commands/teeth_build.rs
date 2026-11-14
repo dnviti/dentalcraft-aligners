@@ -158,7 +158,8 @@ fn clear_plan(data: &mut AlignersState, arch: Arch, setup: bool) -> (bool, bool)
         s.lines.remove(&arch.role());
         setup_cleared = before != (s.poses.len(), s.locked.len(), s.ipr.len(), s.lines.len());
     }
-    let mut stages_cleared = false;
+    // the result of the last staging of the arch goes with its aligners
+    let mut stages_cleared = data.staging_results.remove(&arch.role()).is_some();
     for st in &mut data.stages {
         let before = (st.poses.len(), st.ipr.len());
         st.poses.retain(|f, _| !mine(f));

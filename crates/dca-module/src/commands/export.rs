@@ -5,7 +5,8 @@
 //!   STL (`upper_stage_00.stl` is the initial situation), `stages.csv` with
 //!   the movement of every tooth at every stage and the dates, and
 //!   `visits.ics` with the aligner changes of both arches. Parameters:
-//!   `dir`, `start_date`, `interval_days`, `policy`, `lang`.
+//!   `dir`, `start_date`, `interval_days`, `policy`, `lang`; the calendar
+//!   values not given are those of the case settings.
 //! * `aligners.output.report` is the full export package: the models and
 //!   the aligners of every stage, the print check of every mesh, the tables
 //!   and calendars, the programme of the patient for each arch, the HTML
@@ -53,7 +54,7 @@ use dca_algo::export::report::Renders;
 use dca_algo::export::{self, ArchSeries, GumDeform};
 use dca_algo::schedule;
 use dca_algo::teeth;
-use dca_model::AlignersState;
+use dca_model::{AlignersState, Settings};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -264,6 +265,21 @@ fn export_error(e: export::ExportError) -> CommandError {
     }
 }
 
+/// The start date, days and policy of the calendar not given: those of the
+/// case settings (no start date in the case either: today, in the export).
+fn calendar_defaults(
+    start_date: &mut Option<String>,
+    interval_days: &mut Option<u32>,
+    policy: &mut Option<schedule::Policy>,
+    settings: &Settings,
+) {
+    if start_date.is_none() {
+        start_date.clone_from(&settings.start_date);
+    }
+    interval_days.get_or_insert(settings.interval_days);
+    policy.get_or_insert(settings.interval_policy.into());
+}
+
 fn run_export(
     state: &CaseState,
     mut params: export::Params,
@@ -279,9 +295,12 @@ fn run_export(
             "dir: the target directory is required".to_owned(),
         ));
     }
-    params
-        .interval_days
-        .get_or_insert(data.settings.interval_days);
+    calendar_defaults(
+        &mut params.start_date,
+        &mut params.interval_days,
+        &mut params.policy,
+        &data.settings,
+    );
     let arches = prepare(state, &data)?;
     let input = input(&arches, &data);
     ctx.check_cancelled()?;
@@ -371,9 +390,12 @@ fn run_report(
         ));
     }
     let arches = prepare(state, &data)?;
-    params
-        .interval_days
-        .get_or_insert(data.settings.interval_days);
+    calendar_defaults(
+        &mut params.start_date,
+        &mut params.interval_days,
+        &mut params.policy,
+        &data.settings,
+    );
     let input = input(&arches, &data);
     let renders = if params.report && params.embed_renders {
         render_views(state, &data)

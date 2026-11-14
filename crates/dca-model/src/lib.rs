@@ -27,14 +27,15 @@ pub use bite_report::{
 pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale, tooth_centre};
 pub use migrate::{ModelError, migrate};
 pub use settings::{
-    FindTeethSettings, PerioStage, SegmentationSettings, Settings, SetupIprZone, SetupLeveling,
-    SetupMidline, SetupScope, SetupSettings, SpacePriority, StagingPattern, StagingSettings,
-    StudyBaseSettings, StudyBaseStyle, TrimMode, TrimParams,
+    FindTeethSettings, INTERVAL_DAYS, IntervalPolicy, PerioStage, SegmentationSettings, Settings,
+    SetupIprZone, SetupLeveling, SetupMidline, SetupScope, SetupSettings, SpacePriority,
+    StagingPattern, StagingSettings, StudyBaseSettings, StudyBaseStyle, TOOTH_SPEED, TrimMode,
+    TrimParams,
 };
 pub use state::{
     AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed,
-    SegmentationRun, Setup, SetupSummary, Stage, TeethBasis, TeethChange, ToothFrame,
-    ToothMeasures, other_arch_fdi, other_arch_label,
+    SegmentationRun, Setup, SetupSummary, Stage, StagingSummary, TeethBasis, TeethChange,
+    ToothFrame, ToothMeasures, other_arch_fdi, other_arch_label,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 
