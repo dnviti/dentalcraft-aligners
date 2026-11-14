@@ -26,10 +26,12 @@
 //! its solids and teeth corrected by hand (the plugin rebuilds `only` the
 //! teeth of `oa_label_dirty`; the solids then follow every label change),
 //! otherwise in the first. An empty `teeth`, or teeth of an arch with no
-//! labels, are refused before anything runs. Then the
-//! diagnosis runs on the new teeth (`case_plan.analyze`). The output lists
-//! every step and what was done: the teeth and the gingiva of each arch,
-//! what was cleared and whether the diagnosis ran.
+//! labels, are refused before anything runs. Without an arch asked, every
+//! arch with a scan and labels is built; an arch with a scan and no labels
+//! is named in `arches` (`built: false` and the reason), never skipped in
+//! silence. Then the diagnosis runs on the new teeth (`case_plan.analyze`).
+//! The output lists every step and what was done: the teeth and the gingiva
+//! of each arch, what was cleared and whether the diagnosis ran.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -236,8 +238,10 @@ pub(super) fn run_teeth(
         .map(|t| asked_teeth(t, params.arch))
         .transpose()?;
 
-    // how each arch is built
+    // how each arch is built; an arch with a scan that cannot be built is
+    // named in the output with the reason, never skipped in silence
     let mut modes: BTreeMap<Arch, Mode> = BTreeMap::new();
+    let mut not_built: BTreeMap<Arch, String> = BTreeMap::new();
     for arch in params.arch.arches() {
         let Some(labelled) = labelled_teeth(state, &data, arch)? else {
             let named = asked
@@ -245,6 +249,11 @@ pub(super) fn run_teeth(
                 .is_some_and(|a| a.iter().any(|f| Arch::of(*f) == arch));
             if params.arch != Which::All || named {
                 return Err(messages::not_segmented(arch));
+            }
+            if state.case.scan(arch.role()).is_some() {
+                let word = messages::arch_word(arch);
+                let reason = messages::tr("aligners-err-arch-not-segmented", &[("arch", &word)]);
+                not_built.insert(arch, reason);
             }
             continue;
         };
@@ -399,11 +408,18 @@ pub(super) fn run_teeth(
         report.insert(
             arch_name(arch).to_owned(),
             json!({
+                "built": true,
                 "mode": if matches!(mode, Mode::All) { "all" } else { "some" },
                 "teeth": teeth.len(),
                 "rebuilt": rebuilt,
                 "gingiva": d.gingiva.contains_key(&arch.role()),
             }),
+        );
+    }
+    for (arch, reason) in not_built {
+        report.insert(
+            arch_name(arch).to_owned(),
+            json!({ "built": false, "reason": reason }),
         );
     }
     let any_tooth = !d.tooth_frames.is_empty();
@@ -483,6 +499,42 @@ mod tests {
         assert!(d.gingiva.contains_key(&ScanRole::Lower));
         // one undoable change: the first state is untouched
         assert_eq!(aligners_data(&s).unwrap(), before);
+    }
+
+    #[test]
+    fn every_arch_is_built_and_an_arch_that_cannot_be_is_named() {
+        let both = super::super::occlusion::tests::two_demo_arches();
+        let (next, out) = exec(BUILD, &both, Value::Null).unwrap();
+        let d = aligners_data(&next).unwrap();
+        for (arch, role) in [("upper", ScanRole::Upper), ("lower", ScanRole::Lower)] {
+            assert_eq!(out["arches"][arch]["built"], true, "{arch}");
+            assert!(
+                d.crowns
+                    .keys()
+                    .any(|f| f.is_upper() == (role == ScanRole::Upper))
+            );
+            assert!(d.gingiva.contains_key(&role), "{arch}");
+            assert!(!d.teeth_out_of_date(role), "{arch}");
+        }
+        // the upper arch without its colours: the lower one is built, the
+        // upper one is named with the reason
+        let mut s = both.clone();
+        let mut d = aligners_data(&s).unwrap();
+        d.labels.remove(&ScanRole::Upper);
+        s.set_module(MODULE_ID, ModuleState::new(d));
+        let (next, out) = exec(BUILD, &s, Value::Null).unwrap();
+        assert_eq!(out["arches"]["lower"]["built"], true);
+        assert_eq!(out["arches"]["upper"]["built"], false);
+        let reason = out["arches"]["upper"]["reason"].as_str().unwrap();
+        assert!(reason.contains("upper"), "{reason}");
+        let d = aligners_data(&next).unwrap();
+        assert!(d.crowns.keys().all(|f| !f.is_upper()));
+        // an arch with no scan is not an arch to build
+        let lower = exec("aligners.demo", &CaseState::default(), Value::Null)
+            .unwrap()
+            .0;
+        let (_, out) = exec(BUILD, &lower, Value::Null).unwrap();
+        assert!(out["arches"].get("upper").is_none(), "{out}");
     }
 
     /// `p` moved by the frame `frame` into the world.

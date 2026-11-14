@@ -135,9 +135,11 @@ fn move_scans(next: &mut CaseState, role: ScanRole, deltas: &[DMat4]) -> Vec<Blo
 }
 
 /// Moves the scan of `arch` with its labels, seeds, tooth frames and
-/// measures, closed crowns, gingiva and setup arch line by the
-/// case-coordinate rigid move `delta`, and moves the scans of the bite
-/// (role `Bite`, in order) by `bite_deltas`. Unused blobs are dropped.
+/// measures, closed crowns (a size corrected by hand stays with its moved
+/// solid), gingiva, setup arch line and the record of what its 3D teeth were
+/// built from (so a move alone never leaves them out of date) by the
+/// case-coordinate rigid move `delta`, and moves the scans of the bite (role
+/// `Bite`, in order) by `bite_deltas`. Unused blobs are dropped.
 pub(crate) fn move_arch(
     state: &CaseState,
     mut data: AlignersState,
@@ -148,12 +150,23 @@ pub(crate) fn move_arch(
     let mut next = state.clone();
     let mut stale = move_scans(&mut next, arch.role(), std::slice::from_ref(delta));
     stale.extend(move_scans(&mut next, ScanRole::Bite, bite_deltas));
-    if let Some(old) = data.labels.get(&arch.role()).copied()
+    let old_labels = data.labels.get(&arch.role()).copied();
+    if let Some(old) = old_labels
         && let Some(mesh) = next.blobs.get(&old).cloned()
     {
         let r = next.blobs.insert(moved_mesh(&mesh, delta));
         data.labels.insert(arch.role(), r);
         stale.push(old);
+    }
+    // the 3D teeth move with the arch: what they were built from moves too
+    let new_labels = data.labels.get(&arch.role()).copied();
+    if let Some(basis) = data.teeth_basis.get_mut(&arch.role()) {
+        if basis.labels == old_labels {
+            basis.labels = new_labels;
+        }
+        for s in &mut basis.seeds {
+            s.position = delta.transform_point3(s.position);
+        }
     }
     // the closed crowns and the gingiva are case-coordinate blobs too
     let blobs: Vec<BlobRef> = data
@@ -171,6 +184,8 @@ pub(crate) fn move_arch(
                     *v = r;
                 }
             }
+            // a size corrected by hand holds on the moved solid
+            data.components.crown_moved(old, r);
             stale.push(old);
         }
     }
@@ -461,5 +476,38 @@ pub(crate) mod tests {
         // no stale blob left
         let used = next.referenced_blobs();
         assert!(next.blobs.iter().all(|(r, _)| used.contains(r)));
+    }
+
+    #[test]
+    fn moving_an_arch_keeps_its_3d_teeth_up_to_date() {
+        let built = exec("aligners.teeth.build", &two_demo_arches(), Value::Null).0;
+        let data = |s: &CaseState| s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+        let stale =
+            |d: &AlignersState| [ScanRole::Upper, ScanRole::Lower].map(|r| d.teeth_out_of_date(r));
+        assert_eq!(stale(&data(&built)), [false, false]);
+        // the virtual bite moves the upper arch with its 3D teeth: its colours
+        // and marks are moved, not changed, so both arches stay up to date
+        let (next, _) = exec("aligners.occlusion.virtual-bite", &built, Value::Null);
+        let d = data(&next);
+        assert_ne!(
+            d.labels[&ScanRole::Upper],
+            data(&built).labels[&ScanRole::Upper]
+        );
+        assert_eq!(stale(&d), [false, false]);
+        // also once the project is reopened
+        let back: AlignersState =
+            serde_json::from_value(serde_json::to_value(&d).unwrap()).unwrap();
+        assert_eq!(stale(&back), [false, false]);
+        // a mark moved after the build: still out of date once the arch is moved
+        let mut d = data(&built);
+        let mark = d.seeds.iter_mut().find(|s| s.fdi.is_upper()).unwrap();
+        mark.position.x += 0.5;
+        assert_eq!(stale(&d), [true, false]);
+        let delta = DMat4::from_rotation_translation(
+            DQuat::from_rotation_z(0.1),
+            glam::DVec3::new(1.0, 2.0, 3.0),
+        );
+        let moved = move_arch(&built, d, Arch::Upper, &delta, &[]);
+        assert_eq!(stale(&data(&moved)), [true, false]);
     }
 }

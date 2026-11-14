@@ -6,7 +6,7 @@ use dc_case::{BlobRef, Fdi, Pose, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{AlignerBite, RampKind, SCHEMA_VERSION, Settings, TrimParams, Visit};
+use crate::{AlignerBite, ComponentEdits, RampKind, SCHEMA_VERSION, Settings, TrimParams, Visit};
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
 /// number. Seeds tell the segmentation which teeth exist and where.
@@ -31,6 +31,20 @@ pub struct TeethBasis {
     pub seeds: Vec<Seed>,
     /// The teeth of the arch marked missing.
     pub missing: Vec<Fdi>,
+}
+
+/// Why the built teeth of an arch are out of date
+/// ([`AlignersState::teeth_changes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeethChange {
+    /// Teeth corrected by hand wait to be rebuilt.
+    HandCorrected,
+    /// The tooth colours (the labels blob) changed.
+    Colours,
+    /// The tooth marks changed (placed, moved, deleted or renumbered).
+    Marks,
+    /// Teeth were marked missing or present.
+    Missing,
 }
 
 /// Rest frame of a 3D tooth.
@@ -250,6 +264,9 @@ pub struct AlignersState {
     /// version has none: its teeth are out of date only while teeth
     /// corrected by hand (`dirty`) wait to be rebuilt.
     pub teeth_basis: BTreeMap<ScanRole, TeethBasis>,
+    /// What was changed by hand on the 3D components with the gizmo: the
+    /// moves of the scans (with their arch) and the sizes of built teeth.
+    pub components: ComponentEdits,
 }
 
 /// Ids [`AlignersState::clear_arch`] (and so the `scan_replaced` hook) can
@@ -439,15 +456,36 @@ impl AlignersState {
     /// brush, the clean-up, a mark placed, moved or deleted, a number
     /// changed, a tooth marked missing or present, the numbering in order,
     /// the marks cleared, Find the teeth or the separation run again).
+    /// Moving the arch rigidly (the bite) moves its record along, so it is
+    /// no change.
     pub fn teeth_out_of_date(&self, role: ScanRole) -> bool {
+        !self.teeth_changes(role).is_empty()
+    }
+
+    /// What changed in the arch `role` since its teeth were built, in the
+    /// order of [`TeethChange`]; empty when the arch has no built teeth or
+    /// they are up to date ([`AlignersState::teeth_out_of_date`]).
+    pub fn teeth_changes(&self, role: ScanRole) -> Vec<TeethChange> {
+        let mut out = Vec::new();
         if !self.crowns.keys().any(|f| in_arch(*f, role)) {
-            return false;
+            return out;
         }
-        self.dirty.iter().any(|f| in_arch(*f, role))
-            || self
-                .teeth_basis
-                .get(&role)
-                .is_some_and(|b| *b != self.teeth_basis_now(role))
+        if self.dirty.iter().any(|f| in_arch(*f, role)) {
+            out.push(TeethChange::HandCorrected);
+        }
+        if let Some(b) = self.teeth_basis.get(&role) {
+            let now = self.teeth_basis_now(role);
+            if b.labels != now.labels {
+                out.push(TeethChange::Colours);
+            }
+            if b.seeds != now.seeds {
+                out.push(TeethChange::Marks);
+            }
+            if b.missing != now.missing {
+                out.push(TeethChange::Missing);
+            }
+        }
+        out
     }
 
     /// Drops what is computed from the labels of the arch `role`, keeping
@@ -935,30 +973,34 @@ mod tests {
         let built = st.clone();
         assert!(!built.teeth_out_of_date(ScanRole::Lower));
         type Change = fn(&mut AlignersState);
-        let changes: [(&str, Change); 6] = [
-            ("colours", |s| {
+        use TeethChange::{Colours, Marks, Missing};
+        let changes: [(&str, TeethChange, Change); 6] = [
+            ("colours", Colours, |s| {
                 s.labels
                     .insert(ScanRole::Lower, BlobRef::of_bytes(b"painted"));
             }),
-            ("mark moved", |s| s.seeds[1].position.x += 0.25),
-            ("mark deleted", |s| {
+            ("mark moved", Marks, |s| s.seeds[1].position.x += 0.25),
+            ("mark deleted", Marks, |s| {
                 s.seeds.remove(1);
             }),
-            ("mark added", |s| {
+            ("mark added", Marks, |s| {
                 s.seeds.push(Seed {
                     fdi: Fdi::new(33).unwrap(),
                     position: DVec3::ZERO,
                 });
             }),
-            ("number changed", |s| s.seeds[1].fdi = Fdi::new(34).unwrap()),
-            ("missing", |s| {
+            ("number changed", Marks, |s| {
+                s.seeds[1].fdi = Fdi::new(34).unwrap()
+            }),
+            ("missing", Missing, |s| {
                 s.missing.insert(Fdi::new(35).unwrap());
             }),
         ];
-        for (what, change) in changes {
+        for (what, why, change) in changes {
             let mut s = built.clone();
             change(&mut s);
             assert!(s.teeth_out_of_date(ScanRole::Lower), "{what}");
+            assert_eq!(s.teeth_changes(ScanRole::Lower), [why], "{what}");
             assert!(!s.teeth_out_of_date(ScanRole::Upper), "{what}: upper");
             // it comes back from the project file
             let back: AlignersState =
@@ -974,7 +1016,10 @@ mod tests {
         s.labels
             .insert(ScanRole::Lower, BlobRef::of_bytes(b"brushed"));
         s.dirty.insert(f31);
-        assert!(s.teeth_out_of_date(ScanRole::Lower));
+        assert_eq!(
+            s.teeth_changes(ScanRole::Lower),
+            [TeethChange::HandCorrected, TeethChange::Colours]
+        );
         s.dirty.remove(&f31);
         s.rebuilt_by_hand(ScanRole::Lower);
         assert!(!s.teeth_out_of_date(ScanRole::Lower));
