@@ -81,6 +81,12 @@ fn moved(mesh: &TriMesh, m: &DMat4) -> TriMesh {
 struct Stage {
     to_arch: DMat4,
     teeth: Vec<TriMesh>,
+    /// The tooth number of every tooth of `teeth`.
+    fdis: Vec<Fdi>,
+    /// Every tooth of `teeth` in its own frame, its placement (tooth →
+    /// world) and the count of its first vertices that are scanned
+    /// (`closed_tooth_info`).
+    local: Vec<(TriMesh, DMat4, usize)>,
     gingiva: TriMesh,
     n_stages: usize,
 }
@@ -96,9 +102,11 @@ fn stage(name: &str, k: Option<usize>) -> Stage {
     let n_stages = staging["plan"]["n_stages"].as_u64().unwrap() as usize;
     let k = k.unwrap_or(n_stages);
     let mut teeth = Vec::new();
+    let mut fdis = Vec::new();
+    let mut locals = Vec::new();
     for (fdi, qs) in q {
         let f: u8 = fdi.parse().unwrap();
-        assert!(Fdi::new(f).is_ok());
+        fdis.push(Fdi::new(f).unwrap());
         let rest = mat4(&teeth_json["teeth"][fdi]["rest_frame"]);
         let qs = qs.as_array().unwrap();
         let qk: Vec<f64> = qs[k.min(qs.len() - 1)]
@@ -111,7 +119,12 @@ fn stage(name: &str, k: Option<usize>) -> Stage {
             &std::fs::read(dir.join(format!("staging/closed_{fdi}.dcm"))).unwrap(),
         )
         .unwrap();
-        teeth.push(moved(&local, &(arch_frame * rest * local_pose(&qk))));
+        let m = arch_frame * rest * local_pose(&qk);
+        teeth.push(moved(&local, &m));
+        let scanned = staging["closed_tooth_info"][fdi]["crown_vertices"]
+            .as_u64()
+            .unwrap() as usize;
+        locals.push((local, m, scanned));
     }
     let scan = dc_mesh::dcm::decode(&std::fs::read(dir.join("scan.dcm")).unwrap()).unwrap();
     let labels = scan.vertex_labels.clone().unwrap();
@@ -137,6 +150,8 @@ fn stage(name: &str, k: Option<usize>) -> Stage {
     Stage {
         to_arch: rigid_inverse(&arch_frame),
         teeth,
+        fdis,
+        local: locals,
         gingiva: TriMesh::new(positions, tris),
         n_stages,
     }
@@ -210,6 +225,8 @@ fn check(name: &str, k: Option<usize>, params: &Params, thickness_tol: f64) -> f
         gingiva: &st.gingiva,
         cover: &[],
         fdis: &[],
+        covered: None,
+        stumps: &[],
     };
     let t = Instant::now();
     let out = shell::run(&input, params, &design, Outputs::ALL).unwrap();
@@ -424,6 +441,8 @@ fn closed_model_matches_openvdb() {
         gingiva: &st.gingiva,
         cover: &[],
         fdis: &[],
+        covered: None,
+        stumps: &[],
     };
     let parts = shell::model_parts(&input, shell::BASE_HEIGHT_MM).unwrap();
     let dir = std::env::temp_dir().join(format!("dc_vdb_model_{}", std::process::id()));
@@ -460,4 +479,317 @@ fn closed_model_matches_openvdb() {
     println!("deviation from OpenVDB: p99.9 {p999:.4} mm, max {max:.4} mm");
     assert!(p999 < 0.1, "p99.9 {p999} mm");
     assert!(max < 0.5, "max {max} mm");
+}
+
+/// The contact bridges of the port against the plugin's `pair_bridge`
+/// (`golden/bridge_oracle.py`, Blender headless) on the same closed teeth
+/// placed at a stage: the same pairs of teeth are bridged, and every bridge
+/// is the same solid, vertex for vertex.
+///
+/// The plugin runs its float64 queries (`gpu_query` on the GPU): on the CPU
+/// its float32 BVH (mathutils) misses a hit closer to the origin of a ray
+/// than its rounding, which the float64 path finds (demo_upper_mild stage 0,
+/// 23-24: one line starting 4.5e-7 mm inside 23, the bridge 1.3 % larger).
+/// Without the GPU the test is skipped.
+#[test]
+#[ignore = "needs Blender (blender -b), the plugin repository and its GPU queries: run with --release --ignored --nocapture"]
+fn contact_bridges_match_the_plugin() {
+    use dca_algo::anatomy::{Arch, arch_order};
+    use dca_algo::shell::bridge::{self, BridgeParams};
+    use dca_algo::shell::embrasure::Tooth;
+    const VERTEX_TOL_MM: f64 = 1e-9;
+
+    let blender = std::env::var("BLENDER").unwrap_or_else(|_| "blender".into());
+    if std::process::Command::new(&blender)
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        println!("skipped: {blender} not found");
+        return;
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/bridge_oracle.py");
+    let mut bridged = 0;
+    for (name, k) in [
+        ("demo_lower_mild", Some(0)),
+        ("demo_lower_mild", None),
+        ("demo_upper_mild", Some(0)),
+        ("demo_upper_moderate", None),
+    ] {
+        let st = stage(name, k);
+        // the plugin reads the points as float32: the port gets the same
+        let points: Vec<Vec<DVec3>> = st
+            .teeth
+            .iter()
+            .map(|t| {
+                t.positions
+                    .iter()
+                    .map(|p| {
+                        st.to_arch
+                            .transform_point3(p.as_dvec3())
+                            .as_vec3()
+                            .as_dvec3()
+                    })
+                    .collect()
+            })
+            .collect();
+        let placed: Vec<Tooth<'_>> = st
+            .fdis
+            .iter()
+            .zip(&points)
+            .zip(&st.teeth)
+            .map(|((&fdi, points), mesh)| Tooth {
+                fdi,
+                points,
+                tris: &mesh.tris,
+            })
+            .collect();
+        let params = BridgeParams::default();
+        let t = Instant::now();
+        let port = bridge::bridges_by_pair(&placed, &params);
+        let secs = t.elapsed().as_secs_f64();
+
+        // the same teeth, in arch order, through the plugin
+        let dir = std::env::temp_dir().join(format!("dc_bridges_{}_{name}", std::process::id()));
+        let (src, out) = (dir.join("in"), dir.join("out"));
+        std::fs::create_dir_all(&src).unwrap();
+        let order: Vec<Fdi> = arch_order(Arch::of(st.fdis[0]))
+            .into_iter()
+            .filter(|f| st.fdis.contains(f))
+            .collect();
+        for t in &placed {
+            let mesh = TriMesh::new(
+                t.points.iter().map(|p| p.as_vec3()).collect(),
+                t.tris.to_vec(),
+            );
+            write_raw(&mesh, &src.join(format!("tooth_{}", t.fdi.get())));
+        }
+        let lines: Vec<String> = order.iter().map(|f| f.get().to_string()).collect();
+        std::fs::write(src.join("order.txt"), lines.join("\n")).unwrap();
+        let p = serde_json::json!({
+            "reach": params.reach,
+            "gingival": params.gingival,
+            "touch": params.touch,
+            "above": params.above,
+            "inset": params.inset,
+        });
+        std::fs::write(src.join("params.json"), p.to_string()).unwrap();
+        let status = std::process::Command::new(&blender)
+            .args(["-b", "--factory-startup", "-P"])
+            .arg(&script)
+            .arg("--")
+            .arg(&src)
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success(), "blender run failed");
+        let report = json(&out.join("bridges.json"));
+        if report["gpu"].as_bool() != Some(true) {
+            std::fs::remove_dir_all(&dir).unwrap();
+            println!("skipped: the plugin's float64 (GPU) queries are not available");
+            return;
+        }
+        let pairs = report["pairs"].as_array().unwrap();
+        println!(
+            "{name} stage {k:?}: port {secs:.2} s, plugin {:.2} s",
+            report["seconds"].as_f64().unwrap()
+        );
+        let mut failures = Vec::new();
+        for pr in pairs {
+            let (a, b) = (pr["a"].as_u64().unwrap(), pr["b"].as_u64().unwrap());
+            let mine = port
+                .iter()
+                .find(|(x, y, _)| u64::from(x.get()) == a && u64::from(y.get()) == b);
+            let theirs = pr["bridged"].as_bool().unwrap();
+            match (mine, theirs) {
+                (None, false) => {}
+                (Some((_, _, s)), true) => {
+                    bridged += 1;
+                    let stem = out.join(format!("bridge_{a}_{b}"));
+                    let ours = TriMesh::new(s.0.iter().map(|p| p.as_vec3()).collect(), s.1.clone());
+                    assert!(ours.validate().is_watertight(), "{a}-{b}: not closed");
+                    let plugin = read_raw(&stem);
+                    let v64: Vec<DVec3> = std::fs::read(stem.with_extension("v64.bin"))
+                        .unwrap()
+                        .as_chunks::<24>()
+                        .0
+                        .iter()
+                        .map(|c| {
+                            let f = |k: usize| f64::from_le_bytes(c[k..k + 8].try_into().unwrap());
+                            DVec3::new(f(0), f(8), f(16))
+                        })
+                        .collect();
+                    // the same nodes of the same cells: vertex for vertex
+                    if s.1 != plugin.tris || s.0.len() != v64.len() {
+                        let (max, p999) = shell::deviation_stats(&ours, &plugin).unwrap();
+                        println!(
+                            "  {a}-{b}: other cells, surfaces p99.9 {p999:.4} mm, max {max:.4} mm"
+                        );
+                        failures.push(format!("{a}-{b}: other cells"));
+                        continue;
+                    }
+                    let dv =
+                        s.0.iter()
+                            .zip(&v64)
+                            .map(|(p, q)| p.distance(*q))
+                            .fold(0.0f64, f64::max);
+                    println!("  {a}-{b}: {} vertices, max {dv:.2e} mm", v64.len());
+                    if dv > VERTEX_TOL_MM {
+                        failures.push(format!("{a}-{b}: {dv:.2e} mm"));
+                    }
+                }
+                (m, t) => {
+                    failures.push(format!("{a}-{b}: port bridged {}, plugin {t}", m.is_some()))
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(failures.is_empty(), "{name} stage {k:?}: {failures:#?}");
+    }
+    assert!(
+        bridged > 0,
+        "no contact was bridged: the oracle compared nothing"
+    );
+}
+
+/// The stumps of the closed teeth drawn under the gingiva of the cast
+/// ([`shell::tuck_below_margin`]) against the plugin's `_tuck_below_margin`
+/// (`golden/tuck_oracle.py`, Blender headless) on the same closed teeth,
+/// with their scanned part (`closed_tooth_info`), and the same cast (the
+/// port's `gum_cast` of the stage): the same vertices below the margin,
+/// every vertex where the plugin puts it. The cast is also lowered by
+/// `lower` mm (a gingiva thinner over the roots) so that stumps stand out.
+#[test]
+#[ignore = "needs Blender (blender -b) and the plugin repository: run with --release --ignored --nocapture"]
+fn stumps_are_tucked_as_the_plugin_does() {
+    use std::collections::HashSet;
+
+    let blender = std::env::var("BLENDER").unwrap_or_else(|_| "blender".into());
+    if std::process::Command::new(&blender)
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        println!("skipped: {blender} not found");
+        return;
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/tuck_oracle.py");
+    let f64s = |v: &[f64]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let mut moved = 0usize;
+    for (name, k) in [
+        ("demo_lower_mild", Some(0)),
+        ("demo_lower_mild", None),
+        ("demo_upper_mild", Some(0)),
+        ("demo_upper_moderate", None),
+    ] {
+        let st = stage(name, k);
+        let a = st.to_arch;
+        let vg: Vec<DVec3> = st
+            .gingiva
+            .positions
+            .iter()
+            .map(|p| a.transform_point3(p.as_dvec3()))
+            .collect();
+        // the crowns one per CROWN_STEP_MM cell, as `model_parts` gives them
+        let mut seen = HashSet::new();
+        let mut crown_xy = Vec::new();
+        for t in &st.teeth {
+            for p in &t.positions {
+                let q = a.transform_point3(p.as_dvec3());
+                if seen.insert((q / shell::CROWN_STEP_MM).floor().as_i64vec3()) {
+                    crown_xy.push([q.x, q.y]);
+                }
+            }
+        }
+        let c = shell::cast::gum_cast(
+            &vg,
+            &st.gingiva.tris,
+            &crown_xy,
+            &shell::cast::CastParams::default(),
+            &st.gingiva.tris,
+            &[],
+        );
+        for lower in [0.0, 1.0] {
+            let mut gum = c.info.clone();
+            for h in &mut gum.h {
+                *h -= lower;
+            }
+            let g = &gum.grid;
+            let dir =
+                std::env::temp_dir().join(format!("dc_tuck_{}_{name}_{lower}", std::process::id()));
+            let (src, out) = (dir.join("in"), dir.join("out"));
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("h.bin"), f64s(&gum.h)).unwrap();
+            let mut teeth = Vec::new();
+            let mut ours = Vec::new();
+            for (fdi, (local, frame, scanned)) in st.fdis.iter().zip(&st.local) {
+                let p: Vec<DVec3> = local.positions.iter().map(|p| p.as_dvec3()).collect();
+                let m = a * *frame;
+                let rows: Vec<f64> = (0..16).map(|k| m.col(k % 4)[k / 4]).collect();
+                let stem = src.join(format!("tooth_{}", fdi.get()));
+                let flat: Vec<f64> = p.iter().flat_map(|q| q.to_array()).collect();
+                std::fs::write(stem.with_extension("p.bin"), f64s(&flat)).unwrap();
+                std::fs::write(stem.with_extension("m.bin"), f64s(&rows)).unwrap();
+                teeth.push(serde_json::json!({ "fdi": fdi.get(), "crown_vertices": scanned }));
+                let below = shell::below_margin(&p, *scanned);
+                ours.push((
+                    *fdi,
+                    below.clone(),
+                    shell::tuck_below_margin(&p, &m, &below, &gum),
+                    p.iter().map(|q| m.transform_point3(*q)).collect::<Vec<_>>(),
+                ));
+            }
+            let spec = serde_json::json!({
+                "nx": g.nx, "ny": g.ny, "lo": [g.lo.x, g.lo.y], "cell": g.cell, "teeth": teeth,
+            });
+            std::fs::write(src.join("tuck.json"), spec.to_string()).unwrap();
+            let status = std::process::Command::new(&blender)
+                .args(["-b", "--factory-startup", "-P"])
+                .arg(&script)
+                .arg("--")
+                .arg(&src)
+                .arg(&out)
+                .status()
+                .unwrap();
+            assert!(status.success(), "blender run failed");
+            let (mut worst, mut drawn, mut stumps) = (0.0f64, 0usize, 0usize);
+            for (fdi, below, tucked, placed) in &ours {
+                let stem = out.join(format!("tooth_{}", fdi.get()));
+                let mask = std::fs::read(stem.with_extension("below.bin")).unwrap();
+                let theirs: Vec<u32> = (0..mask.len() as u32)
+                    .filter(|&i| mask[i as usize] != 0)
+                    .collect();
+                assert_eq!(
+                    *below, theirs,
+                    "{name} {k:?} {fdi}: other vertices below the margin"
+                );
+                let w = std::fs::read(stem.with_extension("w.bin")).unwrap();
+                let w: Vec<DVec3> = w
+                    .as_chunks::<24>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        let f = |k: usize| f64::from_le_bytes(c[k..k + 8].try_into().unwrap());
+                        DVec3::new(f(0), f(8), f(16))
+                    })
+                    .collect();
+                assert_eq!(w.len(), tucked.len());
+                for ((q, t), p) in tucked.iter().zip(&w).zip(placed) {
+                    worst = worst.max(q.distance(*t));
+                    drawn += usize::from(q.distance(*p) > 1e-9);
+                }
+                stumps += below.len();
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+            println!(
+                "{name} stage {k:?}, cast lowered {lower} mm: {stumps} stump vertices, {drawn} drawn in, max {worst:.2e} mm from the plugin"
+            );
+            assert!(worst < 1e-9, "{name} {k:?} {lower}: {worst} mm");
+            moved += drawn;
+        }
+    }
+    assert!(
+        moved > 0,
+        "no stump stood out of the gum: the oracle compared nothing"
+    );
 }

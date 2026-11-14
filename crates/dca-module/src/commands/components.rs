@@ -321,6 +321,7 @@ fn transform_tooth(
             let mesh = next.blobs.require(&old)?;
             let r = next.blobs.insert(scaled_about_centre(mesh, ratio));
             data.crowns.insert(f, r);
+            data.crown_replaced(old, r);
             stale.push(old);
         }
         if (target - 1.0).abs() <= 1e-9 {
@@ -651,5 +652,40 @@ mod tests {
             json!({ "arch": "upper", "teeth": [f.get()] }),
         );
         assert_eq!(tooth_scale(&rebuilt, f), 1.0);
+    }
+
+    /// The scanned part of a closed tooth (`crown_scanned`, the plugin's
+    /// `oa_rebuilt`) holds on its scaled and moved solids; no count is left
+    /// for a solid no tooth uses.
+    #[test]
+    fn the_scanned_part_of_a_tooth_survives_a_scale_and_an_arch_move() {
+        let s = built();
+        let f = *data(&s).crowns.keys().find(|f| f.is_upper()).unwrap();
+        let count = |s: &CaseState| {
+            let d = data(s);
+            d.crown_scanned.get(&d.crowns[&f]).copied()
+        };
+        let n = count(&s).expect("a closed tooth records its scanned part");
+        // all of them on this demo tooth: its closing added no vertex
+        assert!(n > 0 && n as usize <= crown(&s, f).positions.len(), "{n}");
+        let (scaled, _) = exec(
+            TRANSFORM,
+            &s,
+            json!({ "component": "tooth", "fdi": f.get(), "scale": 1.1 }),
+        );
+        assert_eq!(count(&scaled), Some(n));
+        let (moved, _) = exec(
+            TRANSFORM,
+            &scaled,
+            json!({ "component": "gingiva", "arch": "upper", "move": mv([0.0, 0.0, 1.0], DQuat::IDENTITY) }),
+        );
+        assert_eq!(count(&moved), Some(n));
+        let d = data(&moved);
+        assert_eq!(d.crown_scanned.len(), d.crowns.len());
+        assert!(
+            d.crown_scanned
+                .keys()
+                .all(|b| d.crowns.values().any(|c| c == b))
+        );
     }
 }

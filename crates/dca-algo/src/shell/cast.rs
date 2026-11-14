@@ -250,6 +250,34 @@ pub struct CastInfo {
     pub hmin: Vec<f64>,
     /// The faces chosen for the prisms (`info['faces']`).
     pub faces: Vec<[u32; 3]>,
+    /// The gingiva of the model seen from above on every node, not sunk
+    /// (`info['H']`, `NaN`: no cast): with the prisms down to the cast,
+    /// everything under it is gingiva of the model, or under the crowns the
+    /// tooth over it ([`CastInfo::under_gum`]).
+    pub h: Vec<f64>,
+}
+
+impl CastInfo {
+    /// `q` (arch coordinates) is at least `inset` under the gingiva of the
+    /// model seen from above (`case_print._under_gum`: [`CastInfo::h`],
+    /// bilinear between its nodes; in a cell without all four, or outside
+    /// the grid, not under it).
+    pub fn under_gum(&self, q: DVec3, inset: f64) -> bool {
+        let g = &self.grid;
+        let (fx, fy) = ((q.x - g.lo.x) / g.cell, (q.y - g.lo.y) / g.cell);
+        let (fi, fj) = (fx.floor(), fy.floor());
+        if !(fi >= 0.0 && fj >= 0.0 && fi < (g.nx - 1) as f64 && fj < (g.ny - 1) as f64) {
+            return false;
+        }
+        let (i, j) = (fi as usize, fj as usize);
+        let (u, v) = (fx - fi, fy - fj);
+        let h = |a: usize, b: usize| self.h[g.idx(a, b)];
+        let z = h(i, j) * (1.0 - u) * (1.0 - v)
+            + h(i + 1, j) * u * (1.0 - v)
+            + h(i, j + 1) * (1.0 - u) * v
+            + h(i + 1, j + 1) * u * v;
+        q.z <= z - inset
+    }
 }
 
 /// The cast: a closed mesh (arch coordinates) and what the prisms need.
@@ -463,6 +491,7 @@ pub fn gum_cast(
         z_base,
         hmin: Vec::new(),
         faces: Vec::new(),
+        h: Vec::new(),
     };
     let near: Vec<bool> = dist.iter().map(|d| *d <= 2.0 * cell).collect();
     let mut sunk = vec![sink; g.len()];
@@ -622,6 +651,7 @@ pub fn gum_cast(
         })
         .collect();
     info.hmin = g.box3(&topz, false);
+    info.h = hm;
     Cast {
         positions,
         tris: out_tris,

@@ -419,6 +419,21 @@ pub fn stages_csv(input: &Input<'_>, calendars: &BTreeMap<Arch, Calendar>) -> St
     out
 }
 
+/// The first day of wear of every aligner (`(arch, aligner)`, passive ones
+/// included) in the calendars of `params`: the date of the stamp when it
+/// carries the start of the aligner (`case_stamp.day_of`). Empty when there
+/// is no calendar.
+pub fn start_dates(input: &Input<'_>, params: &Params) -> BTreeMap<(Arch, u32), schedule::Date> {
+    plan_calendars(input, params, &BTreeMap::new())
+        .map(|plan| {
+            plan.calendars
+                .iter()
+                .flat_map(|(a, c)| c.rows.iter().map(move |r| ((*a, r.aligner), r.start)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The series of each arch and their calendars.
 struct Plan {
     /// Active aligners of each arch with any.

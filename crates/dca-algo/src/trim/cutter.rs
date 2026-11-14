@@ -202,6 +202,207 @@ fn face_normals(mesh: &TriMesh) -> Vec<DVec3> {
         .collect()
 }
 
+/// EQUATOR: the wall beside a crown is measured from the crown the scan
+/// shows less this many cells (`EQUATOR_VISIBLE_SLACK_CELLS`: the nearest
+/// crown node is up to about 1.4 cells beyond the outline).
+pub const EQUATOR_VISIBLE_SLACK_CELLS: f64 = 1.5;
+/// EQUATOR: a grid finer than [`EQUATOR_CELL_MM`] is followed within this
+/// inside an outline, blending over as much again into the field sampled
+/// every [`EQUATOR_CELL_MM`] deeper (`EQUATOR_FINE_BAND_MM`).
+pub const EQUATOR_FINE_BAND_MM: f64 = 0.6;
+
+/// `g_top` (the gingiva hit by the ray of every node) raised by the most a
+/// vertex of the gingiva in a cell of the node stands above the bilinear
+/// interpolation of `top` there (the top of the model at every node, its
+/// crown or its gingiva; default `g_top`), over `top` at the node
+/// (`_gum_cell_max`): the rays sample the gingiva at the nodes only, and a
+/// ridge between them (the rim of the gingiva over the distal of a last
+/// molar) would stand above the trim surface between the nodes. A cell with
+/// a node without gingiva raises nothing.
+pub fn gum_cell_max(
+    gum: &TriMesh,
+    grid: &PlanGrid,
+    g_top: &[f64],
+    top: Option<&[f64]>,
+) -> Vec<f64> {
+    let out = g_top.to_vec();
+    let base: Vec<f64> = match top {
+        None => out.clone(),
+        Some(t) => out
+            .iter()
+            .zip(t)
+            .map(|(&g, &t)| if g.is_finite() { t } else { g })
+            .collect(),
+    };
+    let (nx, ny) = (grid.nx, grid.ny);
+    if gum.tris.is_empty() || nx < 2 || ny < 2 {
+        return out;
+    }
+    let mut used: Vec<u32> = gum.tris.iter().flatten().copied().collect();
+    used.sort_unstable();
+    used.dedup();
+    let o = grid.node(0);
+    let (hx, hy) = (grid.node(ny).x - o.x, grid.node(1).y - o.y);
+    let mut lift = vec![0.0f64; nx * ny];
+    for &v in &used {
+        let q = gum.positions[v as usize].as_dvec3();
+        let (fx, fy) = ((q.x - o.x) / hx, (q.y - o.y) / hy);
+        let (fi, fj) = (fx.floor(), fy.floor());
+        if !((0.0..(nx - 1) as f64).contains(&fi) && (0.0..(ny - 1) as f64).contains(&fj)) {
+            continue;
+        }
+        let (i, j) = (fi as usize, fj as usize);
+        let (u, w) = (fx - fi, fy - fj);
+        let c = [
+            base[i * ny + j],
+            base[(i + 1) * ny + j],
+            base[i * ny + j + 1],
+            base[(i + 1) * ny + j + 1],
+        ];
+        if !c.iter().all(|x| x.is_finite()) {
+            continue;
+        }
+        let e = q.z
+            - (c[0] * (1.0 - u) * (1.0 - w)
+                + c[1] * u * (1.0 - w)
+                + c[2] * (1.0 - u) * w
+                + c[3] * u * w);
+        if e > 0.0 {
+            for (di, dj) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                let k = (i + di) * ny + j + dj;
+                lift[k] = lift[k].max(e);
+            }
+        }
+    }
+    out.iter()
+        .zip(&base)
+        .zip(&lift)
+        .map(|((&g, &b), &l)| {
+            if g.is_finite() && l > 0.0 {
+                g.max(b + l)
+            } else {
+                g
+            }
+        })
+        .collect()
+}
+
+/// Plan distance from the nodes `want` of a grid (nodes `p`, `nx` x `ny`) to
+/// the nearest node of `mask` (`_grid_distance`): to the nodes of the mask on
+/// its edge (a node with a neighbour off the mask or off the grid), 0 on the
+/// mask, in single precision as the plugin's k-d tree; infinite with no
+/// node in the mask.
+pub fn grid_distance(p: &[DVec2], mask: &[bool], want: &[usize], nx: usize, ny: usize) -> Vec<f64> {
+    let at = |i: isize, j: isize| {
+        i >= 0
+            && j >= 0
+            && (i as usize) < nx
+            && (j as usize) < ny
+            && mask[i as usize * ny + j as usize]
+    };
+    let edge: Vec<[f32; 2]> = (0..nx * ny)
+        .filter(|&k| {
+            let (i, j) = ((k / ny) as isize, (k % ny) as isize);
+            mask[k] && !(at(i - 1, j) && at(i + 1, j) && at(i, j - 1) && at(i, j + 1))
+        })
+        .map(|k| [p[k].x as f32, p[k].y as f32])
+        .collect();
+    if edge.is_empty() {
+        return vec![f64::INFINITY; want.len()];
+    }
+    want.par_iter()
+        .map(|&k| {
+            if mask[k] {
+                return 0.0;
+            }
+            let (x, y) = (p[k].x as f32, p[k].y as f32);
+            let d2 = edge
+                .iter()
+                .map(|e| {
+                    let (dx, dy, dz) = (e[0] - x, e[1] - y, 0.0f32);
+                    dx * dx + dy * dy + dz * dz
+                })
+                .fold(f32::INFINITY, f32::min);
+            f64::from(d2.sqrt())
+        })
+        .collect()
+}
+
+/// The EQUATOR trim heights `z` of a grid finer than [`EQUATOR_CELL_MM`]
+/// followed only near the border (`_coarse_inside`): deeper inside an
+/// outline (`loops`) than [`EQUATOR_FINE_BAND_MM`] they blend, over as much
+/// again, into the heights `field` gives on the grid of [`EQUATOR_CELL_MM`]
+/// over the same bounds (the triangles of its cells, diagonal from node
+/// `(i, j)` to `(i + 1, j + 1)`). The rim follows the fine cells, the cap
+/// over the crown does not: a finer grid there finds thin overhangs inside
+/// the outline whose columns are undercut, and the wall under them a
+/// window.
+pub fn coarse_inside(
+    grid: &PlanGrid,
+    z: &mut [f64],
+    loops: &[&[DVec3]],
+    field: impl FnOnce(&PlanGrid) -> Vec<f64>,
+) {
+    let (nx, ny) = (grid.nx, grid.ny);
+    if nx < 2 || ny < 2 || loops.is_empty() {
+        return;
+    }
+    let (lo, hi) = (grid.lo, grid.hi);
+    let coarse = PlanGrid {
+        lo,
+        hi,
+        nx: ((hi.x - lo.x) / EQUATOR_CELL_MM).ceil() as usize + 1,
+        ny: ((hi.y - lo.y) / EQUATOR_CELL_MM).ceil() as usize + 1,
+    };
+    let p = grid.nodes();
+    let mut depth = vec![0.0f64; p.len()];
+    for e in loops {
+        let blo = e
+            .iter()
+            .fold(DVec2::splat(f64::INFINITY), |a, q| a.min(q.truncate()));
+        let bhi = e
+            .iter()
+            .fold(DVec2::splat(f64::NEG_INFINITY), |a, q| a.max(q.truncate()));
+        for (k, q) in p.iter().enumerate() {
+            if q.cmpge(blo).all() && q.cmple(bhi).all() {
+                depth[k] = np_max(depth[k], loop_nearest(e, *q).0);
+            }
+        }
+    }
+    let w: Vec<f64> = depth
+        .iter()
+        .map(|d| ((d - EQUATOR_FINE_BAND_MM) / EQUATOR_FINE_BAND_MM).clamp(0.0, 1.0))
+        .collect();
+    if !w.iter().any(|&x| x > 0.0) {
+        return;
+    }
+    let zc = field(&coarse);
+    let (mx, my) = (coarse.nx, coarse.ny);
+    let (hx, hy) = (
+        (hi.x - lo.x) / (mx - 1) as f64,
+        (hi.y - lo.y) / (my - 1) as f64,
+    );
+    for (k, q) in p.iter().enumerate() {
+        if w[k].partial_cmp(&0.0) != Some(Ordering::Greater) {
+            continue;
+        }
+        let (fx, fy) = ((q.x - lo.x) / hx, (q.y - lo.y) / hy);
+        let i = (fx.floor().max(0.0) as usize).min(mx - 2);
+        let j = (fy.floor().max(0.0) as usize).min(my - 2);
+        let (u, v) = (fx - i as f64, fy - j as f64);
+        let (za, zb) = (zc[i * my + j], zc[(i + 1) * my + j]);
+        let (zcc, zd) = (zc[(i + 1) * my + j + 1], zc[i * my + j + 1]);
+        let zi = if u >= v {
+            za + u * (zb - za) + v * (zcc - zb)
+        } else {
+            za + v * (zd - za) + u * (zcc - zd)
+        };
+        if zi.is_finite() && z[k].is_finite() {
+            z[k] += w[k] * (zi - z[k]);
+        }
+    }
+}
+
 /// Heights of the EQUATOR trim surface on the nodes (`_equator_field`).
 ///
 /// Inside the outline of a crown (its equator loop) the column of the model
@@ -212,16 +413,16 @@ fn face_normals(mesh: &TriMesh) -> Vec<DVec3> {
 /// [`EQUATOR_REACH_EXTRA`] of its loop, the wall is kept above the equator
 /// of that crown (and of a neighbour about as near) and above the gingiva:
 /// its underside rises from [`EQUATOR_GUM_GAP_MM`] over the gingiva at the
-/// crown to the whole wall farther out. Beyond the reach of the aligner the
-/// surface rises steeply. The lower limits are smoothed without going below
-/// them, spikes are removed and the steps between the nodes smoothed
-/// within the limits. Over a tooth left out nothing is kept.
+/// crown to the whole wall farther out, measured from the crown the scan
+/// shows ([`grid_distance`]); over a node inside an outline that is no crown
+/// column the gingiva is raised by its ridges between the nodes
+/// ([`gum_cell_max`]). Beyond the reach of the aligner the surface rises
+/// steeply. The lower limits are smoothed without going below them, spikes
+/// are removed and the steps between the nodes smoothed within the limits.
+/// Over a tooth left out nothing is kept.
 ///
 /// Not ported (no input for them yet): the bars over a space between two
-/// caps, the ceilings of the embrasure fills, the ridge of the gingiva
-/// between the nodes (`_gum_cell_max`: the gingiva of the rays is used) and
-/// the distance from the visible crown (`_grid_distance`: the distance from
-/// the outline is used).
+/// caps and the ceilings of the embrasure fills.
 pub fn equator_field(
     grid: &PlanGrid,
     loops: &[&ToothLoop],
@@ -357,9 +558,16 @@ pub fn equator_field(
             }
         }
     }
-    let h = if nx > 1 { grid.dx() } else { EQUATOR_CELL_MM };
+    // the spacing of the nodes as the plugin reads it off the grid (X[1, 0] - X[0, 0])
+    let h = if nx > 1 {
+        grid.node(ny).x - grid.node(0).x
+    } else {
+        EQUATOR_CELL_MM
+    };
     let k_near = ((EQUATOR_GUM_NEAR_MM / h).round() as usize).max(1);
     let g_ray = grid::filter(&g_top, nx, ny, k_near, false);
+    // the crown columns the scan shows (the foot of a crown too)
+    let vis = hit.clone();
     for k in 0..n {
         let z_own = if nl[k].z_own.is_nan() {
             f64::INFINITY
@@ -376,17 +584,41 @@ pub fn equator_field(
             l[k] = f64::NEG_INFINITY;
         }
     }
-    let g_near = grid::filter(&g_top, nx, ny, k_near, false);
+    // the gingiva of a node inside an outline and no crown column (the gingiva
+    // covering the closed tooth, distal of a last molar): raised by the ridge
+    // of the gingiva between it and the nodes beside it
+    let tops: Vec<f64> = g_top.iter().zip(&top_z).map(|(g, t)| g.max(*t)).collect();
+    let ridge = gum_cell_max(model.gingiva, grid, &g_top, Some(&tops));
+    let g_cell: Vec<f64> = (0..n)
+        .map(|k| {
+            if inside[k] && !hit[k] {
+                ridge[k]
+            } else {
+                g_top[k]
+            }
+        })
+        .collect();
+    let g_near = grid::filter(&g_cell, nx, ny, k_near, false);
+    // the wall beside a crown is measured from the crown the scan shows: where
+    // the gingiva covers the closed tooth inside its outline the nodes are
+    // gingiva, as far from the crown as its visible edge
+    let mut dwall: Vec<f64> = nl.iter().map(|r| r.dmin).collect();
+    let want: Vec<usize> = (0..n).filter(|&k| !hit[k] && nl[k].dmin <= reach).collect();
+    if vis.iter().any(|v| *v) && !want.is_empty() {
+        let dvis = grid_distance(&p, &vis, &want, nx, ny);
+        for (&k, dv) in want.iter().zip(dvis) {
+            dwall[k] = np_max(dwall[k], dv - EQUATOR_VISIBLE_SLACK_CELLS * h);
+        }
+    }
     let floor: Vec<f64> = (0..n)
         .map(|k| {
-            let g = if inside[k] { g_near[k] } else { g_top[k] };
-            g + cl + EQUATOR_GUM_GAP_MM + nl[k].dmin.min(outer)
+            let g = if inside[k] { g_near[k] } else { g_cell[k] };
+            g + cl + EQUATOR_GUM_GAP_MM + dwall[k].min(outer)
         })
         .collect();
     for k in 0..n {
         if !hit[k] {
-            let dw = nl[k].dmin;
-            l[k] = np_max(nl[k].z_out, floor[k]) + EQUATOR_RISE * (dw - reach).max(0.0);
+            l[k] = np_max(nl[k].z_out, floor[k]) + EQUATOR_RISE * (dwall[k] - reach).max(0.0);
         }
     }
     if off < 0.0 {

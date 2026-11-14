@@ -222,7 +222,7 @@ fn run_automatic(
         let mut teeth = Map::new();
         for (f, tooth) in &closed.teeth {
             let blob = next.blobs.insert(crown_mesh(tooth, &scan.to_case));
-            data.crowns.insert(*f, blob);
+            data.record_crown(*f, blob, tooth.info.crown_vertices);
             teeth.insert(f.to_string(), report(tooth)?);
         }
         data.record_teeth_basis(arch.role());
@@ -278,7 +278,7 @@ fn run_rebuild_tooth(
         .map_err(|e| CommandError::Failed(e.to_string()))?;
     ctx.check_cancelled()?;
     let blob = next.blobs.insert(crown_mesh(&tooth, &scan.to_case));
-    data.crowns.insert(fdi, blob);
+    data.record_crown(fdi, blob, tooth.info.crown_vertices);
     next.set_module(MODULE_ID, ModuleState::new(data));
     let out = json!({ "fdi": fdi.get(), "tooth": report(&tooth)? });
     Ok((next, out))

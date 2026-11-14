@@ -7,8 +7,8 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AlignerBite, ComponentEdits, RampKind, ReviewKind, ReviewRecord, SCHEMA_VERSION, Settings,
-    StagingPattern, TrimParams, Visit,
+    AlignerBite, AlignerEnd, ComponentEdits, RampKind, ReviewKind, ReviewRecord, SCHEMA_VERSION,
+    Settings, StagingPattern, TrimParams, Visit,
 };
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
@@ -278,6 +278,10 @@ pub struct SetupSummary {
     /// The log of the run, each entry as `dca_algo::setup::Note` writes it
     /// (data, worded by the interface).
     pub notes: Vec<serde_json::Value>,
+    /// Where the aligner ended when this final position was computed (the
+    /// plugin's `oa_setup_end`): another end now is to compute again
+    /// ([`AlignersState::setup_end_changed`]).
+    pub aligner_end: AlignerEnd,
 }
 
 /// Interproximal reduction on the contact between two neighbouring teeth.
@@ -390,6 +394,15 @@ pub struct AlignersState {
     /// Closed solid of each reconstructed tooth (a mesh blob in case
     /// coordinates: watertight, outward normals).
     pub crowns: BTreeMap<Fdi, BlobRef>,
+    /// How many of the first vertices of each closed tooth of `crowns` are
+    /// scanned, by the blob of the tooth (the plugin's `crown_vertices`: the
+    /// vertices from that index on were added to close the crown, its
+    /// `oa_rebuilt`). Written when a tooth is closed
+    /// ([`AlignersState::record_crown`]); a tooth closed by a version that
+    /// did not keep it has none, and its closed solid is not drawn under the
+    /// gingiva of the model below its margin (`_tuck_below_margin`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub crown_scanned: BTreeMap<BlobRef, u32>,
     /// Gingiva without holes of each arch (a mesh blob in case coordinates
     /// whose vertex labels hold the tooth a vertex moves with and the
     /// margin, membrane and col flags of `dca_algo::gingiva`).
@@ -444,6 +457,14 @@ pub struct AlignersState {
     /// `review`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review: Vec<ReviewRecord>,
+    /// Where the aligner of each arch ends (the plugin's
+    /// `aligner_end_right` / `_left`), set by
+    /// `aligners.production.aligner-end`; an arch without an entry is
+    /// covered whole ([`AlignersState::aligner_teeth`]). It is a choice of
+    /// the clinician: it stays when the scan is replaced and moves with an
+    /// arch that changes place.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub aligner_end: BTreeMap<ScanRole, AlignerEnd>,
 }
 
 /// The same tooth in the other arch, on the same side (the plugin's
@@ -512,7 +533,7 @@ pub const CLEARED_IDS: [&str; 16] = [
 ];
 
 /// `fdi` belongs to the arch of `role` (`false` for a bite role).
-fn in_arch(fdi: Fdi, role: ScanRole) -> bool {
+pub(crate) fn in_arch(fdi: Fdi, role: ScanRole) -> bool {
     match role {
         ScanRole::Upper => fdi.is_upper(),
         ScanRole::Lower => !fdi.is_upper(),
@@ -709,6 +730,32 @@ impl AlignersState {
         self.teeth_basis.insert(role, basis);
     }
 
+    /// The closed tooth `fdi` is the blob `crown`, whose first `scanned`
+    /// vertices are scanned ([`AlignersState::crown_scanned`]: a tooth
+    /// closed again); the counts of the blobs no tooth uses any more go.
+    pub fn record_crown(&mut self, fdi: Fdi, crown: BlobRef, scanned: usize) {
+        self.crowns.insert(fdi, crown);
+        self.crown_scanned.insert(crown, scanned as u32);
+        self.prune_crown_scanned();
+    }
+
+    /// The closed solid `old` became `new` with the same vertices in the
+    /// same order (moved rigidly or scaled; call it once `crowns` holds
+    /// `new`): its scanned count holds on `new`.
+    pub fn crown_replaced(&mut self, old: BlobRef, new: BlobRef) {
+        if let Some(&n) = self.crown_scanned.get(&old) {
+            self.crown_scanned.insert(new, n);
+        }
+        self.prune_crown_scanned();
+    }
+
+    /// Drops the scanned counts of the blobs no tooth uses.
+    fn prune_crown_scanned(&mut self) {
+        let crowns = &self.crowns;
+        self.crown_scanned
+            .retain(|b, _| crowns.values().any(|c| c == b));
+    }
+
     /// A tooth of the arch `role` was built again by hand: once no tooth
     /// corrected by hand waits to be rebuilt and the tooth marks, missing
     /// teeth and occlusal side are those the teeth were built from, the
@@ -836,6 +883,23 @@ impl AlignersState {
             .iter()
             .filter(|r| !landing.contains(r))
             .map(|r| role_map(*r))
+            .collect();
+        let ends = std::mem::take(&mut self.aligner_end);
+        self.aligner_end = ends
+            .into_iter()
+            .filter(|(r, _)| !landing.contains(r))
+            .map(|(r, e)| {
+                if moved.contains(&r) {
+                    let other = |f: Option<Fdi>| f.map(other_arch_fdi);
+                    let e = AlignerEnd {
+                        right: other(e.right),
+                        left: other(e.left),
+                    };
+                    (opposite(r), e)
+                } else {
+                    (r, e)
+                }
+            })
             .collect();
 
         for v in &mut self.visits {
@@ -1385,7 +1449,7 @@ mod tests {
         let gum = case.blobs.insert(tri(2.0));
         let garbage = case.blobs.insert(tri(3.0));
         let mut st = AlignersState::default();
-        st.crowns.insert(Fdi::new(11).unwrap(), crown);
+        st.record_crown(Fdi::new(11).unwrap(), crown, 2);
         st.gingiva.insert(ScanRole::Upper, gum);
         case.set_module("aligners", ModuleState::new(st.clone()));
         let used = case.referenced_blobs();
@@ -1394,9 +1458,13 @@ mod tests {
         case.blobs.retain_only(&keep);
         assert!(case.blobs.contains(&crown) && case.blobs.contains(&gum));
         assert!(!case.blobs.contains(&garbage));
-        // and the JSON keys are the tooth numbers and the arches
+        // and the JSON keys are the tooth numbers, the arches and the blobs;
+        // the scanned count of a tooth is saved and read back
         let json = serde_json::to_value(&st).unwrap();
         assert!(json["crowns"]["11"].is_string() && json["gingiva"]["upper"].is_string());
+        assert_eq!(json["crown_scanned"][crown.to_hex()], 2);
+        let back: AlignersState = serde_json::from_value(json).unwrap();
+        assert_eq!(back, st);
     }
 
     #[test]

@@ -94,6 +94,7 @@ pub mod make_base;
 mod manual;
 pub(crate) mod messages;
 mod occlusion;
+mod production;
 mod ramps;
 mod reconstruct;
 pub(crate) mod review;
@@ -136,6 +137,7 @@ pub fn all() -> Vec<CommandSpec> {
         bite::specs,
         components::specs,
         ramps::specs,
+        production::specs,
         shell::specs,
         trim::specs,
         stamp::specs,

@@ -55,6 +55,11 @@ static TABLE: &[(&str, &str, &str)] = &[
         "size {0} mm does not fit the build plate {1} mm",
         "ingombro {0} mm oltre il piano di stampa {1} mm",
     ),
+    (
+        "chk-flap",
+        "{0} vertices of the shell far from the teeth (flap)",
+        "{0} vertici del guscio lontani dai denti (lembo)",
+    ),
     // ---- patient programme ----
     ("pat-title", "Aligner programme", "Programma allineatori"),
     (

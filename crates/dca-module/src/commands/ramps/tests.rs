@@ -312,3 +312,23 @@ fn the_ramps_follow_their_tooth_at_every_stage() {
     );
     assert!(ramp_solids(&off, Arch::Upper, 0).unwrap().is_empty());
 }
+
+#[test]
+fn the_teeth_behind_the_end_of_the_aligner_are_not_under_it() {
+    let state = closed();
+    let all = StageBite::new(&state).unwrap();
+    assert!(all.covered(Arch::Lower).contains(&47));
+    let (ended, _) = exec(
+        "aligners.production.aligner-end",
+        &state,
+        json!({ "action": "set", "fdi": 46 }),
+    );
+    let bite = StageBite::new(&ended).unwrap();
+    let covered = bite.covered(Arch::Lower);
+    assert!(!covered.contains(&47) && covered.contains(&46) && covered.contains(&37));
+    assert_eq!(covered.len(), all.covered(Arch::Lower).len() - 1);
+    // the other arch is covered whole
+    assert_eq!(bite.covered(Arch::Upper), all.covered(Arch::Upper));
+    // the bite is measured with the aligner that ends there
+    exec("aligners.occlusion.bite-with-aligners", &ended, Value::Null);
+}

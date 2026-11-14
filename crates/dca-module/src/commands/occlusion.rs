@@ -179,8 +179,9 @@ pub(crate) fn move_arch(
                     *v = r;
                 }
             }
-            // a size corrected by hand holds on the moved solid
+            // a size corrected by hand and the scanned part hold on the moved solid
             data.components.crown_moved(old, r);
+            data.crown_replaced(old, r);
             stale.push(old);
         }
     }

@@ -231,14 +231,15 @@ pub(crate) struct ExportParams {
     start_date: Option<String>,
     /// Days of wear of each aligner (default: the case settings).
     interval_days: Option<u32>,
-    /// Quality of the print files (default the production quality).
-    quality: Quality,
+    /// Quality of the print files (default: the case settings, the
+    /// production quality when they were never changed).
+    quality: Option<Quality>,
     /// Language of the report, the programmes and the calendar (default the
     /// language of the app).
     lang: Option<Lang>,
     /// Case code in the stamp (letters, digits, `-`; at most 8; never the
-    /// name of the patient).
-    stamp_code: String,
+    /// name of the patient; default: the case settings).
+    stamp_code: Option<String>,
 }
 
 /// The whole package: `aligners.output.report` with the print files of the
@@ -253,8 +254,15 @@ fn run_export_all(
     let mut report = Map::new();
     report.insert("dir".to_owned(), json!(params.dir));
     report.insert("shells".to_owned(), json!(true));
-    report.insert("quality".to_owned(), json!(params.quality));
-    report.insert("stamp_code".to_owned(), json!(params.stamp_code));
+    let stored = super::occlusion::aligners_data(state)?.settings;
+    report.insert(
+        "quality".to_owned(),
+        json!(params.quality.unwrap_or(stored.quality)),
+    );
+    report.insert(
+        "stamp_code".to_owned(),
+        json!(params.stamp_code.unwrap_or(stored.stamp.code)),
+    );
     report.insert(
         "lang".to_owned(),
         json!(params.lang.unwrap_or_else(app_lang)),

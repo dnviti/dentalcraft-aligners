@@ -384,11 +384,18 @@ fn run_automatic(
         .into_iter()
         .map(|p| to_arch.transform_point3(p))
         .collect();
-        let fixed: Vec<Fdi> = excluded
+        // the teeth given and those left out of the aligner stay at rest
+        // (`case_plan.out_of_aligner_teeth`)
+        let mut fixed: Vec<Fdi> = excluded
             .iter()
             .copied()
             .filter(|f| Arch::of(*f) == arch)
             .collect();
+        for f in data.out_of_aligner(role) {
+            if !fixed.contains(&f) {
+                fixed.push(f);
+            }
+        }
         let out = setup::run(
             &setup::Input {
                 arch,
@@ -438,6 +445,7 @@ fn run_automatic(
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| CommandError::Failed(e.to_string()))?;
+        let end = data.aligner_end_of(role);
         data.setup.results.insert(
             role,
             SetupSummary {
@@ -447,6 +455,7 @@ fn run_automatic(
                 residual_crowding_mm: r.residual,
                 spacing_mm: r.spacing,
                 notes,
+                aligner_end: end,
             },
         );
         data.setup.ipr.retain(|s| Arch::of(s.between[0]) != arch);
@@ -829,6 +838,45 @@ mod tests {
         let notes = report["notes"].as_array().unwrap();
         assert_eq!(notes[0]["kind"], "out_of_aligner");
         assert!(notes.iter().any(|n| n["kind"] == "locked"));
+    }
+
+    #[test]
+    fn the_teeth_behind_the_end_of_the_aligner_stay_at_rest() {
+        let state = demo(&CaseState::default(), "lower", "moderate");
+        let exec = |s: &CaseState, id: &str, p: Value| {
+            crate::commands::find(id)
+                .unwrap()
+                .execute(s, &p, &JobCtx::detached())
+                .unwrap()
+                .0
+        };
+        let ended = exec(
+            &state,
+            "aligners.production.aligner-end",
+            json!({ "action": "set", "fdi": 46 }),
+        );
+        assert_eq!(data(&ended).out_of_aligner(ScanRole::Lower), [fdi(47)]);
+        let (next, out) = run(&ended, Value::Null).unwrap();
+        let d = data(&next);
+        assert!(!d.setup.poses.contains_key(&fdi(47)));
+        assert!(
+            out["lower"]["excluded"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(47))
+        );
+        // the end it was computed with is recorded: another end is reported
+        assert_eq!(
+            d.setup.results[&ScanRole::Lower].aligner_end.right,
+            Some(fdi(46))
+        );
+        assert!(!d.setup_end_changed(ScanRole::Lower));
+        let cleared = exec(
+            &next,
+            "aligners.production.aligner-end",
+            json!({ "action": "clear" }),
+        );
+        assert!(data(&cleared).setup_end_changed(ScanRole::Lower));
     }
 
     /// `state` after the virtual bite.

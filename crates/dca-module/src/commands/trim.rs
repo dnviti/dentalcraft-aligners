@@ -9,10 +9,12 @@
 //! model of a stage comes from the shell stage, the model is the segmented
 //! scan itself, which has to be a closed solid (the parts of the demo arch
 //! are closed and merged); the shell is the sheet of the case's wall
-//! thickness and clearance laid on it. The trim settings of the case are
-//! the defaults of the parameters. The case is not modified: the line of
-//! every tooth and the trimmed aligner are described (case coordinates)
-//! and, with `dir`, the aligner is written there as binary STL
+//! thickness and clearance laid on it. The trim settings of the case (the
+//! insertion axis too) are the defaults of the parameters; the teeth behind
+//! the stored end of the aligner are left out. The case is not modified:
+//! the line of every tooth and the trimmed aligner are described (case
+//! coordinates, with the fill, the plugs and the slots that closed its
+//! holes) and, with `dir`, the aligner is written there as binary STL
 //! (`<arch>_trimmed.stl`).
 
 use std::collections::BTreeMap;
@@ -72,7 +74,7 @@ pub(crate) struct TrimLineParams {
     /// Radius of the rounded rim (mm; default 0.3 x wall, at most 0.3).
     round_mm: Option<f64>,
     /// Equator: the insertion axis (vertical, common or per_tooth).
-    insertion_axis: InsertionAxis,
+    insertion_axis: Option<InsertionAxis>,
     /// Wall thickness of the shell (mm).
     thickness_mm: Option<f64>,
     /// Internal clearance (mm).
@@ -94,7 +96,7 @@ impl Default for TrimLineParams {
             equator_offset_mm: None,
             extension_mm: None,
             round_mm: None,
-            insertion_axis: InsertionAxis::PerTooth,
+            insertion_axis: None,
             thickness_mm: None,
             clearance_mm: None,
             voxel_mm: 0.1,
@@ -112,6 +114,29 @@ fn mode_of(m: TrimMode) -> Mode {
     }
 }
 
+fn axis_of(a: dca_model::InsertionAxis) -> InsertionAxis {
+    match a {
+        dca_model::InsertionAxis::Vertical => InsertionAxis::Vertical,
+        dca_model::InsertionAxis::Common => InsertionAxis::Common,
+        dca_model::InsertionAxis::PerTooth => InsertionAxis::PerTooth,
+    }
+}
+
+/// The trim parameters of the case's trim settings (the rim radius the
+/// default of the wall): what the trim command starts from and what the
+/// export trims with.
+pub(crate) fn case_trim_params(t: &dca_model::TrimParams) -> trim::Params {
+    trim::Params {
+        mode: mode_of(t.mode),
+        margin_gap_mm: t.margin_gap_mm,
+        scallop_mm: t.scallop_mm,
+        equator_offset_mm: t.equator_offset_mm,
+        extension_mm: t.extension_mm,
+        round_mm: None,
+        insertion_axis: axis_of(t.insertion_axis),
+    }
+}
+
 fn run_trim_line(
     state: &CaseState,
     params: TrimLineParams,
@@ -119,15 +144,15 @@ fn run_trim_line(
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
     let data = aligners_data(state)?;
-    let case = &data.trim;
+    let case = case_trim_params(&data.trim);
     let tp = trim::Params {
-        mode: params.mode.unwrap_or(mode_of(case.mode)),
+        mode: params.mode.unwrap_or(case.mode),
         margin_gap_mm: params.margin_gap_mm.unwrap_or(case.margin_gap_mm),
         scallop_mm: params.scallop_mm.unwrap_or(case.scallop_mm),
         equator_offset_mm: params.equator_offset_mm.unwrap_or(case.equator_offset_mm),
         extension_mm: params.extension_mm.unwrap_or(case.extension_mm),
         round_mm: params.round_mm,
-        insertion_axis: params.insertion_axis,
+        insertion_axis: params.insertion_axis.unwrap_or(case.insertion_axis),
     };
     let wall = params
         .thickness_mm
@@ -235,7 +260,15 @@ fn trim_arch(
         .map(|(f, t)| (*f, (t.centroid, t.e_bl)))
         .collect();
     ctx.check_cancelled()?;
-    let parts = model::parts(&vertices, &mesh.tris, labels, &frames, None);
+    // the teeth behind the end of the aligner are left out (no shell over them)
+    let covered = data.aligner_teeth(arch.role());
+    let parts = model::parts(
+        &vertices,
+        &mesh.tris,
+        labels,
+        &frames,
+        (!covered.is_empty()).then_some(&covered),
+    );
     let arch_mesh = dc_mesh::TriMesh::new(
         vertices.iter().map(|p| p.as_vec3()).collect(),
         mesh.tris.clone(),
@@ -300,7 +333,11 @@ fn trim_arch(
         "watertight": check.is_watertight(),
         "manifold": check.is_manifold(),
         "genus": done.genus,
+        "fill": done.fill,
+        "plugs": done.plugs,
+        "slots": done.slots.len(),
         "dropped_pieces": done.dropped_pieces,
+        "checks": done.checks,
         "lines": lines,
         "seconds": t0.elapsed().as_secs_f64(),
         "file": written,
@@ -352,6 +389,12 @@ mod tests {
         assert_eq!(lower["watertight"], true);
         assert_eq!(lower["manifold"], true);
         assert!(lower["lines"].as_object().unwrap().len() >= 12, "{lower}");
+        // the checks of the border built: the labial cover of the incisors and canines
+        assert!(
+            lower["checks"]["labial"].as_object().unwrap().len() >= 4,
+            "{}",
+            lower["checks"]
+        );
         let file = std::path::PathBuf::from(lower["file"].as_str().unwrap());
         assert!(file.metadata().unwrap().len() > 1000);
         std::fs::remove_dir_all(&dir).unwrap();

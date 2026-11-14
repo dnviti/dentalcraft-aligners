@@ -148,7 +148,7 @@ fn the_glyph_bounds_match_the_requested_height() {
             "{h}: {}",
             two.height
         );
-        // monospace: the ink grows with the characters
+        // the ink grows with the characters
         let one = layout(&lines(&["0"]), h).unwrap();
         let four = layout(&lines(&["0000"]), h).unwrap();
         assert!(four.width > 3.0 * one.width);
@@ -179,6 +179,43 @@ fn the_glyph_bounds_match_the_requested_height() {
         area > 0.1 * t.width * t.height && area < 0.6 * t.width * t.height,
         "{area}"
     );
+}
+
+/// The room of a real face, the lingual of 16 of `demo_upper_mild` at stage 1
+/// with the embrasure fills: a stretch of 7.2 mm between the fills and the
+/// tooth edge above it. The plugin's label fits it (6.16 mm wide, measured in
+/// Blender); the advances of the monospaced font left 7.61 mm, too wide for
+/// every face of the upper molars and premolars.
+#[test]
+fn a_one_line_label_fits_the_face_of_a_molar_like_the_plugin() {
+    let xs: Vec<f64> = (0..61).map(|k| -6.0 + 0.2 * f64::from(k)).collect();
+    let (nx, ny) = (xs.len(), xs.len());
+    let valid: Vec<bool> = (0..nx * ny)
+        .map(|k| xs[k % nx].abs() <= 3.6 + 1e-9 && xs[k / nx].abs() <= 1.0 + 1e-9)
+        .collect();
+    let fm = place::FaceMap {
+        ys: xs.clone(),
+        xs,
+        valid,
+        center: DVec3::ZERO,
+        frame: Frame {
+            n: DVec3::X,
+            u: DVec3::Y,
+            r: DVec3::Z,
+        },
+        reason: None,
+    };
+    // the digits are not all as wide: the widest ones and the plugin's example
+    for text in ["SUP 01 010126", "INF 13 311226", "SUP 08 280826"] {
+        let t = layout(&lines(&[text]), 0.7).unwrap();
+        assert!(t.width <= 6.4, "{text}: {} mm", t.width);
+        assert!(
+            place::place(&fm, t.width, t.height, 0.2).is_some(),
+            "{text}: {} mm",
+            t.width
+        );
+    }
+    assert!(layout(&lines(&["SUP 01 010126"]), 0.7).unwrap().width <= 6.16);
 }
 
 #[test]
@@ -311,6 +348,7 @@ fn invalid_parameters_are_refused() {
         mesh: &mesh,
         arch: Arch::Upper,
         teeth: Vec::new(),
+        covered: None,
     };
     for p in [
         Params {
@@ -355,6 +393,7 @@ fn check_block(kind: Kind, method: Method) {
         mesh: &mesh,
         arch: Arch::Upper,
         teeth: Vec::new(),
+        covered: None,
     };
     let p = Params {
         method,
@@ -447,6 +486,7 @@ fn the_local_method_keeps_the_topology_and_the_labels() {
         mesh: &mesh,
         arch: Arch::Upper,
         teeth: Vec::new(),
+        covered: None,
     };
     let before = mesh.validate();
     let out = stamped(run(&input, &params(Kind::Shell)).unwrap());
@@ -506,6 +546,7 @@ fn an_open_surface_is_stamped_too() {
         mesh: &mesh,
         arch: Arch::Lower,
         teeth: Vec::new(),
+        covered: None,
     };
     let p = Params {
         placement: manual([0.0, 0.0, 0.0]),
@@ -534,6 +575,7 @@ fn the_text_plane_follows_the_reading_frame() {
         mesh: &mesh,
         arch: Arch::Upper,
         teeth: Vec::new(),
+        covered: None,
     };
     let located = locate(&input, &params(Kind::Shell)).unwrap();
     let v = text_plane(&located.placed, DVec3::new(1.0, 0.5, 2.5));
@@ -552,6 +594,7 @@ fn a_hand_placed_stamp_on_a_surface_with_no_wall_under_it_is_refused() {
         mesh: &mesh,
         arch: Arch::Upper,
         teeth: Vec::new(),
+        covered: None,
     };
     let p = Params {
         placement: manual([4.0, 0.0, 2.5]),
@@ -592,6 +635,7 @@ fn the_demo_arch_gets_its_stamp_on_a_molar() {
             mesh: &mesh,
             arch,
             teeth: demo_input(&demo),
+            covered: None,
         };
         let p = Params {
             date: Some("2026-10-13".to_owned()),

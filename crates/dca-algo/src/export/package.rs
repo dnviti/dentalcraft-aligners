@@ -98,15 +98,17 @@ pub struct FullParams {
     /// gingiva, else the deformed scans as the models and no aligner;
     /// `true` requires them, `false` uses the scans.
     pub shells: Option<bool>,
-    /// Quality of the shell-stage files (detail and surface tolerance).
-    pub quality: Quality,
+    /// Quality of the shell-stage files (detail and surface tolerance);
+    /// default the quality stored in the case.
+    pub quality: Option<Quality>,
     /// Detail of the models and shells (mm), instead of the quality's.
     pub voxel_mm: Option<f64>,
     /// Identification stamp: embossed on the models, engraved in the
-    /// aligners (arch, number, date of the export, `stamp_code`).
-    pub stamp: bool,
+    /// aligners (arch, number, date of the export, `stamp_code`); default
+    /// the stamp setting of the case (on).
+    pub stamp: Option<bool>,
     /// Case code in the stamp (letters, digits, `-`; at most 8; never the
-    /// name of the patient).
+    /// name of the patient); empty: the code of the stamp settings.
     pub stamp_code: String,
     /// Files built at the same time (default: what one build can afford, at
     /// most the threads).
@@ -133,9 +135,9 @@ impl Default for FullParams {
             threads: None,
             generated: None,
             shells: None,
-            quality: Quality::default(),
+            quality: None,
             voxel_mm: None,
-            stamp: true,
+            stamp: None,
             stamp_code: String::new(),
             parallel: None,
         }
@@ -494,6 +496,13 @@ fn run_inner(
                 build_plate_mm: params.build_plate_mm,
                 ..CheckOptions::default()
             };
+            let mut check = printcheck::check(&mesh, &options);
+            // no fin, no flap far from the teeth (the check passes them)
+            if kind == Kind::Aligner
+                && let Some(reach) = provider.reach(arch, k)
+            {
+                printcheck::add_reach(&mut check, reach);
+            }
             FileCheck {
                 name: name.clone(),
                 arch,
@@ -503,7 +512,7 @@ fn run_inner(
                 } else {
                     "aligner"
                 },
-                check: printcheck::check(&mesh, &options),
+                check,
             }
         });
         entry.printable = check.as_ref().map(|c| c.check.ok);
@@ -724,9 +733,9 @@ fn run_inner(
             "shell_thickness_mm": case.state.settings.shell_thickness_mm,
             "clearance_mm": case.state.settings.clearance_mm,
             "meshes": case.meshes,
-            "quality": params.quality,
-            "voxel_mm": params.voxel_mm.unwrap_or(params.quality.voxel_mm()),
-            "stamp": params.stamp,
+            "quality": params.quality.unwrap_or_default(),
+            "voxel_mm": params.voxel_mm.unwrap_or(params.quality.unwrap_or_default().voxel_mm()),
+            "stamp": params.stamp.unwrap_or(true),
         }),
         aligners: aligners.clone(),
         total_aligners: plan.total,

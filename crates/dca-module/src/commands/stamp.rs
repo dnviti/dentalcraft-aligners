@@ -42,12 +42,15 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
 }
 
 /// Parameters of `aligners.production.stamp`: the arches and the output, then
-/// the parameters of the stamp (`dca_algo::stamp::Params`) in the same object.
+/// the parameters of the stamp (`dca_algo::stamp::Params`) in the same object;
+/// those not given come from the stamp settings of the case
+/// ([`case_stamp_params`]).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StampParams {
     arch: Which,
     dir: Option<String>,
-    stamp: stamp::Params,
+    /// The keys of `stamp::Params` given (checked when read).
+    stamp: Map<String, Value>,
 }
 
 /// What the schema of [`StampParams`] shows.
@@ -92,9 +95,43 @@ impl<'de> Deserialize<'de> for StampParams {
             .transpose()
             .map_err(D::Error::custom)?
             .unwrap_or_default();
-        let stamp = serde_json::from_value(Value::Object(map)).map_err(D::Error::custom)?;
-        Ok(Self { arch, dir, stamp })
+        serde_json::from_value::<stamp::Params>(Value::Object(map.clone()))
+            .map_err(D::Error::custom)?;
+        Ok(Self {
+            arch,
+            dir,
+            stamp: map,
+        })
     }
+}
+
+/// The stamp parameters of the case (`Settings::stamp`, the plugin's
+/// `stamp_*`: tooth, face, reading side, date format, code, sizes), with the
+/// keys of `given` on top.
+///
+/// # Errors
+/// A value of `given` that `stamp::Params` refuses.
+pub(crate) fn case_stamp_params(
+    s: &dca_model::StampSettings,
+    given: &Map<String, Value>,
+) -> Result<stamp::Params, CommandError> {
+    let invalid = |e: serde_json::Error| CommandError::Invalid(e.to_string());
+    let mut v = serde_json::to_value(stamp::Params::default()).map_err(invalid)?;
+    if let Value::Object(o) = &mut v {
+        o.insert(
+            "placement".into(),
+            json!({ "mode": "tooth", "tooth": s.tooth, "face": s.face, "read": s.read }),
+        );
+        o.insert("date_format".into(), json!(s.date_format));
+        o.insert("code".into(), json!(s.code));
+        o.insert("height".into(), json!(s.height_mm));
+        o.insert("depth".into(), json!(s.depth_mm));
+        o.insert("min_wall".into(), json!(s.min_wall_mm));
+        for (k, x) in given {
+            o.insert(k.clone(), x.clone());
+        }
+    }
+    serde_json::from_value(v).map_err(invalid)
 }
 
 fn arch_name(arch: Arch) -> &'static str {
@@ -246,7 +283,8 @@ fn run_stamp(
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
     let data = aligners_data(state)?;
-    let manual = matches!(params.stamp.placement, Placement::Manual { .. });
+    let sp = case_stamp_params(&data.settings.stamp, &params.stamp)?;
+    let manual = matches!(sp.placement, Placement::Manual { .. });
     let explicit = params.arch != Which::All;
     let dir = params.dir.as_deref().map(Path::new);
     if let Some(d) = dir {
@@ -266,13 +304,17 @@ fn run_stamp(
             }
             continue;
         };
+        // the text goes on a tooth the aligner covers (any tooth when the
+        // case does not know them yet)
+        let covered = data.aligner_teeth(arch.role());
         let input = stamp::Input {
             mesh: &target.mesh,
             arch,
             teeth: target.teeth,
+            covered: (!covered.is_empty()).then_some(&covered),
         };
         let t0 = Instant::now();
-        let outcome = stamp::run(&input, &params.stamp).map_err(|e| match e {
+        let outcome = stamp::run(&input, &sp).map_err(|e| match e {
             stamp::StampError::Invalid(m) => CommandError::Invalid(m),
             e => CommandError::Failed(format!("{} arch: {e}", arch_name(arch))),
         })?;

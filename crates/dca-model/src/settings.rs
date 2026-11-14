@@ -173,7 +173,7 @@ pub const INTERVAL_DAYS: (u32, u32) = (5, 21);
 pub const TOOTH_SPEED: (f64, f64) = (0.2, 1.0);
 
 /// Shape of the aligner's edge (old `trim_mode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TrimMode {
     /// Ends on the equator of each crown.
@@ -185,6 +185,21 @@ pub enum TrimMode {
     /// Smooth line along the gingival margin with soft scallops.
     #[default]
     Smooth,
+}
+
+/// Axis along which the aligner goes in and out (the plugin's
+/// `insertion_axis`, `props.py:576`): the equator, the undercuts and the
+/// removal follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InsertionAxis {
+    /// One axis for the whole arch, perpendicular to the occlusal plane.
+    Vertical,
+    /// One rigid axis for the whole arch, tilted like on a surveyor.
+    Common,
+    /// Every tooth has its own axis.
+    #[default]
+    PerTooth,
 }
 
 /// Parameters of the trim line.
@@ -204,6 +219,8 @@ pub struct TrimParams {
     pub equator_offset_mm: f64,
     /// Edge extension (mm).
     pub extension_mm: f64,
+    /// Axis of insertion.
+    pub insertion_axis: InsertionAxis,
 }
 
 impl Default for TrimParams {
@@ -215,8 +232,232 @@ impl Default for TrimParams {
             scallop_mm: 1.5,
             equator_offset_mm: 0.0,
             extension_mm: 2.0,
+            insertion_axis: InsertionAxis::PerTooth,
         }
     }
+}
+
+/// Quality of the print files (the plugin's `quality`, `props.py:738`,
+/// `quality.py`): the detail of the models and of the shells and the
+/// surface tolerance of the files, plus a draft for quick runs and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    /// Quick look and tests: 0.25 mm detail, 0.05 mm tolerance.
+    Draft,
+    /// Light: 0.15 mm detail, 0.03 mm tolerance.
+    Light,
+    /// Standard, the production files: 0.1 mm detail, 0.01 mm tolerance.
+    #[default]
+    #[serde(alias = "final")]
+    Standard,
+    /// High: 0.08 mm detail, 0.005 mm tolerance.
+    High,
+}
+
+impl Quality {
+    /// Voxel of the model and shell fields (mm).
+    pub fn voxel_mm(self) -> f64 {
+        match self {
+            Self::Draft => 0.25,
+            Self::Light => 0.15,
+            Self::Standard => 0.1,
+            Self::High => 0.08,
+        }
+    }
+
+    /// Mesh tolerance of the print files (mm).
+    pub fn tolerance_mm(self) -> f64 {
+        match self {
+            Self::Draft => 0.05,
+            Self::Light => 0.03,
+            Self::Standard => 0.01,
+            Self::High => 0.005,
+        }
+    }
+}
+
+/// Tooth the identification text is tried on first (the plugin's
+/// `stamp_tooth`); the names are those of `dca_algo::stamp::ToothChoice`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum StampTooth {
+    /// First molar, patient's right.
+    #[default]
+    #[serde(rename = "M6R")]
+    FirstMolarRight,
+    /// First molar, patient's left.
+    #[serde(rename = "M6L")]
+    FirstMolarLeft,
+    /// Second molar, patient's right.
+    #[serde(rename = "M7R")]
+    SecondMolarRight,
+    /// Second molar, patient's left.
+    #[serde(rename = "M7L")]
+    SecondMolarLeft,
+    /// Second premolar, patient's right.
+    #[serde(rename = "PM5R")]
+    SecondPremolarRight,
+    /// Second premolar, patient's left.
+    #[serde(rename = "PM5L")]
+    SecondPremolarLeft,
+}
+
+/// Face of the tooth the text goes on (the plugin's `stamp_face`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StampFace {
+    /// Lingual / palatal.
+    #[default]
+    Lingual,
+    /// Buccal / labial.
+    Buccal,
+}
+
+/// From where the text is read (the plugin's `stamp_read`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StampRead {
+    /// From inside the aligner.
+    #[default]
+    Inside,
+    /// From outside, through the transparent wall.
+    Outside,
+}
+
+/// Which date the text carries (the plugin's `stamp_date`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StampDate {
+    /// The day of the export (the same for every file of a delivery).
+    #[default]
+    Production,
+    /// The day the patient starts the aligner (calendar).
+    Start,
+}
+
+/// Format of the date of the text (the plugin's `stamp_date_format`); the
+/// names are those of `dca_algo::stamp::DateFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum StampDateFormat {
+    /// `131026`.
+    #[default]
+    #[serde(rename = "DDMMYY")]
+    DdMmYy,
+    /// `13.10.26`.
+    #[serde(rename = "DD.MM.YY")]
+    DotDdMmYy,
+    /// `261013`.
+    #[serde(rename = "YYMMDD")]
+    YyMmDd,
+}
+
+/// The identification text inside every aligner (the plugin's `stamp_*`,
+/// `props.py:515-542`), with the plugin's defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StampSettings {
+    /// The aligners carry the text.
+    pub enabled: bool,
+    /// Tooth tried first.
+    pub tooth: StampTooth,
+    /// Face tried first.
+    pub face: StampFace,
+    /// From where the text is read.
+    pub read: StampRead,
+    /// Which date the text carries.
+    pub date: StampDate,
+    /// Format of the date.
+    pub date_format: StampDateFormat,
+    /// Case code in a third line ([`StampSettings::code_ok`]); never the
+    /// name of the patient.
+    pub code: String,
+    /// Height of the characters (mm).
+    pub height_mm: f64,
+    /// Depth of the engraving or height of the relief (mm).
+    pub depth_mm: f64,
+    /// Wall left under the engraving (mm).
+    pub min_wall_mm: f64,
+}
+
+impl Default for StampSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tooth: StampTooth::FirstMolarRight,
+            face: StampFace::Lingual,
+            read: StampRead::Inside,
+            date: StampDate::Production,
+            date_format: StampDateFormat::DdMmYy,
+            code: String::new(),
+            height_mm: 0.7,
+            depth_mm: 0.08,
+            min_wall_mm: 0.35,
+        }
+    }
+}
+
+impl StampSettings {
+    /// Longest case code (the plugin's `maxlen`).
+    pub const CODE_MAX: usize = 8;
+
+    /// `code` can be a case code: at most [`StampSettings::CODE_MAX`]
+    /// letters, digits and `-` (the plugin's `stamp_code`).
+    pub fn code_ok(code: &str) -> bool {
+        code.chars().count() <= Self::CODE_MAX
+            && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    }
+}
+
+/// The groups of the production settings `aligners.settings.production`
+/// changes ([`crate::AlignersState::production_values`]): the trim line
+/// (`trim`, [`TrimParams`]), the shell (`shell`: `shell_thickness_mm`,
+/// `clearance_mm` of [`Settings`]), the identification text (`stamp`,
+/// [`StampSettings`]), the bite with the aligners worn (`bite`,
+/// [`crate::OcclusalSettings`]), the ramps (`ramps`,
+/// [`crate::RampSettings`] without the ramps) and the print quality
+/// (`quality`).
+pub const PRODUCTION_GROUPS: [&str; 6] = ["trim", "shell", "stamp", "bite", "ramps", "quality"];
+
+/// The numeric production settings with the range of the plugin's slider
+/// (`props.py:537-661`): group, field, smallest and largest value.
+pub const PRODUCTION_NUMBERS: [(&str, &str, f64, f64); 21] = [
+    ("trim", "margin_gap_mm", -2.0, 5.0),
+    ("trim", "recess_mm", 0.6, 2.5),
+    ("trim", "scallop_mm", 0.0, 4.0),
+    ("trim", "equator_offset_mm", -2.0, 1.5),
+    ("trim", "extension_mm", 0.0, 4.0),
+    ("shell", "shell_thickness_mm", 0.3, 2.0),
+    ("shell", "clearance_mm", 0.0, 0.3),
+    ("stamp", "height_mm", 0.3, 2.5),
+    ("stamp", "depth_mm", 0.02, 0.30),
+    ("stamp", "min_wall_mm", 0.2, 1.0),
+    ("bite", "thickness_mm", 0.3, 2.0),
+    ("bite", "min_thickness_mm", 0.3, 1.5),
+    ("bite", "opening_target_mm", 0.0, 5.0),
+    ("bite", "hinge_posterior_mm", 40.0, 120.0),
+    ("bite", "hinge_height_mm", 0.0, 80.0),
+    ("bite", "equilibrate_teeth_per_side", 1.0, 6.0),
+    ("bite", "equilibrate_max_mm", 0.05, 1.0),
+    ("ramps", "width_mm", 0.5, 8.0),
+    ("ramps", "depth_mm", 0.5, 6.0),
+    ("ramps", "height_mm", 0.2, 4.0),
+    ("ramps", "overbite_min_mm", 1.0, 8.0),
+];
+
+/// The first numeric setting of the production group `group` (its values
+/// as [`crate::AlignersState::production_values`] gives them) outside its
+/// range, or not a finite number: its name, value and range.
+pub fn production_out_of_range(
+    group: &str,
+    values: &serde_json::Value,
+) -> Option<(&'static str, f64, f64, f64)> {
+    PRODUCTION_NUMBERS
+        .iter()
+        .filter(|n| n.0 == group)
+        .find_map(|&(_, name, lo, hi)| {
+            let v = values[name].as_f64().unwrap_or(f64::NAN);
+            (!v.is_finite() || v < lo - 1e-9 || v > hi + 1e-9).then_some((name, v, lo, hi))
+        })
 }
 
 /// Style of the orthodontic study-model bases (B6,
@@ -605,6 +846,10 @@ pub struct Settings {
     pub segmentation: SegmentationSettings,
     /// "Final position": the setup parameters and the steps of "Move a tooth".
     pub setup: SetupSettings,
+    /// The identification text inside every aligner.
+    pub stamp: StampSettings,
+    /// Quality of the print files.
+    pub quality: Quality,
 }
 
 impl Default for Settings {
@@ -621,6 +866,8 @@ impl Default for Settings {
             find_teeth: FindTeethSettings::default(),
             segmentation: SegmentationSettings::default(),
             setup: SetupSettings::default(),
+            stamp: StampSettings::default(),
+            quality: Quality::Standard,
         }
     }
 }
@@ -783,5 +1030,34 @@ mod tests {
         assert_eq!(s.side_angle_deg, 65.0);
         assert_eq!(s.heel_angle_deg, 115.0);
         assert_eq!(StudyBaseSettings::default().style, StudyBaseStyle::European);
+    }
+
+    #[test]
+    fn stamp_and_quality_follow_the_plugin() {
+        // the plugin's defaults (`props.py:515-542`, `quality.STANDARD`)
+        let s = Settings::default();
+        assert!(s.stamp.enabled);
+        assert_eq!(s.stamp.tooth, StampTooth::FirstMolarRight);
+        assert_eq!(
+            (s.stamp.height_mm, s.stamp.depth_mm, s.stamp.min_wall_mm),
+            (0.7, 0.08, 0.35)
+        );
+        assert_eq!(s.quality, Quality::Standard);
+        // the names the stamp and the export use
+        let v = serde_json::to_value(&s.stamp).unwrap();
+        assert_eq!(
+            (v["tooth"].as_str(), v["date_format"].as_str()),
+            (Some("M6R"), Some("DDMMYY"))
+        );
+        assert_eq!(
+            serde_json::from_str::<Quality>(r#""final""#).unwrap(),
+            Quality::Standard
+        );
+        assert_eq!(Quality::Light.voxel_mm(), 0.15);
+        assert_eq!(Quality::High.tolerance_mm(), 0.005);
+        // the case code
+        assert!(StampSettings::code_ok("") && StampSettings::code_ok("AB-12345"));
+        assert!(!StampSettings::code_ok("AB-123456") && !StampSettings::code_ok("A B"));
+        assert!(!StampSettings::code_ok("È1"));
     }
 }

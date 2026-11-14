@@ -121,6 +121,9 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.review.decide",
     "aligners.review.set-value",
     "aligners.review.bulk",
+    // the parameters and the aligner end of the Export for printing inspector
+    "aligners.settings.production",
+    "aligners.production.aligner-end",
     // the gizmo of the viewport on a selected 3D component
     "aligners.components.transform",
 ];

@@ -14,6 +14,7 @@ mod bite;
 mod bite_report;
 mod components;
 mod migrate;
+mod production;
 mod review;
 mod settings;
 mod state;
@@ -27,12 +28,14 @@ pub use bite_report::{
 };
 pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale, tooth_centre};
 pub use migrate::{ModelError, migrate};
+pub use production::{AlignerEnd, AlignerEndSuggestion, Side};
 pub use review::{ReviewKind, ReviewRecord, ReviewStatus};
 pub use settings::{
-    FindTeethSettings, INTERVAL_DAYS, IntervalPolicy, PerioStage, SegmentationSettings, Settings,
-    SetupIprZone, SetupLeveling, SetupMidline, SetupScope, SetupSettings, SpacePriority,
-    StagingPattern, StagingSettings, StudyBaseSettings, StudyBaseStyle, TOOTH_SPEED, TrimMode,
-    TrimParams,
+    FindTeethSettings, INTERVAL_DAYS, InsertionAxis, IntervalPolicy, PRODUCTION_GROUPS,
+    PRODUCTION_NUMBERS, PerioStage, Quality, SegmentationSettings, Settings, SetupIprZone,
+    SetupLeveling, SetupMidline, SetupScope, SetupSettings, SpacePriority, StagingPattern,
+    StagingSettings, StampDate, StampDateFormat, StampFace, StampRead, StampSettings, StampTooth,
+    StudyBaseSettings, StudyBaseStyle, TOOTH_SPEED, TrimMode, TrimParams, production_out_of_range,
 };
 pub use state::{
     AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed,

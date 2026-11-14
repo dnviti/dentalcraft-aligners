@@ -19,51 +19,12 @@
 //! the gingiva, [`ScanProvider`] otherwise.
 
 use dc_mesh::TriMesh;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+/// Quality of the print files (stored in the case settings).
+pub use dca_model::Quality;
 
+use super::printcheck::Reach;
 use super::{ExportError, Input, deform_series, stage_deltas};
 use crate::anatomy::Arch;
-
-/// Quality of the print files: the detail of the models and of the shells
-/// and the surface tolerance of the files, plus a draft for quick runs and
-/// tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Quality {
-    /// Quick look and tests: 0.25 mm detail, 0.05 mm tolerance.
-    Draft,
-    /// Light: 0.15 mm detail, 0.03 mm tolerance.
-    Light,
-    /// Standard, the production files: 0.1 mm detail, 0.01 mm tolerance.
-    #[default]
-    #[serde(alias = "final")]
-    Standard,
-    /// High: 0.08 mm detail, 0.005 mm tolerance.
-    High,
-}
-
-impl Quality {
-    /// Voxel of the model and shell fields (mm).
-    pub fn voxel_mm(self) -> f64 {
-        match self {
-            Self::Draft => 0.25,
-            Self::Light => 0.15,
-            Self::Standard => 0.1,
-            Self::High => 0.08,
-        }
-    }
-
-    /// Mesh tolerance of the print files (mm).
-    pub fn tolerance_mm(self) -> f64 {
-        match self {
-            Self::Draft => 0.05,
-            Self::Light => 0.03,
-            Self::Standard => 0.01,
-            Self::High => 0.005,
-        }
-    }
-}
 
 /// Something the provider could not do as asked for one file (a stamp with
 /// no room, a ramp left out, the bite not shaped), or for the whole export
@@ -99,6 +60,14 @@ pub trait MeshProvider: Sync {
     /// them once every mesh is made.
     fn notes(&self) -> Vec<Note> {
         Vec::new()
+    }
+
+    /// How far the shell of aligner `stage` reaches from the teeth of its
+    /// stage ([`super::printcheck::shell_reach`]), asked once the shell is
+    /// made; `None` when not measured (a border that covers the gingiva on
+    /// purpose, or no teeth). The print check of the file adds it.
+    fn reach(&self, _arch: Arch, _stage: u32) -> Option<Reach> {
+        None
     }
 
     /// Meshes built at the same time at most (the memory of one build);

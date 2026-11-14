@@ -28,7 +28,8 @@ use dca_algo::occlusion::{self, ArchModel};
 use dca_algo::ramps::{self, ProposeInput, ProposeTooth, RampSolid};
 use dca_algo::{frame, staging, teeth};
 use dca_model::{
-    AlignersState, BiteClosing, MODULE_ID, OcclusalMode, OcclusalSettings, Ramp, RampKind,
+    AlignerEnd, AlignersState, BiteClosing, MODULE_ID, OcclusalMode, OcclusalSettings, Ramp,
+    RampKind,
 };
 use glam::{DMat4, DVec3};
 use schemars::JsonSchema;
@@ -261,6 +262,9 @@ struct ArchCase {
     /// The closed crown of every tooth at rest (case coordinates): the
     /// reconstructed solids, else the labelled triangles of the scan.
     crowns: BTreeMap<Fdi, TriMesh>,
+    /// Where the aligner of the arch ends: the teeth behind it are not
+    /// under the aligner (`case_print.aligner_teeth`).
+    end: AlignerEnd,
 }
 
 fn arch_case(
@@ -310,6 +314,7 @@ fn arch_case(
         model,
         to_arch,
         crowns,
+        end: data.aligner_end_of(arch.role()),
     })
 }
 
@@ -370,7 +375,9 @@ fn place(c: &ArchCase, deltas: &BTreeMap<Fdi, DMat4>, ramps: &[Ramp], use_ramps:
         s.crown_labels
             .extend(std::iter::repeat_n(i64::from(l), pts.len()));
         s.crown_points.extend_from_slice(&pts);
-        s.covered.push(i64::from(l));
+        if c.end.covers(f) {
+            s.covered.push(i64::from(l));
+        }
         crowns.insert(i64::from(l), pts);
     }
     let to_arch: BTreeMap<Fdi, DMat4> = c
@@ -600,10 +607,17 @@ impl StageBite {
         occlusal::bite(&lower.stage, &upper.stage, &rel, &self.design, [kl, ku])
     }
 
-    /// The teeth under the aligner of `arch` (all its crowns).
+    /// The teeth under the aligner of `arch`: its crowns not behind the
+    /// end of the aligner.
     pub(crate) fn covered(&self, arch: Arch) -> Vec<i64> {
         self.arch(arch)
-            .map(|c| c.crowns.keys().map(|f| i64::from(f.get())).collect())
+            .map(|c| {
+                c.crowns
+                    .keys()
+                    .filter(|f| c.end.covers(**f))
+                    .map(|f| i64::from(f.get()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
