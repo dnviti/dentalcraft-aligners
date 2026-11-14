@@ -13,14 +13,14 @@
 //! Both need the two arches segmented (labels) with their seeds.
 
 use super::messages;
-use dc_case::{BlobRef, CaseState, ModuleState, Pose, ScanRole};
+use dc_case::{BlobRef, CaseState, ModuleState, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
 use dca_algo::occlusion::{self, ArchModel};
 use dca_model::{AlignersState, MODULE_ID};
-use glam::{DMat3, DMat4, DQuat};
+use glam::{DMat3, DMat4};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -106,12 +106,6 @@ pub(crate) fn moved_mesh(mesh: &TriMesh, delta: &DMat4) -> TriMesh {
         }
     }
     out
-}
-
-/// Pose of a rigid 4x4 matrix.
-pub(crate) fn pose_of(m: &DMat4) -> Pose {
-    let r = DMat3::from_mat4(*m);
-    Pose::new(m.w_axis.truncate(), DQuat::from_mat3(&r).normalize())
 }
 
 /// Moves the scans with role `role`, in order, by `deltas` (one move per
@@ -215,7 +209,7 @@ pub(crate) fn move_arch(
             *p = delta.transform_point3(*p);
         }
     }
-    let pose = pose_of(delta);
+    let pose = dca_algo::rotation::pose_from_mat4(delta);
     for (_, f) in data
         .tooth_frames
         .iter_mut()
@@ -237,10 +231,9 @@ pub(crate) fn move_arch(
 
 /// Rigid move as JSON: translation (mm) and rotation (degrees).
 pub(crate) fn move_json(m: &DMat4) -> Value {
-    let pose = pose_of(m);
     json!({
         "translation_mm": [m.w_axis.x, m.w_axis.y, m.w_axis.z],
-        "rotation_deg": dca_algo::frame::rotation_degrees(&pose),
+        "rotation_deg": dca_algo::rotation::degrees(&dca_algo::rotation::pose_from_mat4(m)),
     })
 }
 
@@ -291,6 +284,7 @@ fn run_contact_map(
 pub(crate) mod tests {
     use super::*;
     use dc_case::ScanRole;
+    use glam::DQuat;
 
     pub(crate) fn exec(id: &str, state: &CaseState, params: Value) -> CommandOutput {
         try_exec(id, state, params).unwrap()
@@ -422,6 +416,12 @@ pub(crate) mod tests {
     #[test]
     fn the_crowns_gingiva_measures_and_arch_line_move_with_the_upper_arch() {
         let mut state = two_demo_arches();
+        // with both arches the setup needs their relation first: taken as
+        // registered, so that the virtual bite then moves an upper arch with
+        // its setup from where the demo put it
+        let mut data = aligners_data(&state).unwrap();
+        data.bite_registered = true;
+        state.set_module(MODULE_ID, ModuleState::new(data));
         for id in [
             "aligners.preparation.reconstruction.automatic",
             "aligners.preparation.gingiva",

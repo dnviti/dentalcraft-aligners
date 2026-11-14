@@ -9,22 +9,31 @@
 //! teeth (`Setup::locked`) keep their pose and are the reference; the teeth
 //! in `excluded` (out of the aligner) stay at rest.
 //!
+//! With both arches segmented and not related (no bite registration or
+//! virtual bite, and the scans not exported in occlusion:
+//! [`dca_algo::occlusion::bite_needed`]) the setup refuses and changes nothing,
+//! as the plugin's `case_plan.run_setup`: with both arches the bite comes
+//! first.
+//!
 //! Stored in `AlignersState::setup`: `poses` (the final local pose of each
 //! tooth that moves, in its rest frame: the rest pose of the stored tooth
 //! frame, centre of resistance origin; a tooth without a pose stays at rest),
 //! `ipr` (one entry per contact, total over both surfaces) and `lines` (the
 //! arch line each arch was aligned on, case coordinates). The summary of each
-//! arch is returned.
+//! arch is returned. The poses go to and from the arch-space moves of
+//! `setup::run` as the plugin's staging reads them
+//! (`staging::q_from_delta`, `staging::delta_from_q`): the shortest rotation,
+//! a quaternion with `w >= 0` ([`dca_algo::rotation`]).
 
 use std::collections::BTreeMap;
 
-use dc_case::{CaseState, Fdi, ModuleState, Pose};
+use dc_case::{CaseState, Fdi, ModuleState};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
-use dca_algo::frame;
 use dca_algo::setup::{self, ToothInput};
 use dca_algo::teeth::{self, Which};
+use dca_algo::{frame, rotation, staging};
 use dca_model::{AlignersState, IprStep, MODULE_ID};
 use serde_json::{Map, Value, json};
 
@@ -53,17 +62,6 @@ fn which(arch: Arch) -> Which {
 
 fn invalid(msg: impl Into<String>) -> CommandError {
     CommandError::Invalid(msg.into())
-}
-
-/// The local pose (in the rest frame `rest`) of the rigid move `delta` of a
-/// tooth: `rest^-1 * delta * rest`.
-fn local_pose(rest: &Pose, delta: &Pose) -> Pose {
-    rest.inverse().compose(delta).compose(rest)
-}
-
-/// The rigid move of a tooth for its local pose: `rest * local * rest^-1`.
-fn world_delta(rest: &Pose, local: &Pose) -> Pose {
-    rest.compose(local).compose(&rest.inverse())
 }
 
 fn check(params: &setup::Params) -> Result<Vec<Fdi>, CommandError> {
@@ -119,6 +117,14 @@ fn run_automatic(
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
     let excluded = check(&params)?;
+    // `case_plan.run_setup`: with both arches the bite comes first, whichever
+    // arch is asked for; nothing changes in the case
+    if dca_algo::occlusion::bite_needed(state) {
+        return Err(crate::commands::messages::invalid(
+            "aligners-err-setup-bite-first",
+            &[],
+        ));
+    }
     let mut data = match state.module(MODULE_ID) {
         None => AlignersState::default(),
         Some(m) => m
@@ -163,8 +169,6 @@ fn run_automatic(
         .map_err(|e| CommandError::Failed(e.to_string()))?;
         let to_case = framed.arch_frame.matrix();
         let to_arch = frame::rigid_inverse(&to_case);
-        let to_case_pose = Pose::from_mat4(&to_case);
-        let to_arch_pose = Pose::from_mat4(&to_arch);
         let vertices: Vec<_> = case_vertices
             .iter()
             .map(|&p| to_arch.transform_point3(p))
@@ -190,9 +194,9 @@ fn run_automatic(
             .iter()
             .map(|(f, t)| (*f, ToothInput::from(t)))
             .collect();
-        // the rest pose of each tooth (case coordinates): the stored tooth frame, else the one
-        // the teeth stage would store
-        let rest: BTreeMap<Fdi, Pose> = geo
+        // the rest frame of each tooth in arch coordinates (the staging's frame): the rest pose
+        // of the stored tooth frame, else of the one the teeth stage would store
+        let frames: BTreeMap<Fdi, _> = geo
             .teeth
             .iter()
             .map(|(f, t)| {
@@ -201,7 +205,7 @@ fn run_automatic(
                     .get(f)
                     .copied()
                     .unwrap_or_else(|| teeth::tooth_frame(&t.transformed(&to_case)));
-                (*f, teeth::rest_pose(&fr))
+                (*f, to_arch * teeth::rest_pose(&fr).to_mat4())
             })
             .collect();
 
@@ -216,11 +220,12 @@ fn run_automatic(
         let poses: BTreeMap<_, _> = locked
             .iter()
             .map(|f| {
-                let local = data.setup.poses.get(f).copied().unwrap_or(Pose::IDENTITY);
-                let delta = to_arch_pose
-                    .compose(&world_delta(&rest[f], &local))
-                    .compose(&to_case_pose);
-                (*f, delta.to_mat4())
+                let q = data
+                    .setup
+                    .poses
+                    .get(f)
+                    .map_or([0.0; 6], staging::q_from_pose);
+                (*f, staging::delta_from_q(&frames[f], &q))
             })
             .collect();
         let line: Vec<_> = params
@@ -261,15 +266,12 @@ fn run_automatic(
             }
             match r.targets.get(f) {
                 Some(d) => {
-                    let delta = to_case_pose
-                        .compose(&Pose::from_mat4(d))
-                        .compose(&to_arch_pose);
-                    let local = local_pose(&rest[f], &delta);
+                    let local = staging::pose_from_q(&staging::q_from_delta(&frames[f], d));
                     teeth_report.insert(
                         f.to_string(),
                         json!({
                             "translation_mm": local.t.to_array(),
-                            "rotation_deg": local.q.normalize().to_axis_angle().1.to_degrees(),
+                            "rotation_deg": rotation::degrees(&local),
                         }),
                     );
                     data.setup.poses.insert(*f, local);
@@ -337,7 +339,7 @@ fn run_automatic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dc_case::ScanRole;
+    use dc_case::{Pose, ScanRole};
 
     fn run(state: &CaseState, params: Value) -> Result<CommandOutput, CommandError> {
         crate::commands::find("aligners.planning.setup.automatic")
@@ -479,6 +481,79 @@ mod tests {
         }
     }
 
+    /// The 719-stage anomaly: where the arch lies in the case changed the sign of
+    /// the stored quaternions (`w < 0`), read as turns of 350 degrees and more.
+    /// The setup is the same move of each tooth wherever the arch lies, stored as
+    /// the shortest rotation, and the staging plans the same aligners.
+    #[test]
+    fn the_setup_and_its_aligners_do_not_depend_on_where_the_arch_lies() {
+        // the staging needs the measured teeth (`aligners.teeth.frames`)
+        let state = crate::commands::find("aligners.teeth.frames")
+            .unwrap()
+            .execute(
+                &demo(&CaseState::default(), "lower", "moderate"),
+                &Value::Null,
+                &JobCtx::detached(),
+            )
+            .unwrap()
+            .0;
+        let (base, base_out) = run(&state, Value::Null).unwrap();
+        let stage = |s: &CaseState| {
+            crate::commands::find("aligners.planning.staging.automatic")
+                .unwrap()
+                .execute(s, &Value::Null, &JobCtx::detached())
+                .unwrap()
+        };
+        let (_, base_plan) = stage(&base);
+        let n = base_plan["lower"]["aligners"].as_u64().unwrap();
+        assert!((1..=40).contains(&n), "{n}");
+        for (axis, deg) in [
+            (glam::DVec3::Z, 170.0),
+            (glam::DVec3::new(1.0, 0.3, -0.2), 135.0),
+            (glam::DVec3::new(-0.4, 1.0, 0.7), 250.0),
+            (glam::DVec3::X, 180.0),
+        ] {
+            let r = glam::DQuat::from_axis_angle(axis.normalize(), f64::to_radians(deg));
+            let delta =
+                glam::DMat4::from_rotation_translation(r, glam::DVec3::new(12.0, -30.0, 7.0));
+            let moved = crate::commands::occlusion::move_arch(
+                &state,
+                data(&state),
+                Arch::Lower,
+                &delta,
+                &[],
+            );
+            let (next, out) = run(&moved, Value::Null).unwrap();
+            let (a, b) = (data(&base).setup.poses, data(&next).setup.poses);
+            assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+            for (f, p) in &b {
+                assert!(p.q.w >= 0.0, "{axis} {deg}: {f} {p:?}");
+                // the moved scan is stored in f32 again: the same move within the
+                // bounds of the setup oracle (0.01 mm, 0.05 degrees)
+                let (dt, turn) = (
+                    p.t.distance(a[f].t),
+                    rotation::degrees(&p.compose(&a[f].inverse())),
+                );
+                assert!(
+                    dt < 0.01 && turn < 0.05,
+                    "{axis} {deg}: {f} {dt} mm {turn} deg"
+                );
+                let reported = out["lower"]["teeth"][f.to_string()]["rotation_deg"]
+                    .as_f64()
+                    .unwrap();
+                let want = base_out["lower"]["teeth"][f.to_string()]["rotation_deg"]
+                    .as_f64()
+                    .unwrap();
+                assert!(
+                    reported <= 30.0 && (reported - want).abs() < 0.05,
+                    "{f}: {reported} against {want}"
+                );
+            }
+            let (_, plan) = stage(&next);
+            assert_eq!(plan["lower"]["aligners"], n, "{axis} {deg}");
+        }
+    }
+
     #[test]
     fn locked_teeth_keep_their_pose_and_excluded_teeth_stay_at_rest() {
         let state = demo(&CaseState::default(), "lower", "moderate");
@@ -504,13 +579,82 @@ mod tests {
         assert!(notes.iter().any(|n| n["kind"] == "locked"));
     }
 
+    /// `state` after the virtual bite.
+    fn bitten(state: &CaseState) -> CaseState {
+        crate::commands::find("aligners.occlusion.virtual-bite")
+            .unwrap()
+            .execute(state, &Value::Null, &JobCtx::detached())
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn with_both_arches_the_bite_comes_first() {
+        // `case_plan.run_setup`: both arches with their teeth, not related
+        let both = super::super::occlusion::tests::two_demo_arches();
+        assert!(dca_algo::occlusion::bite_needed(&both));
+        let before = data(&both);
+        for params in [
+            Value::Null,
+            json!({ "arch": "lower" }),
+            json!({ "arch": "upper" }),
+        ] {
+            let err = run(&both, params.clone()).unwrap_err();
+            let CommandError::Invalid(m) = err else {
+                panic!("not a refusal: {err:?}");
+            };
+            assert!(
+                m.starts_with("with both arches the bite comes first") && m.contains("Bite"),
+                "{params}: {m}"
+            );
+        }
+        // the refusal changes nothing in the case
+        assert_eq!(data(&both), before);
+        assert!(before.setup.poses.is_empty() && !before.bite_registered);
+
+        // allowed after the virtual bite
+        let virtual_bite = bitten(&both);
+        assert!(!dca_algo::occlusion::bite_needed(&virtual_bite));
+        let (_, out) = run(&virtual_bite, Value::Null).unwrap();
+        assert!(out["lower"].is_object() && out["upper"].is_object());
+
+        // allowed after a registration (the flag the registration commands set)
+        let mut registered = both.clone();
+        let mut d = data(&both);
+        d.bite_registered = true;
+        registered.set_module(MODULE_ID, ModuleState::new(d));
+        assert!(run(&registered, Value::Null).is_ok());
+
+        // allowed for scans already in occlusion (exported in occlusion): the
+        // arch frames say so without any registration
+        let mut exported = virtual_bite.clone();
+        let mut d = data(&virtual_bite);
+        d.bite_registered = false;
+        exported.set_module(MODULE_ID, ModuleState::new(d));
+        assert!(!dca_algo::occlusion::bite_needed(&exported));
+        assert!(run(&exported, Value::Null).is_ok());
+
+        // allowed with a single arch
+        let lower = demo(&CaseState::default(), "lower", "mild");
+        assert!(!dca_algo::occlusion::bite_needed(&lower));
+        assert!(run(&lower, Value::Null).is_ok());
+        // and with two scans when one arch has no tooth colours yet
+        let mut d = data(&both);
+        d.labels.remove(&ScanRole::Upper);
+        let mut one = both.clone();
+        one.set_module(MODULE_ID, ModuleState::new(d));
+        assert!(!dca_algo::occlusion::bite_needed(&one));
+        let (_, out) = run(&one, Value::Null).unwrap();
+        assert!(out["lower"].is_object() && out.get("upper").is_none());
+    }
+
     #[test]
     fn a_drawn_line_is_followed_and_both_arches_are_set_up() {
-        let both = demo(
+        let both = bitten(&demo(
             &demo(&CaseState::default(), "lower", "mild"),
             "upper",
             "mild",
-        );
+        ));
         let (all, out) = run(&both, Value::Null).unwrap();
         assert!(out["lower"].is_object() && out["upper"].is_object());
         let d = data(&all);

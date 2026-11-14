@@ -314,6 +314,29 @@ fn drop_teeth<V>(map: &mut BTreeMap<Fdi, V>, role: ScanRole) -> bool {
     map.len() != n
 }
 
+/// The last aligner of `stages` in which a tooth moves (its pose differs
+/// from the one before it, the rest pose before its first) or an IPR is
+/// done; 0 when there is none. The staging keeps the aligners up to there
+/// (`dca_algo::schedule::active_stages` with the IPR, in `merge_arch`).
+fn last_active_stage(stages: &[Stage]) -> u32 {
+    let mut ordered: Vec<&Stage> = stages.iter().collect();
+    ordered.sort_by_key(|s| s.index);
+    let mut before: BTreeMap<Fdi, Pose> = BTreeMap::new();
+    let mut last = 0;
+    for s in ordered {
+        if !s.ipr.is_empty() {
+            last = last.max(s.index);
+        }
+        for (f, p) in &s.poses {
+            let prev = before.insert(*f, *p).unwrap_or(Pose::IDENTITY);
+            if !p.approx_eq(&prev, 1e-9, 1e-9) {
+                last = last.max(s.index);
+            }
+        }
+    }
+    last
+}
+
 impl AlignersState {
     /// Drops everything computed from, or entered about, the scan of the
     /// arch `role`, and returns the ids of the groups that held data, in the
@@ -336,14 +359,15 @@ impl AlignersState {
     /// settings (staging, trim, occlusal, ramp sizes) are kept as they are.
     ///
     /// Stages: as `merge_arch` of the staging command does with an empty
-    /// series, the arch's poses and IPR leave every stage and a stage left
-    /// with neither is dropped. The other arch is not touched: it keeps the
-    /// poses it has in every stage, so a case staged with `merge_arch` keeps
-    /// its aligner count (the arch that finished first repeats its last
-    /// pose), while stages that only the cleared arch filled disappear. The
-    /// stage `index` values are not renumbered, as in `merge_arch`. Control
-    /// visits are not renumbered either; the remaining ones keep their
-    /// `number`.
+    /// series, the arch's poses and IPR leave every stage, and the aligners
+    /// after the end of the other arch's series (its last movement or IPR)
+    /// are dropped, with any stage left with neither poses nor IPR. The
+    /// other arch keeps its own series as it was: the repeats of its last
+    /// pose that only kept up with the longer series of the cleared arch go
+    /// with it, as in the plugin, where each arch has its own aligners
+    /// (`n_stages`). The stage `index` values are not renumbered, as in
+    /// `merge_arch`. Control visits are not renumbered either; the
+    /// remaining ones keep their `number`.
     pub fn clear_arch(&mut self, role: ScanRole) -> Vec<&'static str> {
         if role == ScanRole::Bite {
             return Vec::new();
@@ -553,6 +577,12 @@ impl AlignersState {
             s.ipr
                 .retain(|r| !r.between.iter().any(|f| in_arch(*f, role)));
             held |= n != s.ipr.len();
+        }
+        if held {
+            // the other arch keeps its own series, not the repeats of its last
+            // pose that kept up with this arch (the staging's `merge_arch`)
+            let end = last_active_stage(&self.stages);
+            self.stages.retain(|s| s.index <= end);
         }
         self.stages
             .retain(|s| !s.poses.is_empty() || !s.ipr.is_empty());

@@ -36,10 +36,10 @@
 
 use std::collections::BTreeMap;
 
-use dc_case::Fdi;
+use dc_case::{CaseState, Fdi, ScanRole};
 use dc_geom::bvh::Bvh;
 use dc_mesh::TriMesh;
-use dca_model::Seed;
+use dca_model::{AlignersState, MODULE_ID, Seed};
 use glam::{DMat3, DMat4, DVec3, Vec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -703,6 +703,52 @@ pub fn in_occlusion(lower_to_case: &DMat4, upper_to_case: &DMat4) -> bool {
     let t = rel.w_axis.truncate();
     let horiz = (t.x * t.x + t.y * t.y).sqrt();
     (-2.0..=10.0).contains(&t.z) && horiz <= 15.0
+}
+
+/// The arch frame of `arch` in `state` (arch coordinates to case
+/// coordinates) as the virtual bite takes it ([`ArchModel::new`]): from the
+/// seeds of the arch, else from its scan. `None` without a scan or a frame.
+fn arch_to_case(state: &CaseState, data: &AlignersState, arch: Arch) -> Option<DMat4> {
+    let mesh = state.mesh(&state.case.scan(arch.role())?.mesh)?;
+    let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+    let input = frame::Input {
+        arch,
+        vertices: &vertices,
+        seeds: &data.seeds,
+    };
+    let framed = frame::run(&input, &frame::Params::default()).ok()?;
+    Some(framed.arch_frame.matrix())
+}
+
+/// `true` when the relation of the two arches is known
+/// (`case_plan.arches_related`): a bite registration or the virtual bite was
+/// applied and no arch was replaced since (`bite_registered`, the plugin's
+/// stored bite source `bite.info(lower)["fonte"]`), or the two arch frames
+/// are already in occlusion ([`in_occlusion`]: scans exported in
+/// occlusion). Arches without a frame are not related.
+pub fn arches_related(state: &CaseState, data: &AlignersState) -> bool {
+    data.bite_registered
+        || match (
+            arch_to_case(state, data, Arch::Lower),
+            arch_to_case(state, data, Arch::Upper),
+        ) {
+            (Some(lower), Some(upper)) => in_occlusion(&lower, &upper),
+            _ => false,
+        }
+}
+
+/// `true` when both arches have their teeth and are not related: the
+/// plugin's `case_plan.opposing_pair` (both arches with their 3D teeth; here
+/// a scan with tooth colours each, the teeth the setup measures) and not
+/// [`arches_related`]. With both arches the bite comes first: the setup
+/// refuses such a case (`case_plan.run_setup`), and the whole automatic run
+/// puts the arches in occlusion before the setup (`case_auto.auto_steps`).
+pub fn bite_needed(state: &CaseState) -> bool {
+    let Some(data) = state.module_data::<AlignersState>(MODULE_ID) else {
+        return false;
+    };
+    let teeth = |role: ScanRole| state.case.scan(role).is_some() && data.labels.contains_key(&role);
+    teeth(ScanRole::Lower) && teeth(ScanRole::Upper) && !arches_related(state, data)
 }
 
 // ----------------------------------------------------------------------------
