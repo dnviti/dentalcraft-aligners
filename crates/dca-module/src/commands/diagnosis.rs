@@ -104,6 +104,7 @@ fn arch_data(
             arch,
             vertices: &case_vertices,
             seeds: &data.seeds,
+            occlusal_flipped: data.occlusal_flipped.contains(&role),
         },
         &frame::Params::default(),
     )

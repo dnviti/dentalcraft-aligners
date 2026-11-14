@@ -250,6 +250,7 @@ fn segment_visit(
             arch,
             vertices: moved,
             seeds: &seeds,
+            occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
         },
         &frame::Params::default(),
     )
@@ -717,6 +718,7 @@ fn run_replan(
             arch,
             vertices: &case_v,
             seeds: &data.seeds,
+            occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
         },
         &frame::Params::default(),
     )

@@ -32,6 +32,7 @@ pub mod occlusion;
 pub mod ramps;
 pub mod reconstruct;
 pub mod rotation;
+pub mod scan_base;
 pub mod schedule;
 pub mod seed_check;
 pub mod segmentation;

@@ -188,6 +188,7 @@ fn run_study_models(
                 arch,
                 vertices: &v,
                 seeds: &data.seeds,
+                occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
             },
             &frame::Params::default(),
         )

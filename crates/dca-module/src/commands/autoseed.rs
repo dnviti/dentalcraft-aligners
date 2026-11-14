@@ -138,11 +138,12 @@ fn run_orientation(
     require_settled(scan)?;
     let mesh = state.blobs.require(&scan.mesh)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
-    let seeds = aligners_data(state)?.seeds;
+    let data = aligners_data(state)?;
     let input = frame::Input {
         arch,
         vertices: &vertices,
-        seeds: &seeds,
+        seeds: &data.seeds,
+        occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
     };
     let out = autoseed::orient(&input, &mesh.tris).map_err(|e| seed_error(Some(arch), e))?;
     ctx.check_cancelled()?;

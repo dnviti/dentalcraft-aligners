@@ -198,6 +198,17 @@ impl ArchFrame {
             -1.0
         }
     }
+
+    /// The frame with its occlusal side turned over (the plugin's
+    /// `case_teeth._occlusal_flip`): `x` and `n` reversed, `y` and the
+    /// origin kept, so it stays right-handed.
+    pub fn turned_over(self) -> Self {
+        Self {
+            x: -self.x,
+            n: -self.n,
+            ..self
+        }
+    }
 }
 
 /// Arch frame from the seeds of one arch (occlusal plane by least squares),
@@ -408,6 +419,11 @@ pub struct Input<'a> {
     pub vertices: &'a [DVec3],
     /// Seeds of the case (any arch; other arches are ignored).
     pub seeds: &'a [Seed],
+    /// The occlusal side of the arch was turned over by hand
+    /// (`AlignersState::occlusal_flipped`): the arch frame found is turned
+    /// over ([`ArchFrame::turned_over`]), as the plugin does after
+    /// `compute_frame` (`case_teeth._occlusal_flip`).
+    pub occlusal_flipped: bool,
 }
 
 /// Where the arch frame came from.
@@ -455,6 +471,7 @@ pub fn run(input: &Input<'_>, _params: &Params) -> Result<Output, FrameError> {
             (FrameSource::Mesh, f, c)
         }
     };
+    let arch_frame = oriented(input, arch_frame);
     Ok(output(input.arch, source, arch_frame, centre))
 }
 
@@ -470,7 +487,18 @@ pub fn run_from_seeds(input: &Input<'_>, _params: &Params) -> Result<Output, Fra
     let arch_seeds = arch_seeds(input);
     let arch_frame = arch_frame_from_seeds(&arch_seeds, centroid(input.vertices))?;
     let centre = arch_centre(&arch_frame, &arch_seeds);
+    let arch_frame = oriented(input, arch_frame);
     Ok(output(input.arch, FrameSource::Seeds, arch_frame, centre))
+}
+
+/// `frame` turned over when the occlusal side of the input was turned over
+/// by hand.
+fn oriented(input: &Input<'_>, frame: ArchFrame) -> ArchFrame {
+    if input.occlusal_flipped {
+        frame.turned_over()
+    } else {
+        frame
+    }
 }
 
 /// The seeds of the arch of the input.
@@ -798,6 +826,7 @@ mod tests {
                 arch,
                 vertices: &v,
                 seeds: &seeds,
+                occlusal_flipped: false,
             };
             let out = run(&input, &Params::default()).unwrap();
             assert_eq!(out.source, FrameSource::Seeds);
@@ -823,6 +852,7 @@ mod tests {
                     arch,
                     vertices: &v2,
                     seeds: &s2,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -844,6 +874,7 @@ mod tests {
                     arch,
                     vertices: &v,
                     seeds: &seeds,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -853,6 +884,7 @@ mod tests {
                     arch,
                     vertices: &v,
                     seeds: &[],
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -878,11 +910,46 @@ mod tests {
                     arch,
                     vertices: &v,
                     seeds: &other,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
             .unwrap();
             assert_eq!(ignored.source, FrameSource::Mesh);
+        }
+    }
+
+    #[test]
+    fn a_flipped_occlusal_side_turns_the_frame_over() {
+        // the plugin's arch_set(flip=True): frame X and Z reversed, Y kept
+        // (tests/archive/test_manual_tools.py), the same origin and centre
+        for (arch, with_seeds) in [
+            (Arch::Lower, true),
+            (Arch::Upper, true),
+            (Arch::Lower, false),
+        ] {
+            let (v, seeds) = demo_input(arch, with_seeds);
+            let input = |occlusal_flipped| Input {
+                arch,
+                vertices: &v,
+                seeds: &seeds,
+                occlusal_flipped,
+            };
+            let a = run(&input(false), &Params::default()).unwrap();
+            let b = run(&input(true), &Params::default()).unwrap();
+            assert_eq!(b.arch_frame, a.arch_frame.turned_over(), "{arch:?}");
+            assert_eq!(b.arch_frame.n, -a.arch_frame.n);
+            assert_eq!(b.arch_frame.x, -a.arch_frame.x);
+            assert_eq!(b.arch_frame.y, a.arch_frame.y);
+            assert_eq!(b.arch_frame.handedness(), 1.0);
+            assert_eq!((b.centre, b.source), (a.centre, a.source));
+            // the world frame turns the arch upside down
+            let up = |o: &Output| o.from_case.apply_vector(a.arch_frame.n);
+            assert!(up(&a).dot(up(&b)) < -0.999, "{arch:?}");
+            if with_seeds {
+                let strict = run_from_seeds(&input(true), &Params::default()).unwrap();
+                assert_eq!(strict.arch_frame, b.arch_frame);
+            }
         }
     }
 
@@ -895,6 +962,7 @@ mod tests {
                     arch: Arch::Lower,
                     vertices: &v,
                     seeds,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -906,6 +974,7 @@ mod tests {
                 arch: Arch::Lower,
                 vertices: &v,
                 seeds: &seeds,
+                occlusal_flipped: false,
             },
             &Params::default(),
         )
@@ -931,6 +1000,7 @@ mod tests {
                 arch: Arch::Lower,
                 vertices: &v,
                 seeds: &seeds[..3],
+                occlusal_flipped: false,
             },
             &Params::default(),
         )
@@ -942,6 +1012,7 @@ mod tests {
                     arch: Arch::Lower,
                     vertices: &[],
                     seeds: &seeds,
+                    occlusal_flipped: false,
                 },
                 &Params::default()
             ),
@@ -969,6 +1040,7 @@ mod tests {
             arch: Arch::Lower,
             vertices: &[],
             seeds: &[],
+            occlusal_flipped: false,
         };
         assert_eq!(
             run(&input, &Params::default()),

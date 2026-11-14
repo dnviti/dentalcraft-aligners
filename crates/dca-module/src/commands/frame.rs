@@ -49,18 +49,18 @@ fn run_frame(
     super::import::require_settled(scan)?;
     let mesh = state.blobs.require(&scan.mesh)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
-    let seeds = match state.module(MODULE_ID) {
-        None => Vec::new(),
+    let data = match state.module(MODULE_ID) {
+        None => AlignersState::default(),
         Some(m) => m
             .downcast_ref::<AlignersState>()
             .ok_or_else(crate::commands::messages::no_data)?
-            .seeds
             .clone(),
     };
     let input = dca_algo::frame::Input {
         arch,
         vertices: &vertices,
-        seeds: &seeds,
+        seeds: &data.seeds,
+        occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
     };
     let out = dca_algo::frame::run(&input, &params)
         .map_err(|e| crate::commands::messages::frame_error(arch, &e))?;

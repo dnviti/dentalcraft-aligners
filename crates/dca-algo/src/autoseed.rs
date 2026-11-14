@@ -1571,7 +1571,8 @@ pub struct Orientation {
 /// seeds of the arch when there are enough of them, otherwise from the arch
 /// frame of the crowns ([`arch_frame`]), with the arch centre halfway
 /// between its origin (the most posterior crowns) and the most anterior
-/// crown tops.
+/// crown tops. The frame is turned over when the occlusal side of the arch
+/// was turned over by hand (`input.occlusal_flipped`).
 pub fn orient(
     input: &frame::Input<'_>,
     triangles: &[[u32; 3]],
@@ -1606,6 +1607,11 @@ pub fn orient(
                 transform(&m, DVec3::new(0.0, 0.5 * front, 0.0)),
             )
         }
+    };
+    let arch_frame = if input.occlusal_flipped {
+        arch_frame.turned_over()
+    } else {
+        arch_frame
     };
     let from_case = frame::world_delta(&arch_frame, input.arch, centre);
     Ok(Orientation {

@@ -71,6 +71,9 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.frame",
     "aligners.demo",
     "aligners.case.detect-arch",
+    // the scan corrections of the Import scans inspector
+    "aligners.case.set-arch",
+    "aligners.case.make-base",
     "aligners.preparation.orientation.automatic",
     "aligners.preparation.numbering.automatic",
     "aligners.teeth.frames",

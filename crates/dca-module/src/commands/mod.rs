@@ -90,6 +90,7 @@ mod export;
 mod frame;
 mod gingiva;
 pub mod import;
+pub mod make_base;
 mod manual;
 pub(crate) mod messages;
 mod occlusion;
@@ -98,6 +99,7 @@ mod reconstruct;
 mod schedule;
 mod seed_check;
 mod segmentation;
+pub mod set_arch;
 mod setup;
 mod shell;
 mod staging;
@@ -113,6 +115,7 @@ pub(crate) mod wrappers;
 pub fn all() -> Vec<CommandSpec> {
     [
         import::specs,
+        set_arch::specs,
         frame::specs,
         demo::specs,
         autoseed::specs,

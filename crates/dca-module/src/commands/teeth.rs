@@ -82,6 +82,7 @@ fn run_frames(
                 arch,
                 vertices: &case_vertices,
                 seeds: &data.seeds,
+                occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
             },
             &frame::Params::default(),
         )

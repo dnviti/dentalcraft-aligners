@@ -1517,7 +1517,7 @@ mod tests {
         });
         let v: Vec<DVec3> = d.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let labels = d.mesh.vertex_labels.clone().unwrap();
-        ArchModel::new(arch, &v, &d.mesh.tris, &labels, &d.seeds).unwrap()
+        ArchModel::new(arch, &v, &d.mesh.tris, &labels, &d.seeds, false).unwrap()
     }
 
     #[test]

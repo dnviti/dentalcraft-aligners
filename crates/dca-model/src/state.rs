@@ -19,9 +19,9 @@ pub struct Seed {
 }
 
 /// What the built teeth of an arch were built from: its tooth colours (the
-/// labels blob), its tooth marks (sorted by number) and its missing teeth.
-/// When the arch holds something else now, its built teeth are out of date
-/// ([`AlignersState::teeth_out_of_date`]).
+/// labels blob), its tooth marks (sorted by number), its missing teeth and
+/// the side of its occlusal face. When the arch holds something else now,
+/// its built teeth are out of date ([`AlignersState::teeth_out_of_date`]).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TeethBasis {
@@ -31,6 +31,9 @@ pub struct TeethBasis {
     pub seeds: Vec<Seed>,
     /// The teeth of the arch marked missing.
     pub missing: Vec<Fdi>,
+    /// The occlusal side of the arch was turned over by hand
+    /// ([`AlignersState::occlusal_flipped`]).
+    pub occlusal_flipped: bool,
 }
 
 /// Why the built teeth of an arch are out of date
@@ -45,6 +48,9 @@ pub enum TeethChange {
     Marks,
     /// Teeth were marked missing or present.
     Missing,
+    /// The occlusal side of the arch was turned over by hand: the arch frame
+    /// the teeth were measured in is upside down now.
+    Orientation,
 }
 
 /// Rest frame of a 3D tooth.
@@ -267,6 +273,49 @@ pub struct AlignersState {
     /// What was changed by hand on the 3D components with the gizmo: the
     /// moves of the scans (with their arch) and the sizes of built teeth.
     pub components: ComponentEdits,
+    /// The arches whose occlusal side was turned over by hand
+    /// (`aligners.case.set-arch` with `flip_occlusal`, the plugin's
+    /// `oa_occlusal_flip`): the side of the teeth the seeds give was the
+    /// wrong one, so every arch frame of the arch is turned over (`x` and the
+    /// occlusal normal reversed, `y` kept). It goes with the scan: it moves
+    /// with an arch that changes place and goes when the scan is replaced.
+    pub occlusal_flipped: BTreeSet<ScanRole>,
+}
+
+/// The same tooth in the other arch, on the same side (the plugin's
+/// `manual.other_arch_fdi`): 13 ↔ 43, 24 ↔ 34. The deciduous quadrants
+/// follow the same rule (55 ↔ 85, 64 ↔ 74), which the plugin never meets.
+pub fn other_arch_fdi(f: Fdi) -> Fdi {
+    let q = match f.quadrant() {
+        1 => 4,
+        4 => 1,
+        2 => 3,
+        3 => 2,
+        5 => 8,
+        8 => 5,
+        6 => 7,
+        _ => 6,
+    };
+    Fdi::new(q * 10 + f.position()).expect("the same position in the opposite quadrant")
+}
+
+/// A tooth label (`0` = gingiva) in the other arch: every tooth number goes
+/// to [`other_arch_fdi`], the gingiva stays `0`, and a value that is no tooth
+/// becomes gingiva (the plugin's conversion table maps it to `0`).
+pub fn other_arch_label(label: u16) -> u16 {
+    u8::try_from(label)
+        .ok()
+        .and_then(|n| Fdi::new(n).ok())
+        .map_or(0, |f| u16::from(other_arch_fdi(f).get()))
+}
+
+/// The arch `role` in the other jaw (a bite role stays a bite).
+fn opposite(role: ScanRole) -> ScanRole {
+    match role {
+        ScanRole::Upper => ScanRole::Lower,
+        ScanRole::Lower => ScanRole::Upper,
+        ScanRole::Bite => ScanRole::Bite,
+    }
 }
 
 /// Ids [`AlignersState::clear_arch`] (and so the `scan_replaced` hook) can
@@ -392,6 +441,8 @@ impl AlignersState {
         if self.visits.len() != n {
             cleared.push("visits");
         }
+        // a correction of the scan that was replaced
+        self.occlusal_flipped.remove(&role);
         cleared
     }
 
@@ -430,8 +481,8 @@ impl AlignersState {
         self.segmentation_runs.remove(&role);
     }
 
-    /// The tooth colours, tooth marks and missing teeth the arch `role`
-    /// holds now.
+    /// The tooth colours, tooth marks, missing teeth and occlusal side the
+    /// arch `role` holds now.
     pub fn teeth_basis_now(&self, role: ScanRole) -> TeethBasis {
         let mut seeds: Vec<Seed> = self
             .seeds
@@ -449,6 +500,7 @@ impl AlignersState {
                 .copied()
                 .filter(|f| in_arch(*f, role))
                 .collect(),
+            occlusal_flipped: self.occlusal_flipped.contains(&role),
         }
     }
 
@@ -460,15 +512,17 @@ impl AlignersState {
     }
 
     /// A tooth of the arch `role` was built again by hand: once no tooth
-    /// corrected by hand waits to be rebuilt and the tooth marks and missing
-    /// teeth are those the teeth were built from, the built teeth match the
-    /// arch again (its colours were only changed tooth by tooth).
+    /// corrected by hand waits to be rebuilt and the tooth marks, missing
+    /// teeth and occlusal side are those the teeth were built from, the
+    /// built teeth match the arch again (its colours were only changed tooth
+    /// by tooth).
     pub fn rebuilt_by_hand(&mut self, role: ScanRole) {
         let now = self.teeth_basis_now(role);
-        let marks_same = self
-            .teeth_basis
-            .get(&role)
-            .is_some_and(|b| b.seeds == now.seeds && b.missing == now.missing);
+        let marks_same = self.teeth_basis.get(&role).is_some_and(|b| {
+            b.seeds == now.seeds
+                && b.missing == now.missing
+                && b.occlusal_flipped == now.occlusal_flipped
+        });
         if marks_same && !self.dirty.iter().any(|f| in_arch(*f, role)) {
             self.teeth_basis.insert(role, now);
         }
@@ -508,8 +562,99 @@ impl AlignersState {
             if b.missing != now.missing {
                 out.push(TeethChange::Missing);
             }
+            if b.occlusal_flipped != now.occlusal_flipped {
+                out.push(TeethChange::Orientation);
+            }
         }
         out
+    }
+
+    /// The arches `moved` change jaw (the plugin's `manual.set_arch_steps`
+    /// with a new arch): their scans swap, or one scan takes the free arch.
+    /// What the case keeps of them is renumbered to the other jaw
+    /// ([`other_arch_fdi`], same side, same tooth) and moved to the other
+    /// role: the tooth marks, the teeth marked missing (both the marks of
+    /// the arch and the "missing teeth" setting of Find the teeth), the
+    /// teeth waiting for a rebuild, the key of the labels blob, the occlusal
+    /// side turned over by hand, and the control visits (their arch and
+    /// their teeth; their scan blobs keep the old numbers and are relabelled
+    /// by the caller, as the labels blobs).
+    ///
+    /// Call it after [`AlignersState::clear_label_dependents`] on every
+    /// moved arch: the built teeth and what follows them are made again from
+    /// the renumbered labels, never renumbered. The record of what the teeth
+    /// were built from goes with them.
+    ///
+    /// Entries of the arch a single scan moves to (it had no scan) are kept
+    /// for the sets and replaced for the rest, as in the plugin, where the
+    /// "missing teeth" list keeps the numbers already in the new arch.
+    pub fn renumber_arches(&mut self, moved: &BTreeSet<ScanRole>) {
+        let moved: BTreeSet<ScanRole> = moved
+            .iter()
+            .copied()
+            .filter(|r| *r != ScanRole::Bite)
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        let moves = |f: Fdi| moved.iter().any(|r| in_arch(f, *r));
+        let map = |f: Fdi| if moves(f) { other_arch_fdi(f) } else { f };
+        let role_map = |r: ScanRole| {
+            if moved.contains(&r) { opposite(r) } else { r }
+        };
+        // the arches the moved ones go to and that did not move themselves
+        let landing: BTreeSet<ScanRole> = moved
+            .iter()
+            .map(|r| opposite(*r))
+            .filter(|r| !moved.contains(r))
+            .collect();
+        let lands = |f: Fdi| landing.iter().any(|r| in_arch(f, *r));
+
+        self.seeds.retain(|s| !lands(s.fdi));
+        for s in &mut self.seeds {
+            s.fdi = map(s.fdi);
+        }
+        self.missing = self.missing.iter().map(|f| map(*f)).collect();
+        let find = &mut self.settings.find_teeth.missing;
+        let mut renumbered: Vec<u8> = find
+            .iter()
+            .map(|&n| Fdi::new(n).map_or(n, |f| map(f).get()))
+            .collect();
+        renumbered.sort_unstable();
+        renumbered.dedup();
+        *find = renumbered;
+        self.dirty = self.dirty.iter().map(|f| map(*f)).collect();
+
+        let labels = std::mem::take(&mut self.labels);
+        self.labels = labels
+            .into_iter()
+            .filter(|(r, _)| !landing.contains(r))
+            .map(|(r, v)| (role_map(r), v))
+            .collect();
+        self.teeth_basis
+            .retain(|r, _| !moved.contains(r) && !landing.contains(r));
+        self.occlusal_flipped = self
+            .occlusal_flipped
+            .iter()
+            .filter(|r| !landing.contains(r))
+            .map(|r| role_map(*r))
+            .collect();
+
+        for v in &mut self.visits {
+            if !moved.contains(&v.arch) {
+                continue;
+            }
+            v.arch = opposite(v.arch);
+            v.teeth = std::mem::take(&mut v.teeth)
+                .into_iter()
+                .map(|(f, t)| (other_arch_fdi(f), t))
+                .collect();
+            v.untracked = v.untracked.iter().map(|f| other_arch_fdi(*f)).collect();
+            v.speed = std::mem::take(&mut v.speed)
+                .into_iter()
+                .map(|(f, s)| (other_arch_fdi(f), s))
+                .collect();
+        }
     }
 
     /// Drops what is computed from the labels of the arch `role`, keeping
@@ -1003,8 +1148,8 @@ mod tests {
         let built = st.clone();
         assert!(!built.teeth_out_of_date(ScanRole::Lower));
         type Change = fn(&mut AlignersState);
-        use TeethChange::{Colours, Marks, Missing};
-        let changes: [(&str, TeethChange, Change); 6] = [
+        use TeethChange::{Colours, Marks, Missing, Orientation};
+        let changes: [(&str, TeethChange, Change); 7] = [
             ("colours", Colours, |s| {
                 s.labels
                     .insert(ScanRole::Lower, BlobRef::of_bytes(b"painted"));
@@ -1024,6 +1169,9 @@ mod tests {
             }),
             ("missing", Missing, |s| {
                 s.missing.insert(Fdi::new(35).unwrap());
+            }),
+            ("occlusal side turned over", Orientation, |s| {
+                s.occlusal_flipped.insert(ScanRole::Lower);
             }),
         ];
         for (what, why, change) in changes {
@@ -1058,5 +1206,121 @@ mod tests {
         s.seeds[0].position.y += 1.0;
         s.rebuilt_by_hand(ScanRole::Lower);
         assert!(s.teeth_out_of_date(ScanRole::Lower));
+    }
+
+    #[test]
+    fn the_other_arch_follows_the_plugins_quadrant_table() {
+        // manual._QUAD_SWAP = {1: 4, 4: 1, 2: 3, 3: 2}: same side, same tooth
+        for (a, b) in [(11, 41), (18, 48), (21, 31), (27, 37), (33, 23), (46, 16)] {
+            let f = Fdi::new(a).unwrap();
+            assert_eq!(other_arch_fdi(f).get(), b, "{a}");
+            assert_eq!(other_arch_fdi(other_arch_fdi(f)), f, "{a} and back");
+            assert_eq!(other_arch_fdi(f).is_right(), f.is_right(), "{a}: side");
+        }
+        for f in Fdi::PERMANENT {
+            assert_ne!(other_arch_fdi(f).is_upper(), f.is_upper(), "{f}");
+        }
+        // the labels: the gingiva stays gingiva, a value that is no tooth goes to it
+        assert_eq!(other_arch_label(0), 0);
+        assert_eq!(other_arch_label(36), 26);
+        assert_eq!(other_arch_label(19), 0);
+        assert_eq!(other_arch_label(300), 0);
+    }
+
+    #[test]
+    fn an_arch_that_changes_jaw_takes_the_other_jaws_numbers() {
+        let f = |n: u8| Fdi::new(n).unwrap();
+        let (lower, upper) = (ScanRole::Lower, ScanRole::Upper);
+        let mut st = AlignersState::default();
+        for n in [31, 36, 41, 46] {
+            st.seeds.push(Seed {
+                fdi: f(n),
+                position: DVec3::splat(f64::from(n)),
+            });
+        }
+        // a stray mark of the arch the scan moves to (it has no scan)
+        st.seeds.push(Seed {
+            fdi: f(11),
+            position: DVec3::ZERO,
+        });
+        st.missing.extend([f(35), f(17)]);
+        st.settings.find_teeth.missing = vec![17, 35, 45];
+        st.dirty.insert(f(36));
+        st.labels.insert(lower, BlobRef::of_bytes(b"lower labels"));
+        st.teeth_basis.insert(lower, TeethBasis::default());
+        st.occlusal_flipped.insert(lower);
+        let visit: Visit = serde_json::from_value(serde_json::json!({
+            "number": 1, "date": "2026-11-14", "arch": "lower", "stage": 1,
+            "source_name": "v.stl", "registration_rms_mm": 0.1, "thresholds": [0.5, 2.0],
+            "teeth": {}, "untracked": [36], "on_track": 0, "decision": "on_track",
+            "speed": { "41": 0.5 }, "scan": null, "segmented": false,
+        }))
+        .unwrap();
+        st.visits.push(visit);
+
+        st.renumber_arches(&BTreeSet::from([lower]));
+        let mut seeds: Vec<(u8, f64)> = st
+            .seeds
+            .iter()
+            .map(|s| (s.fdi.get(), s.position.x))
+            .collect();
+        seeds.sort_by_key(|s| s.0);
+        // each mark keeps its place and takes the number of the same tooth above;
+        // the stray mark of the free arch goes
+        assert_eq!(seeds, [(11, 41.0), (16, 46.0), (21, 31.0), (26, 36.0)]);
+        // the plugin: `other_arch_fdi(f) if arch_of(f) != arch else f`
+        assert_eq!(
+            st.missing.iter().map(|f| f.get()).collect::<Vec<_>>(),
+            [17, 25]
+        );
+        assert_eq!(st.settings.find_teeth.missing, [15, 17, 25]);
+        assert_eq!(st.dirty, BTreeSet::from([f(26)]));
+        assert_eq!(
+            st.labels.keys().copied().collect::<Vec<_>>(),
+            [upper],
+            "the labels blob is the upper arch's now"
+        );
+        assert!(st.teeth_basis.is_empty());
+        assert_eq!(st.occlusal_flipped, BTreeSet::from([upper]));
+        let v = &st.visits[0];
+        assert_eq!(v.arch, upper);
+        assert_eq!(v.untracked, [f(26)]);
+        assert_eq!(v.speed.keys().copied().collect::<Vec<_>>(), [f(11)]);
+
+        // two scans swap: both arches renumber, nothing merges
+        let mut st = AlignersState::default();
+        for n in [11, 21, 31, 41] {
+            st.seeds.push(Seed {
+                fdi: f(n),
+                position: DVec3::splat(f64::from(n)),
+            });
+        }
+        st.labels.insert(lower, BlobRef::of_bytes(b"L"));
+        st.labels.insert(upper, BlobRef::of_bytes(b"U"));
+        st.missing.extend([f(18), f(38)]);
+        st.renumber_arches(&BTreeSet::from([lower, upper]));
+        let mut seeds: Vec<(u8, f64)> = st
+            .seeds
+            .iter()
+            .map(|s| (s.fdi.get(), s.position.x))
+            .collect();
+        seeds.sort_by_key(|s| s.0);
+        assert_eq!(seeds, [(11, 41.0), (21, 31.0), (31, 21.0), (41, 11.0)]);
+        assert_eq!(st.labels[&upper], BlobRef::of_bytes(b"L"));
+        assert_eq!(st.labels[&lower], BlobRef::of_bytes(b"U"));
+        assert_eq!(st.missing, BTreeSet::from([f(28), f(48)]));
+        // a bite role moves nothing
+        let before = st.clone();
+        st.renumber_arches(&BTreeSet::from([ScanRole::Bite]));
+        assert_eq!(st, before);
+    }
+
+    #[test]
+    fn a_replaced_scan_loses_its_occlusal_flip() {
+        let mut st = AlignersState::default();
+        st.occlusal_flipped
+            .extend([ScanRole::Lower, ScanRole::Upper]);
+        st.clear_arch(ScanRole::Lower);
+        assert_eq!(st.occlusal_flipped, BTreeSet::from([ScanRole::Upper]));
     }
 }

@@ -155,7 +155,8 @@ pub struct ArchModel {
 
 impl ArchModel {
     /// Model of a labelled scan in case coordinates; the arch frame comes
-    /// from the seeds of the arch ([`frame::run`]).
+    /// from the seeds of the arch ([`frame::run`]), turned over when the
+    /// occlusal side of the arch was turned over by hand.
     ///
     /// # Errors
     /// [`OcclusionError::Invalid`] for labels that do not match the scan, a
@@ -166,12 +167,14 @@ impl ArchModel {
         tris: &[[u32; 3]],
         labels: &[u16],
         seeds: &[Seed],
+        occlusal_flipped: bool,
     ) -> Result<Self, OcclusionError> {
         let framed = frame::run(
             &frame::Input {
                 arch,
                 vertices: case_vertices,
                 seeds,
+                occlusal_flipped,
             },
             &frame::Params::default(),
         )
@@ -715,6 +718,7 @@ fn arch_to_case(state: &CaseState, data: &AlignersState, arch: Arch) -> Option<D
         arch,
         vertices: &vertices,
         seeds: &data.seeds,
+        occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
     };
     let framed = frame::run(&input, &frame::Params::default()).ok()?;
     Some(framed.arch_frame.matrix())
@@ -1095,7 +1099,7 @@ mod tests {
         });
         let v: Vec<DVec3> = d.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let labels = d.mesh.vertex_labels.clone().unwrap();
-        ArchModel::new(arch, &v, &d.mesh.tris, &labels, &d.seeds).unwrap()
+        ArchModel::new(arch, &v, &d.mesh.tris, &labels, &d.seeds, false).unwrap()
     }
 
     #[test]

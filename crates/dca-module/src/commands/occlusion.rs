@@ -91,7 +91,8 @@ pub(crate) fn arch_model(
             )
         })?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
-    ArchModel::new(arch, &vertices, &mesh.tris, labels, &data.seeds)
+    let flipped = data.occlusal_flipped.contains(&arch.role());
+    ArchModel::new(arch, &vertices, &mesh.tris, labels, &data.seeds, flipped)
         .map_err(|e| CommandError::Invalid(format!("{} arch: {e}", arch_name(arch))))
 }
 
