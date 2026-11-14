@@ -245,6 +245,36 @@ pub struct Setup {
     /// The arch line the setup aligned each arch on (case coordinates, mm,
     /// evenly spaced points).
     pub lines: BTreeMap<ScanRole, Vec<DVec3>>,
+    /// The arch line drawn by the clinician for each arch (case
+    /// coordinates, mm): the setup aligns the cusps on it instead of the
+    /// automatic line until it is taken back (the plugin's
+    /// `oa_arch_line`). Kept when the final position is cleared.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub drawn: BTreeMap<ScanRole, Vec<DVec3>>,
+    /// What the last automatic final position gave for each arch (the
+    /// plugin's `setup_json`, shown by the inspector of "Final position").
+    /// It goes with the final position it describes.
+    pub results: BTreeMap<ScanRole, SetupSummary>,
+}
+
+/// What one automatic final position of an arch gave (the plugin's
+/// `setup_json`). The IPR of the arch is in [`Setup::ipr`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SetupSummary {
+    /// Expansion per side at the molars (mm).
+    pub expansion_posterior_mm: f64,
+    /// Expansion per side at the canines (mm).
+    pub expansion_canine_mm: f64,
+    /// Incisor advancement (mm; negative: retracted).
+    pub advance_mm: f64,
+    /// Crowding not resolved (mm).
+    pub residual_crowding_mm: f64,
+    /// Space left next to the fixed teeth (mm).
+    pub spacing_mm: f64,
+    /// The log of the run, each entry as `dca_algo::setup::Note` writes it
+    /// (data, worded by the interface).
+    pub notes: Vec<serde_json::Value>,
 }
 
 /// Interproximal reduction on the contact between two neighbouring teeth.
@@ -814,9 +844,58 @@ impl AlignersState {
             .retain(|r| !r.between.iter().any(|f| in_arch(*f, role)));
         let held = drop_teeth(&mut setup.poses, role)
             | (n != (setup.locked.len(), setup.ipr.len()))
-            | setup.lines.remove(&role).is_some();
+            | setup.lines.remove(&role).is_some()
+            | setup.drawn.remove(&role).is_some()
+            | setup.results.remove(&role).is_some();
         note("setup", held);
 
+        note("stages", self.drop_stages_of(role));
+
+        let ramps = &mut self.aligner_bite.ramps.ramps;
+        let n = ramps.len();
+        ramps.retain(|r| !in_arch(r.fdi, role) && r.kind != RampKind::Auto);
+        note("ramps", ramps.len() != n);
+
+        cleared
+    }
+
+    /// Takes the final position of the arch `role` back to the initial
+    /// position, as the plugin's `case_plan.reset_setup` (`oa.reset_setup`):
+    /// every tooth of the arch back at rest, its IPR, its arch line and the
+    /// result of its last final position gone, and the aligners computed
+    /// from it (the arch's poses and IPR leave every stage, as
+    /// [`AlignersState::clear_label_dependents`] does). The locks, the line
+    /// drawn by the clinician and the settings stay. Returns the ids of the
+    /// groups that held data, in the order of [`CLEARED_IDS`] (`setup`,
+    /// `stages`). A bite role clears nothing.
+    pub fn reset_setup(&mut self, role: ScanRole) -> Vec<&'static str> {
+        if role == ScanRole::Bite {
+            return Vec::new();
+        }
+        let mut cleared = Vec::new();
+        let setup = &mut self.setup;
+        let n = setup.ipr.len();
+        setup
+            .ipr
+            .retain(|r| !r.between.iter().any(|f| in_arch(*f, role)));
+        let held = drop_teeth(&mut setup.poses, role)
+            | (n != setup.ipr.len())
+            | setup.lines.remove(&role).is_some()
+            | setup.results.remove(&role).is_some();
+        if held {
+            cleared.push("setup");
+        }
+        if self.drop_stages_of(role) {
+            cleared.push("stages");
+        }
+        cleared
+    }
+
+    /// The poses and IPR of the arch `role` leave every stage; `true` when
+    /// some were there. The other arch keeps its own series, not the
+    /// repeats of its last pose that kept up with this arch (the staging's
+    /// `merge_arch`), and the stages left empty go.
+    fn drop_stages_of(&mut self, role: ScanRole) -> bool {
         let mut held = false;
         for s in &mut self.stages {
             let n = s.ipr.len();
@@ -826,21 +905,12 @@ impl AlignersState {
             held |= n != s.ipr.len();
         }
         if held {
-            // the other arch keeps its own series, not the repeats of its last
-            // pose that kept up with this arch (the staging's `merge_arch`)
             let end = last_active_stage(&self.stages);
             self.stages.retain(|s| s.index <= end);
         }
         self.stages
             .retain(|s| !s.poses.is_empty() || !s.ipr.is_empty());
-        note("stages", held);
-
-        let ramps = &mut self.aligner_bite.ramps.ramps;
-        let n = ramps.len();
-        ramps.retain(|r| !in_arch(r.fdi, role) && r.kind != RampKind::Auto);
-        note("ramps", ramps.len() != n);
-
-        cleared
+        held
     }
 
     /// Replaces the seeds of the arch `role` with `seeds` (the other arch

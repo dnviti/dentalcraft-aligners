@@ -443,24 +443,37 @@ def stage_diagnosis(ctx, out):
 # setup
 # ---------------------------------------------------------------------------
 
-def stage_setup(ctx, out):
-    """Conservative set-up (setup_conservativo.conservative_setup) with the default scene
-    settings: nothing locked, no tooth out of the aligner, no drawn arch line, no opposing arch.
-    The numerical core of case_plan.run_setup (mirrored; the helper functions are extracted)."""
+# Scene settings of the second set-up of each case (`setup/setup_params.json`): every setup parameter of
+# the page "Posizione finale" (`ui_phases.page_finale`) away from its default, inside its slider range.
+# The midline is BALANCE: with CENTER the plugin (42e6d87) fails on every demo case
+# (`setup_conservativo._targets`: `r["k"]` is a 0-d array, IndexError).
+SETUP_PARAMS = {
+    "cons_align_scope": "PREMOLARS", "cons_line_sigma": 7.0, "cons_normal_tol": 0.05, "cons_rot_tol": 2.0,
+    "cons_post_normal_tol": 0.2, "cons_post_rot_tol": 4.0, "cons_pos_tol": 0.15, "cons_contact_tol": 0.1,
+    "cons_incisor_weight": 6.0, "cons_align_fixed": False, "midline": "BALANCE", "priority": "EXP_IPR_PRO",
+    "expansion_upper": 1.5, "expansion_lower_posterior": 1.0, "expansion_lower_canine": 0.5,
+    "advance_max": 1.5, "retract_max": 1.0, "ipr_zone": "ANTERIOR", "ipr_surface_cap": 0.2,
+    "enamel_fraction": 0.4, "leveling": "FLAT", "vertical_max": 0.8, "cons_level_tol": 0.3,
+    "cons_level_canines": True,
+}
+
+
+def _conservative(ctx, s):
+    """The numerical core of case_plan.run_setup with the scene settings `s` (mirrored; the helper
+    functions are extracted): the plugin's result, its `setup_json`, the config and the rest frames."""
     sc = plugin.load("setup_conservativo")
     d = _data_dict(ctx)
     ns = _plan_ns(ctx)
     plugin.extract("case_plan", ["PRIORITY", "conservative_config", "rest_cusps", "rest_crowns", "_resample"], ns)
     obj = _fake_obj(ctx)
-    cfg = ns["conservative_config"](ctx.s, obj)
+    cfg = ns["conservative_config"](s, obj)
     cusps, crowns = ns["rest_cusps"](d), ns["rest_crowns"](d)
-    t0 = time.time()
     r = sc.conservative_setup(d["teeth"], d["seq"], cusps, cfg, line=None, fixed=[], crowns=crowns, poses={})
     pl = plugin.load("planning")
     residual = {}
     if r["residual"] > 1e-6:
         residual["affollamento"] = round(float(r["residual"]), 2)
-    if r["spacing"] > sc.SPACE_TOL and ctx.s.close_spaces:
+    if r["spacing"] > sc.SPACE_TOL and s.close_spaces:
         residual["spazio"] = round(float(r["spacing"]), 2)
     ipr = [{"a": a, "b": b, "mm": mm, "a_surface": pl.facing_surface(a, b), "b_surface": pl.facing_surface(b, a)}
            for (a, b), mm in sorted(r["ipr"].items())]
@@ -469,19 +482,38 @@ def stage_setup(ctx, out):
                 "gaps_initial": {}, "dz": {}, "log": list(r["log"]), "mode": "ALLINEAMENTO"}
     if len(r["line"]) >= 4:
         out_json["line"] = [[round(float(c), 4) for c in p] for p in ns["_resample"](np.asarray(r["line"]), 96)]
-    targets = r["targets"]
     rest = {f: d["teeth"][f].frame() for f in d["seq"]}
-    state = {"result": r, "setup_json": out_json, "targets": targets, "obj": obj, "config": cfg}
+    return r, out_json, cfg, obj, rest
+
+
+def _setup_dump(ctx, r, out_json, cfg, rest, inputs, seconds):
+    targets = r["targets"]
+    return {
+        "case": ctx.name, "arch": ctx.arch,
+        "inputs": {"teeth": "../teeth/teeth.json", "config": asdict(cfg) if is_dataclass(cfg) else vars(cfg),
+                   "line": None, "fixed": [], "poses": {}, **inputs},
+        "setup": out_json,
+        "targets_delta": {str(f): D for f, D in sorted(targets.items())},
+        "targets_pose": {str(f): targets[f] @ rest[f] for f in sorted(targets)},
+        "rest_frames": {str(f): rest[f] for f in sorted(rest)},
+        "seconds": seconds}
+
+
+def stage_setup(ctx, out):
+    """Conservative set-up (setup_conservativo.conservative_setup) with the default scene
+    settings: nothing locked, no tooth out of the aligner, no drawn arch line, no opposing arch.
+    The numerical core of case_plan.run_setup (mirrored; the helper functions are extracted).
+    With `out`, also `setup_params.json`: the same with the scene settings `SETUP_PARAMS`."""
+    t0 = time.time()
+    r, out_json, cfg, obj, rest = _conservative(ctx, ctx.s)
+    state = {"result": r, "setup_json": out_json, "targets": r["targets"], "obj": obj, "config": cfg}
     if out:
-        dump(out, "setup.json", {
-            "case": ctx.name, "arch": ctx.arch,
-            "inputs": {"teeth": "../teeth/teeth.json", "config": asdict(cfg) if is_dataclass(cfg) else vars(cfg),
-                       "line": None, "fixed": [], "poses": {}},
-            "setup": out_json,
-            "targets_delta": {str(f): D for f, D in sorted(targets.items())},
-            "targets_pose": {str(f): targets[f] @ rest[f] for f in sorted(targets)},
-            "rest_frames": {str(f): rest[f] for f in sorted(rest)},
-            "seconds": round(time.time() - t0, 1)})
+        dump(out, "setup.json", _setup_dump(ctx, r, out_json, cfg, rest, {}, round(time.time() - t0, 1)))
+        t0 = time.time()
+        s = settings.defaults(start_date=START_DATE, **SETUP_PARAMS)
+        r, out_json, cfg, _, rest = _conservative(ctx, s)
+        dump(out, "setup_params.json", _setup_dump(ctx, r, out_json, cfg, rest, {"settings": SETUP_PARAMS},
+                                                   round(time.time() - t0, 1)))
     return state
 
 

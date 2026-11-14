@@ -111,6 +111,9 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.settings.study-models",
     "aligners.settings.find-teeth",
     "aligners.settings.segmentation",
+    // the parameters and the reset of the Final position inspector
+    "aligners.settings.setup",
+    "aligners.planning.setup.reset",
     // the gizmo of the viewport on a selected 3D component
     "aligners.components.transform",
 ];

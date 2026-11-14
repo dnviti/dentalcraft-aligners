@@ -1276,6 +1276,78 @@ fn adjusting_a_tooth_updates_its_pose_in_the_clinical_frame() {
     );
 }
 
+#[test]
+fn exact_values_set_the_whole_movement_and_a_tooth_is_unlocked() {
+    let state = framed();
+    let moved = undoable(
+        &state,
+        ADJUST,
+        json!({ "fdi": 33, "mesial_mm": 0.3, "torque_deg": 4.0 }),
+    );
+    // "Write the exact values": every component reads back as given, from wherever the tooth was
+    let want = [
+        ("mesial_mm", -0.6),
+        ("buccal_mm", 0.25),
+        ("extrusion_mm", -0.1),
+        ("torque_deg", 3.0),
+        ("tip_deg", -2.0),
+        ("rotation_deg", 12.0),
+    ];
+    let mut p = json!({ "fdi": 33, "exact": true });
+    for (k, v) in want {
+        p[k] = json!(v);
+    }
+    let exact = undoable(&moved, ADJUST, p.clone());
+    let (_, out) = ok(ADJUST, &moved, p);
+    for (k, v) in want {
+        assert!((clinical(&out, "after", k) - v).abs() < 1e-9, "{k} {out}");
+    }
+    // from rest too, and the stored pose is the same
+    let mut p0 = json!({ "fdi": 33, "exact": true });
+    for (k, v) in want {
+        p0[k] = json!(v);
+    }
+    let (from_rest, _) = ok(ADJUST, &state, p0);
+    let (a, b) = (
+        al(&exact).setup.poses[&fdi(33)],
+        al(&from_rest).setup.poses[&fdi(33)],
+    );
+    assert!(a.approx_eq(&b, 1e-12, 1e-12));
+    // all zero: back at rest
+    let (rest, _) = ok(ADJUST, &moved, json!({ "fdi": 33, "exact": true }));
+    assert!(!al(&rest).setup.poses.contains_key(&fdi(33)));
+    // exact gives the whole movement: not with a delta or a reset
+    for bad in [
+        json!({ "fdi": 33, "exact": true, "reset": true }),
+        json!({ "fdi": 33, "exact": true, "delta": { "t": [0.0, 0.0, 1.0] } }),
+        json!({ "fdi": 33, "exact": true, "rotation_deg": 200.0 }),
+    ] {
+        assert!(
+            matches!(
+                exec(ADJUST, &moved, bad.clone()),
+                Err(CommandError::Invalid(_))
+            ),
+            "{bad}"
+        );
+    }
+    // lock alone, then unlock alone: the pose stays
+    let locked = undoable(&moved, ADJUST, json!({ "fdi": 33, "lock": true }));
+    assert!(al(&locked).setup.locked.contains(&fdi(33)));
+    assert_eq!(al(&locked).setup.poses, al(&moved).setup.poses);
+    let (unlocked, out) = ok(ADJUST, &locked, json!({ "fdi": 33, "lock": false }));
+    assert!(!al(&unlocked).setup.locked.contains(&fdi(33)));
+    assert_eq!(al(&unlocked).setup.poses, al(&moved).setup.poses);
+    assert_eq!(out["locked"], false);
+    assert!(
+        invalid(exec(
+            ADJUST,
+            &locked,
+            json!({ "fdi": 33, "lock": false, "stage": 1 })
+        ))
+        .contains("lock")
+    );
+}
+
 fn penetration(out: &Value, which: &str, with: u64) -> f64 {
     out[which]
         .as_array()

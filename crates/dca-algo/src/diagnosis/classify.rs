@@ -135,15 +135,21 @@ pub struct MovementDesc {
 pub struct MovementFlag {
     /// 1 = caution, 2 = high risk.
     pub severity: u8,
+    /// Which note it is (stable, for the interface to word it):
+    /// `round-rotation`, `canine-rotation`, `extrusion`,
+    /// `lower-incisor-intrusion`, `torque`, `expansion-tipping`,
+    /// `distalisation`, `distalisation-limit`.
+    pub id: &'static str,
     /// The note (plugin text).
     pub text: String,
     /// Keys of the references behind it ([`evidence::reference`]).
     pub refs: Vec<&'static str>,
 }
 
-fn flag(severity: u8, text: &str, refs: &[&'static str]) -> MovementFlag {
+fn flag(severity: u8, id: &'static str, text: &str, refs: &[&'static str]) -> MovementFlag {
     MovementFlag {
         severity,
+        id,
         text: text.to_owned(),
         refs: refs.to_vec(),
     }
@@ -159,6 +165,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if anatomy::is_round_crown(fdi) && rot > 15.0 {
         out.push(flag(
             if rot > 30.0 { 2 } else { 1 },
+            "round-rotation",
             "rotazione >15 gradi di corona tonda: accuratezza ~24%; valutare attachment e \
              ipercorrezione",
             &["simon2014", "palone2023"],
@@ -167,6 +174,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if anatomy::index(fdi) == 3 && rot > 5.0 {
         out.push(flag(
             1,
+            "canine-rotation",
             "rotazione del canino poco prevedibile",
             &["kravitz2008", "koletsi2021"],
         ));
@@ -174,6 +182,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if ext > 0.5 {
         out.push(flag(
             if ext > 1.5 { 2 } else { 1 },
+            "extrusion",
             "estrusione: movimento meno prevedibile; attachment rettangolare orizzontale",
             &["kravitz2009", "elshazly2024"],
         ));
@@ -181,6 +190,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if ext < -0.5 && anatomy::arch_of(fdi) == Arch::Lower && anatomy::is_incisor(fdi) {
         out.push(flag(
             1,
+            "lower-incisor-intrusion",
             "intrusione incisivi inferiori: accuratezza 35%",
             &["haouili2020"],
         ));
@@ -188,6 +198,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if tor > 3.0 {
         out.push(flag(
             1,
+            "torque",
             "torque >3 gradi: power ridge/attachment",
             &["wang2025consensus"],
         ));
@@ -195,6 +206,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if !anatomy::is_anterior(fdi) && bl > 0.5 {
         out.push(flag(
             1,
+            "expansion-tipping",
             "espansione ottenuta soprattutto per tipping; attachment consigliati",
             &["houle2017", "zhou2020", "wang2025consensus"],
         ));
@@ -202,12 +214,14 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if anatomy::is_molar(fdi) && md < -0.5 {
         out.push(flag(
             1,
+            "distalisation",
             "distalizzazione: schema sequenziale e attachment",
             &["ravera2016"],
         ));
         if md < -distal_predictable() {
             out.push(flag(
                 2,
+                "distalisation-limit",
                 "oltre il limite prevedibile di 2 mm",
                 &["wang2025consensus"],
             ));

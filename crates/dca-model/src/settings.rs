@@ -1,6 +1,7 @@
 //! User-tunable parameters. Defaults come from the old plugin
 //! (`staging.py` `StagingParams`, `evidence.py`, `props.py`).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// How the movement is distributed over the aligners (old `staging.py`).
@@ -243,6 +244,259 @@ impl Default for SegmentationSettings {
     }
 }
 
+/// Teeth the final position aligns (the plugin's `cons_align_scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupScope {
+    /// Incisors and canines (premolars and molars stay as they are).
+    #[default]
+    Anterior,
+    /// Incisors, canines and premolars.
+    Premolars,
+    /// Every tooth.
+    All,
+}
+
+/// Where the dental midline goes (the plugin's `midline`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupMidline {
+    /// Where it is (the central incisors weigh more).
+    #[default]
+    Keep,
+    /// To the centre of the arch.
+    Center,
+    /// Balanced space between the two sides.
+    Balance,
+}
+
+/// Order in which the final position makes space (the plugin's
+/// `priority`): expansion, IPR, incisor advancement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpacePriority {
+    /// Expansion, then IPR, then advancement.
+    ExpIprPro,
+    /// IPR, then expansion, then advancement.
+    #[default]
+    IprExpPro,
+    /// Expansion, then advancement, then IPR.
+    ExpProIpr,
+}
+
+/// Contacts where the final position may plan IPR (the plugin's
+/// `ipr_zone`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupIprZone {
+    /// Nowhere.
+    None,
+    /// Between incisors and canines.
+    Anterior,
+    /// Incisors, canines and the premolars to align.
+    #[default]
+    AnteriorPremolars,
+    /// Every contact.
+    All,
+}
+
+/// Vertical levelling of the final position (the plugin's `leveling`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupLeveling {
+    /// Steps removed, the occlusal curve kept.
+    #[default]
+    Smooth,
+    /// The curve of Spee flattened.
+    Flat,
+    /// No automatic vertical movement.
+    None,
+}
+
+/// Parameters of "Final position" (the plugin's scene settings,
+/// `props.py:388-468`, read by `case_plan.conservative_config`), with the
+/// plugin's defaults, and the steps of the − and + buttons of "Move a
+/// tooth" (`adjust_step_mm`, `adjust_step_deg`, `props.py:686-687`). The
+/// automatic final position uses them for every parameter it is not given;
+/// `aligners.settings.setup` changes them inside the ranges of the plugin's
+/// sliders ([`SetupSettings::NUMBERS`]). The field names are those of the
+/// parameters of `aligners.planning.setup.automatic`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SetupSettings {
+    /// Teeth to align.
+    pub align_scope: SetupScope,
+    /// Smoothing of the arch line from the cusps (mm).
+    pub line_sigma_mm: f64,
+    /// Incisors and canines: distance from the line below which they stay (mm).
+    pub normal_tol_mm: f64,
+    /// Incisors and canines: rotation below which they stay (degrees).
+    pub rot_tol_deg: f64,
+    /// Premolars and molars: distance from the line below which they stay (mm).
+    pub post_normal_tol_mm: f64,
+    /// Premolars and molars: rotation below which they stay (degrees).
+    pub post_rot_tol_deg: f64,
+    /// Move along the arch below which a tooth stays where it is (mm).
+    pub pos_tol_mm: f64,
+    /// Overlap already present left as it is (mm).
+    pub contact_tol_mm: f64,
+    /// First and second molars held along the arch (anchorage).
+    pub fix_molars: bool,
+    /// The teeth held along the arch are still derotated and put on the line.
+    pub align_fixed: bool,
+    /// Third molars held completely.
+    pub fix_third: bool,
+    /// Midline.
+    pub midline: SetupMidline,
+    /// Weight of the central incisors (keeps the midline).
+    pub incisor_weight: f64,
+    /// Order in which space is made.
+    pub priority: SpacePriority,
+    /// Largest expansion per side of the upper arch (mm).
+    pub expansion_upper_mm: f64,
+    /// Largest expansion per side of the lower posterior sectors (mm).
+    pub expansion_lower_posterior_mm: f64,
+    /// Largest expansion per side of the lower canines (mm).
+    pub expansion_lower_canine_mm: f64,
+    /// Largest advancement of the incisors (mm).
+    pub advance_max_mm: f64,
+    /// Largest retraction of the incisors to close spaces (mm).
+    pub retract_max_mm: f64,
+    /// Close the spaces between the teeth.
+    pub close_spaces: bool,
+    /// Contacts where IPR is allowed.
+    pub ipr_zone: SetupIprZone,
+    /// Largest reduction per surface (mm).
+    pub ipr_surface_cap_mm: f64,
+    /// Largest fraction of the enamel removed.
+    pub enamel_fraction: f64,
+    /// Vertical levelling.
+    pub leveling: SetupLeveling,
+    /// Largest vertical correction (mm).
+    pub vertical_max_mm: f64,
+    /// Vertical step tolerated (mm).
+    pub level_tol_mm: f64,
+    /// Level the canines too.
+    pub level_canines: bool,
+    /// Step of the − and + buttons of "Move a tooth" for the translations (mm).
+    pub adjust_step_mm: f64,
+    /// Step of the − and + buttons of "Move a tooth" for the rotations (degrees).
+    pub adjust_step_deg: f64,
+}
+
+impl Default for SetupSettings {
+    fn default() -> Self {
+        Self {
+            align_scope: SetupScope::Anterior,
+            line_sigma_mm: 5.0,
+            normal_tol_mm: 0.1,
+            rot_tol_deg: 1.0,
+            post_normal_tol_mm: 0.3,
+            post_rot_tol_deg: 5.0,
+            pos_tol_mm: 0.1,
+            contact_tol_mm: 0.15,
+            fix_molars: true,
+            align_fixed: true,
+            fix_third: true,
+            midline: SetupMidline::Keep,
+            incisor_weight: 4.0,
+            priority: SpacePriority::IprExpPro,
+            expansion_upper_mm: 2.0,
+            expansion_lower_posterior_mm: 2.0,
+            expansion_lower_canine_mm: 0.0,
+            advance_max_mm: 1.0,
+            retract_max_mm: 2.0,
+            close_spaces: true,
+            ipr_zone: SetupIprZone::AnteriorPremolars,
+            ipr_surface_cap_mm: 0.25,
+            enamel_fraction: 0.5,
+            leveling: SetupLeveling::Smooth,
+            vertical_max_mm: 1.0,
+            level_tol_mm: 0.5,
+            level_canines: false,
+            adjust_step_mm: 0.1,
+            adjust_step_deg: 1.0,
+        }
+    }
+}
+
+impl SetupSettings {
+    /// The numeric settings with the range of the plugin's slider
+    /// (`props.py`): field name, smallest and largest value.
+    pub const NUMBERS: [(&'static str, f64, f64); 19] = [
+        ("line_sigma_mm", 1.0, 20.0),
+        ("normal_tol_mm", 0.0, 2.0),
+        ("rot_tol_deg", 0.0, 30.0),
+        ("post_normal_tol_mm", 0.0, 2.0),
+        ("post_rot_tol_deg", 0.0, 30.0),
+        ("pos_tol_mm", 0.0, 1.0),
+        ("contact_tol_mm", 0.0, 0.5),
+        ("incisor_weight", 1.0, 20.0),
+        ("expansion_upper_mm", 0.0, 4.0),
+        ("expansion_lower_posterior_mm", 0.0, 4.0),
+        ("expansion_lower_canine_mm", 0.0, 3.0),
+        ("advance_max_mm", 0.0, 4.0),
+        ("retract_max_mm", 0.0, 4.0),
+        ("ipr_surface_cap_mm", 0.0, 0.5),
+        ("enamel_fraction", 0.1, 0.5),
+        ("vertical_max_mm", 0.0, 3.0),
+        ("level_tol_mm", 0.0, 2.0),
+        ("adjust_step_mm", 0.01, 1.0),
+        ("adjust_step_deg", 0.1, 10.0),
+    ];
+
+    /// The numeric setting `name` (a name of [`SetupSettings::NUMBERS`]).
+    pub fn number(&self, name: &str) -> Option<f64> {
+        let mut copy = *self;
+        copy.number_mut(name).copied()
+    }
+
+    /// Sets the numeric setting `name`; `false` when there is none.
+    pub fn set_number(&mut self, name: &str, v: f64) -> bool {
+        match self.number_mut(name) {
+            Some(slot) => {
+                *slot = v;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The first numeric setting outside its range (or not finite): its
+    /// name, value and range.
+    pub fn out_of_range(&self) -> Option<(&'static str, f64, f64, f64)> {
+        Self::NUMBERS.iter().find_map(|&(name, lo, hi)| {
+            let v = self.number(name)?;
+            (!v.is_finite() || v < lo - 1e-9 || v > hi + 1e-9).then_some((name, v, lo, hi))
+        })
+    }
+
+    fn number_mut(&mut self, name: &str) -> Option<&mut f64> {
+        Some(match name {
+            "line_sigma_mm" => &mut self.line_sigma_mm,
+            "normal_tol_mm" => &mut self.normal_tol_mm,
+            "rot_tol_deg" => &mut self.rot_tol_deg,
+            "post_normal_tol_mm" => &mut self.post_normal_tol_mm,
+            "post_rot_tol_deg" => &mut self.post_rot_tol_deg,
+            "pos_tol_mm" => &mut self.pos_tol_mm,
+            "contact_tol_mm" => &mut self.contact_tol_mm,
+            "incisor_weight" => &mut self.incisor_weight,
+            "expansion_upper_mm" => &mut self.expansion_upper_mm,
+            "expansion_lower_posterior_mm" => &mut self.expansion_lower_posterior_mm,
+            "expansion_lower_canine_mm" => &mut self.expansion_lower_canine_mm,
+            "advance_max_mm" => &mut self.advance_max_mm,
+            "retract_max_mm" => &mut self.retract_max_mm,
+            "ipr_surface_cap_mm" => &mut self.ipr_surface_cap_mm,
+            "enamel_fraction" => &mut self.enamel_fraction,
+            "vertical_max_mm" => &mut self.vertical_max_mm,
+            "level_tol_mm" => &mut self.level_tol_mm,
+            "adjust_step_mm" => &mut self.adjust_step_mm,
+            "adjust_step_deg" => &mut self.adjust_step_deg,
+            _ => return None,
+        })
+    }
+}
+
 /// General settings of the module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -263,6 +517,8 @@ pub struct Settings {
     pub find_teeth: FindTeethSettings,
     /// "Separate teeth and gum": the separation parameters.
     pub segmentation: SegmentationSettings,
+    /// "Final position": the setup parameters and the steps of "Move a tooth".
+    pub setup: SetupSettings,
 }
 
 impl Default for Settings {
@@ -276,6 +532,7 @@ impl Default for Settings {
             study_base: StudyBaseSettings::default(),
             find_teeth: FindTeethSettings::default(),
             segmentation: SegmentationSettings::default(),
+            setup: SetupSettings::default(),
         }
     }
 }
@@ -283,6 +540,45 @@ impl Default for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_settings_saved_without_them_load_the_plugin_defaults() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("setup");
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.setup, SetupSettings::default());
+        // the plugin's defaults (`props.py`, `evidence.py`)
+        let d = SetupSettings::default();
+        assert_eq!(d.align_scope, SetupScope::Anterior);
+        assert_eq!(d.priority, SpacePriority::IprExpPro);
+        assert_eq!(d.ipr_zone, SetupIprZone::AnteriorPremolars);
+        assert_eq!((d.adjust_step_mm, d.adjust_step_deg), (0.1, 1.0));
+        assert!(d.out_of_range().is_none());
+        // a field saved alone keeps the defaults of the others
+        let s: Settings =
+            serde_json::from_str(r#"{"setup":{"ipr_zone":"none","advance_max_mm":2.5}}"#).unwrap();
+        assert_eq!(s.setup.ipr_zone, SetupIprZone::None);
+        assert_eq!(s.setup.advance_max_mm, 2.5);
+        assert_eq!(s.setup.retract_max_mm, 2.0);
+    }
+
+    #[test]
+    fn every_setup_number_has_a_range_and_one_slot() {
+        let mut s = SetupSettings::default();
+        for (name, lo, hi) in SetupSettings::NUMBERS {
+            assert!(lo < hi, "{name}");
+            let v = s.number(name).unwrap();
+            assert!((lo..=hi).contains(&v), "{name} default {v}");
+            assert!(s.set_number(name, hi + 1.0));
+            assert_eq!(s.out_of_range().map(|o| o.0), Some(name));
+            assert!(s.set_number(name, v));
+        }
+        assert!(s.out_of_range().is_none());
+        assert!(!s.set_number("midline", 1.0));
+        assert_eq!(s.number("nothing"), None);
+        s.contact_tol_mm = f64::NAN;
+        assert_eq!(s.out_of_range().map(|o| o.0), Some("contact_tol_mm"));
+    }
 
     #[test]
     fn defaults_match_the_old_plugin() {

@@ -3,20 +3,27 @@
 //!
 //! `golden/fixtures/<case>/setup/setup.json` is the oracle's output for the
 //! six demo cases (`golden/README.md`: no locked or excluded tooth, no drawn
-//! line, default scene settings). The Rust stage is fed the oracle's own
-//! inputs: the full scan moved to arch coordinates with the worldframe
-//! matrix, the refined segmentation labels and the per-tooth geometry of
-//! `teeth/teeth.json`. Bounds: target poses within 0.01 mm and 0.05 degrees,
-//! the same IPR plan and therapy, the arch line within 0.01 mm.
+//! line, default scene settings); `setup_params.json` is the same with every
+//! setup parameter of the plugin's page away from its default
+//! (`inputs.settings`, the scene settings of `props.py`). The Rust stage is
+//! fed the oracle's own inputs: the full scan moved to arch coordinates with
+//! the worldframe matrix, the refined segmentation labels and the per-tooth
+//! geometry of `teeth/teeth.json`, and the parameters the case settings
+//! give (`Params::from_settings`, the settings the scene ones map to). The
+//! configuration it runs with must be the plugin's
+//! (`case_plan.conservative_config`, `inputs.config`). Bounds: target poses
+//! within 0.01 mm and 0.05 degrees, the same IPR plan and therapy, the arch
+//! line within 0.01 mm.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dc_case::Fdi;
 use dca_algo::anatomy::Arch;
-use dca_algo::setup::{self, Input, Params, ToothInput};
+use dca_algo::setup::{self, Config, Input, Params, ToothInput};
+use dca_model::SetupSettings;
 use glam::{DMat3, DMat4, DVec3};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 const TOL_MM: f64 = 0.01;
 const TOL_DEG: f64 = 0.05;
@@ -96,15 +103,126 @@ struct Worst {
     line_mm: f64,
 }
 
-fn compare(case: &str, worst: &mut Worst) {
+/// The case settings for the plugin's scene settings `scene` (the names of
+/// `props.py`; an enum value in capitals).
+fn settings_of(scene: &Value) -> SetupSettings {
+    let mut out = Map::new();
+    for (k, v) in scene.as_object().into_iter().flatten() {
+        let key = match k.as_str() {
+            "cons_align_scope" => "align_scope",
+            "cons_line_sigma" => "line_sigma_mm",
+            "cons_normal_tol" => "normal_tol_mm",
+            "cons_rot_tol" => "rot_tol_deg",
+            "cons_post_normal_tol" => "post_normal_tol_mm",
+            "cons_post_rot_tol" => "post_rot_tol_deg",
+            "cons_pos_tol" => "pos_tol_mm",
+            "cons_contact_tol" => "contact_tol_mm",
+            "cons_incisor_weight" => "incisor_weight",
+            "cons_fix_molars" => "fix_molars",
+            "cons_align_fixed" => "align_fixed",
+            "cons_fix_third" => "fix_third",
+            "cons_level_tol" => "level_tol_mm",
+            "cons_level_canines" => "level_canines",
+            "expansion_upper" => "expansion_upper_mm",
+            "expansion_lower_posterior" => "expansion_lower_posterior_mm",
+            "expansion_lower_canine" => "expansion_lower_canine_mm",
+            "advance_max" => "advance_max_mm",
+            "retract_max" => "retract_max_mm",
+            "ipr_surface_cap" => "ipr_surface_cap_mm",
+            "vertical_max" => "vertical_max_mm",
+            "midline" | "priority" | "ipr_zone" | "leveling" | "enamel_fraction"
+            | "close_spaces" => k.as_str(),
+            other => panic!("scene setting {other} has no case setting"),
+        };
+        let v = match v.as_str() {
+            Some(s) => Value::from(s.to_lowercase()),
+            None => v.clone(),
+        };
+        out.insert(key.to_owned(), v);
+    }
+    let s: SetupSettings = serde_json::from_value(Value::Object(out)).unwrap();
+    assert!(s.out_of_range().is_none(), "{s:?}");
+    s
+}
+
+/// An enum of the configuration as the plugin writes it.
+fn upper_name(v: impl serde::Serialize) -> Value {
+    match serde_json::to_value(v).unwrap() {
+        Value::String(s) => Value::from(s.to_uppercase()),
+        Value::Array(a) => Value::Array(
+            a.into_iter()
+                .map(|x| Value::from(x.as_str().unwrap().to_uppercase()))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The configuration the case settings give is the plugin's
+/// (`conservative_config` of the same scene settings), field by field.
+fn check_config(what: &str, cfg: &Config, want: &Value) {
+    let numbers = [
+        ("sigma", cfg.sigma),
+        ("pos_tol", cfg.pos_tol),
+        ("normal_tol", cfg.normal_tol),
+        ("rot_tol_deg", cfg.rot_tol_deg),
+        ("max_derotation", cfg.max_derotation),
+        ("vertical_max", cfg.vertical_max),
+        ("post_normal_tol", cfg.post_normal_tol),
+        ("post_rot_tol_deg", cfg.post_rot_tol_deg),
+        ("level_tol", cfg.level_tol),
+        ("contact_tol", cfg.contact_tol),
+        ("incisor_weight", cfg.incisor_weight),
+        ("expansion_posterior", cfg.expansion_posterior),
+        ("expansion_canine", cfg.expansion_canine),
+        ("advance_max", cfg.advance_max),
+        ("retract_max", cfg.retract_max),
+        ("ipr_surface_cap", cfg.ipr_surface_cap),
+        ("enamel_fraction", cfg.enamel_fraction),
+    ];
+    for (k, v) in numbers {
+        assert!(
+            (v - num(&want[k])).abs() < 1e-12,
+            "{what}: {k} {v} against {}",
+            want[k]
+        );
+    }
+    for (k, v) in [
+        ("level_canines", cfg.level_canines),
+        ("fix_molars", cfg.fix_molars),
+        ("fix_third", cfg.fix_third),
+        ("fix_canines", cfg.fix_canines),
+        ("align_fixed", cfg.align_fixed),
+        ("close_spaces", cfg.close_spaces),
+    ] {
+        assert_eq!(Value::from(v), want[k], "{what}: {k}");
+    }
+    for (k, v) in [
+        ("align_scope", upper_name(cfg.align_scope)),
+        ("leveling", upper_name(cfg.leveling)),
+        ("midline", upper_name(cfg.midline)),
+        ("priority", upper_name(&cfg.priority)),
+        ("ipr_zone", upper_name(cfg.ipr_zone)),
+    ] {
+        assert_eq!(v, want[k], "{what}: {k}");
+    }
+}
+
+fn compare(case: &str, file: &str, worst: &mut Worst) {
     let dir = fixtures().join(case);
     let teeth_json = json(&dir.join("teeth/teeth.json"));
-    let oracle = json(&dir.join("setup/setup.json"));
+    let oracle = json(&dir.join("setup").join(file));
     let arch = if teeth_json["arch"] == "UPPER" {
         Arch::Upper
     } else {
         Arch::Lower
     };
+    let params = Params::from_settings(&settings_of(&oracle["inputs"]["settings"]));
+    check_config(
+        &format!("{case} {file}"),
+        &params.config(arch),
+        &oracle["inputs"]["config"],
+    );
     let m_inv = mat4(&json(&dir.join("worldframe/worldframe.json"))["arch_frame"]["M_inv"]);
     let mesh = dc_mesh::dcm::decode(&std::fs::read(dir.join("scan.dcm")).unwrap()).unwrap();
     let vertices: Vec<DVec3> = mesh
@@ -135,7 +253,7 @@ fn compare(case: &str, worst: &mut Worst) {
         fixed: &[],
         poses: &BTreeMap::new(),
     };
-    let out = setup::run(&input, &Params::default()).unwrap();
+    let out = setup::run(&input, &params).unwrap();
     let r = &out.result;
 
     // the same teeth move, to the same poses
@@ -207,11 +325,7 @@ fn compare(case: &str, worst: &mut Worst) {
     }
 
     // determinism
-    assert_eq!(
-        setup::run(&input, &Params::default()).unwrap(),
-        out,
-        "{case}: rerun"
-    );
+    assert_eq!(setup::run(&input, &params).unwrap(), out, "{case}: rerun");
 }
 
 #[test]
@@ -230,7 +344,18 @@ fn setup_matches_the_oracle_on_the_demo_cases() {
     assert_eq!(cases.len(), 6, "{cases:?}");
     for case in &cases {
         let mut worst = Worst::default();
-        compare(case, &mut worst);
+        compare(case, "setup.json", &mut worst);
         println!("{case}: {worst:?}");
+        let mut worst = Worst::default();
+        compare(case, "setup_params.json", &mut worst);
+        println!("{case} with parameters: {worst:?}");
     }
+}
+
+#[test]
+fn the_default_settings_are_the_default_parameters() {
+    assert_eq!(
+        Params::from_settings(&SetupSettings::default()),
+        Params::default()
+    );
 }
