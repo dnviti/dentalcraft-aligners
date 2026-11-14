@@ -6,8 +6,11 @@
 //! before it (attachments, IPR) and the passive aligners that keep the two
 //! arches in step. The start date, the days and the policy not given are
 //! those of the case settings (`Settings::start_date`, `interval_days`,
-//! `interval_policy`; no start date: today). The calendar is returned; the
-//! case is not modified. The `.ics` file is written by the export.
+//! `interval_policy`; no start date: today). The attachments bonded before
+//! the first aligner are those of the clinical review of the arch (the
+//! plugin's `schedule.build`) unless the parameters give them. The calendar
+//! is returned; the case is not modified. The `.ics` file is written by the
+//! export.
 
 use dc_case::CaseState;
 use dc_command::{CommandError, JobCtx};
@@ -48,8 +51,9 @@ pub(crate) struct Params {
     policy: Option<Policy>,
     /// Language of the text of the to-do items.
     lang: Lang,
-    /// Teeth that get an attachment, bonded before aligner 1.
-    attachments: Vec<String>,
+    /// Teeth that get an attachment, bonded before aligner 1 (default: the
+    /// teeth with an attachment in the clinical review of the arch).
+    attachments: Option<Vec<String>>,
 }
 
 /// The arches that have aligners in the case, lower first.
@@ -93,7 +97,11 @@ fn run_schedule(
     };
     let mut out = serde_json::Map::new();
     for arch in arches {
-        let mut input = schedule::input_from_stages(arch, &data.stages, params.attachments.clone());
+        let attachments = params
+            .attachments
+            .clone()
+            .unwrap_or_else(|| data.attachment_teeth(arch.role()));
+        let mut input = schedule::input_from_stages(arch, &data.stages, attachments);
         input.n_total = Some(total);
         let cal =
             schedule::run(&input, &cal_params).map_err(|e| CommandError::Invalid(e.to_string()))?;

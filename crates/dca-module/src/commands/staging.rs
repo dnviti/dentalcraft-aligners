@@ -616,9 +616,16 @@ fn run_tooth_speed(
     ))
 }
 
-/// What the automatic pattern needs: the diagnosis of the arch and the
-/// distal movement of the first molars.
-fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> Complexity {
+/// What the automatic pattern needs: the diagnosis of the arch, the distal
+/// movement of the first molars and the staging pattern in force in the
+/// clinical review when it is not the automatic choice (the plugin's
+/// `case_plan.complexity`: the review's pattern, even a proposal still to
+/// review, replaces the automatic one).
+pub(crate) fn complexity_of(
+    data: &AlignersState,
+    role: ScanRole,
+    moves: &[ToothMove],
+) -> Complexity {
     // the values in force: the ones the clinician wrote by hand over the computed
     let diagnosis = &data.diagnosis;
     let distal = moves
@@ -626,7 +633,7 @@ fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> C
         .filter(|m| anatomy::index(m.fdi) == 6)
         .map(|m| -(m.delta()[0] * f64::from(m.md_sign)))
         .fold(0.0_f64, f64::max);
-    Complexity {
+    let mut c = Complexity {
         level: data
             .diagnosis
             .complexity_score
@@ -635,7 +642,10 @@ fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> C
         little_mm: diagnosis.little_index_mm(role).unwrap_or(0.0),
         distalization_mm: distal,
         pattern_override: None,
-    }
+    };
+    c.pattern_override =
+        dca_algo::review::pattern_override(data, role, staging::choose_pattern(&c));
+    c
 }
 
 /// The aligners 1..=N of a plan as stages of the case.

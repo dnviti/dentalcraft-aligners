@@ -56,6 +56,10 @@ pub(crate) fn leaf_done(state: &CaseState, id: &str) -> bool {
         "aligners.planning.aligners" => {
             every_arch(&|a| schedule::active_stages(a, &data.stages) > 0)
         }
+        // every arch classified (the decisions are the clinician's own pace)
+        "aligners.review.classify" => {
+            every_arch(&|a| data.review.iter().any(|r| r.arch == a.role()))
+        }
         "aligners.followup.visits" => !data.visits.is_empty(),
         _ => false,
     }

@@ -26,7 +26,7 @@ from . import frame as fr
 from . import mesh, plugin, settings
 
 ORDER = ["archform", "worldframe", "autoseed", "segmentation", "teeth", "diagnosis", "setup", "staging",
-         "schedule"]
+         "schedule", "classify"]
 START_DATE = "2026-01-05"       # fixed: schedule.build would use today's date otherwise
 
 
@@ -685,6 +685,108 @@ def stage_schedule(ctx, out):
             if v:
                 with open(os.path.join(out, f"schedule_{k.lower()}.ics"), "w", newline="") as f:
                     f.write(v)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# classify (clinical review)
+# ---------------------------------------------------------------------------
+
+def _record(it):
+    """A record of `review.build_records` as the plugin stores it in `obj.oa.classes` (review.store): the
+    proposal preset as the decision, to review."""
+    return SimpleNamespace(kind=it["tipo"], subject=it["oggetto"], fdi=it["fdi"], math_value=str(it["calcolo"]),
+                           proposed=str(it["proposta"]), decided_value=str(it["proposta"]), status="PENDING",
+                           decided_at="", note=it["nota"], ai_value="", agreement="NONE")
+
+
+def stage_classify(ctx, out):
+    """Classifications of the clinical review (`oa.classify` without the AI classifier: `review.build_records`
+    on `case_plan.jev_case_data`, mirrored: the oracle's analysis, set-up and plan, the teeth's widths, the
+    movement of every tooth `staging.describe_q(q_from_delta(F, target))` and its aligners `plan["need"]`, the
+    complexity `case_plan.complexity(obj)` without moves, extracted).  Then the calendar `schedule.build` (FIXED)
+    with the records as stored (proposals preset, to review), and with decisions: the first tooth with an
+    attachment set to "nessuno" and the first without one set to "rotazione" (`review.decide` VALUE); and
+    `review.decide_all` (the bulk confirmation of the records without a note to check)."""
+    st, sch, rv = plugin.load("staging"), plugin.load("schedule"), plugin.load("review")
+    d = _data_dict(ctx)
+    analysis = ctx.state("diagnosis")["analysis"]
+    su = ctx.state("setup")
+    stg = ctx.state("staging")
+    plan_json = stg["plan_json"]
+    obj = stg["obj"]
+    obj.oa.setup_json = json.dumps(su["setup_json"])
+    obj.oa.plan_json = json.dumps(plan_json)
+    obj.oa.classes = []
+    ns = _plan_ns(ctx)
+    ns["_data"] = lambda o, s=None: d
+    plugin.extract("case_plan", ["complexity"], ns)
+    stub = types.ModuleType(f"{plugin.PKG}.review")           # no decision of the clinician yet
+    stub.decided = lambda o, key: ""
+    prev = sys.modules.get(stub.__name__)
+    sys.modules[stub.__name__] = stub
+    try:
+        cx = ns["complexity"](obj)
+    finally:
+        sys.modules[stub.__name__] = prev if prev is not None else rv
+    teeth = {}
+    for f in d["seq"]:
+        t = d["teeth"][f]
+        q = st.q_from_delta(t.frame(), su["targets"].get(f, np.eye(4)))
+        desc = st.describe_q(q, t.md_sign)
+        teeth[f] = {"width_md": t.width_md, "width_bl": t.width_bl, "height": t.height, "desc": desc,
+                    "need": int(plan_json["need"].get(str(f), 0))}
+    data = {"arch": ctx.arch, "analysis": analysis, "setup": su["setup_json"], "plan": plan_json, "teeth": teeth,
+            "complexity": cx}
+    recs = rv.build_records(data)
+
+    def calendar(classes):
+        obj.oa.classes = classes
+        sch._BUILT.clear()
+        s = types.SimpleNamespace(**{**vars(ctx.s), "interval_policy": "FIXED"})
+        return sch.build(obj, s)
+
+    stored = [_record(r) for r in recs]
+    cal = calendar(stored)
+    decided = [_record(r) for r in recs]
+    att = [it for it in decided if it.kind == "attachment"]
+    changed = {}
+    first_with = next((it for it in att if it.proposed != "nessuno"), None)
+    first_without = next((it for it in att if it.proposed == "nessuno"), None)
+    for it, value in ((first_with, "nessuno"), (first_without, "rotazione")):
+        if it is not None:
+            rv.decide(it, "VALUE", value)
+            changed[it.subject] = value
+    cal_decided = calendar(decided)
+    bulk = types.SimpleNamespace(oa=types.SimpleNamespace(classes=[_record(r) for r in recs]))
+    confirmed = rv.decide_all(bulk, skip_flagged=True)
+    state = {"records": recs}
+    if out:
+        keys = ("width_md", "width_bl", "height", "need")
+        dump(out, "classify.json", {
+            "case": ctx.name, "arch": ctx.arch,
+            "inputs": {
+                "analysis": {"catcat_score": analysis.get("catcat_score", 0),
+                             "catcat_items": analysis.get("catcat_items", {}),
+                             "discrepancy": analysis["space"]["discrepancy"]},
+                "complexity": cx, "distal": 0.0,
+                "teeth": {str(f): {**{k: v[k] for k in keys},
+                                   # describe_q order: mesial, buccal, extrusion, torque, tip, rotation
+                                   "desc": [v["desc"][k] for k in (
+                                       "mesiale(+)/distale(-) mm", "vestibolare(+)/linguale(-) mm",
+                                       "estrusione(+)/intrusione(-) mm", "torque corona vestibolare(+) deg",
+                                       "tip corona mesiale(+) deg", "rotazione mesio-vestibolare(+) deg")]}
+                          for f, v in teeth.items()},
+                "plan": "../staging/staging.json plan", "setup": "../setup/setup.json"},
+            "records": [{"tipo": r["tipo"], "oggetto": r["oggetto"], "fdi": r["fdi"], "calcolo": r["calcolo"],
+                         "proposta": r["proposta"], "opzioni": r["opzioni"], "nota": r["nota"], "fonti": r["fonti"]}
+                        for r in recs],
+            "calendar": {"start_date": START_DATE, "policy": "FIXED",
+                         "todo": [row["todo"] for row in cal["rows"]]},
+            "decided": {"values": changed, "todo": [row["todo"] for row in cal_decided["rows"]]},
+            "bulk": {"confirmed": confirmed,
+                     "left": [it.subject + ":" + it.kind for it in bulk.oa.classes if it.status == "PENDING"]},
+        })
     return state
 
 

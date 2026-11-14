@@ -7,8 +7,8 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AlignerBite, ComponentEdits, RampKind, SCHEMA_VERSION, Settings, StagingPattern, TrimParams,
-    Visit,
+    AlignerBite, ComponentEdits, RampKind, ReviewKind, ReviewRecord, SCHEMA_VERSION, Settings,
+    StagingPattern, TrimParams, Visit,
 };
 
 /// A seed point: the centre of the occlusal face of a tooth, with its
@@ -437,6 +437,13 @@ pub struct AlignersState {
     /// occlusal normal reversed, `y` kept). It goes with the scan: it moves
     /// with an arch that changes place and goes when the scan is replaced.
     pub occlusal_flipped: BTreeSet<ScanRole>,
+    /// The clinical review: the classifications of the program and the
+    /// clinician's decision on each (`dca_algo::review`, the plugin's
+    /// `classes`). The records of an arch go with the teeth they were
+    /// computed from ([`AlignersState::clear_label_dependents`], id
+    /// `review`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review: Vec<ReviewRecord>,
 }
 
 /// The same tooth in the other arch, on the same side (the plugin's
@@ -485,7 +492,7 @@ fn opposite(role: ScanRole) -> ScanRole {
 /// the move is NOT undone, and the registration has to be done again with the
 /// new arch. The workspace shows the ids by the key
 /// `aligners-cleared-<id>` (`_` as `-`).
-pub const CLEARED_IDS: [&str; 15] = [
+pub const CLEARED_IDS: [&str; 16] = [
     "bite_registered",
     "seeds",
     "missing",
@@ -499,6 +506,7 @@ pub const CLEARED_IDS: [&str; 15] = [
     "complexity",
     "setup",
     "stages",
+    "review",
     "ramps",
     "visits",
 ];
@@ -551,6 +559,30 @@ impl AlignersState {
         let flag = std::mem::take(&mut self.bite_registered);
         let report = self.bite_report.take().is_some();
         flag || report
+    }
+
+    /// The value in force of the review record `kind` of the arch `role`
+    /// (the tooth `fdi`, `None` for the whole arch): the clinician's
+    /// decision or, while it is to review, the proposal (the plugin's
+    /// `review.decided`). `None` when the case has no such record.
+    pub fn review_value(&self, role: ScanRole, kind: ReviewKind, fdi: Option<Fdi>) -> Option<&str> {
+        self.review
+            .iter()
+            .find(|r| r.arch == role && r.kind == kind && r.fdi == fdi)
+            .map(ReviewRecord::in_force)
+            .filter(|v| !v.is_empty())
+    }
+
+    /// The teeth of the arch `role` that get an attachment, in the order of
+    /// the review: those whose attachment record has a value in force other
+    /// than `none` (the plugin's `schedule.build`, bonded before aligner 1).
+    pub fn attachment_teeth(&self, role: ScanRole) -> Vec<String> {
+        self.review
+            .iter()
+            .filter(|r| r.arch == role && r.kind == ReviewKind::Attachment)
+            .filter(|r| !matches!(r.in_force(), "" | "none"))
+            .filter_map(|r| r.fdi.map(|f| f.to_string()))
+            .collect()
     }
 
     /// Drops everything computed from, or entered about, the scan of the
@@ -832,8 +864,9 @@ impl AlignersState {
     /// automatic separation): the teeth flagged for a rebuild, the tooth
     /// frames, measures, closed crowns and gingiva of the arch, its space
     /// analysis, the setup, its poses in every stage (with the result of its
-    /// last staging and its teeth slowed by hand, under `stages`) and its
-    /// ramps describe the old teeth, and the results that need both arches
+    /// last staging and its teeth slowed by hand, under `stages`), its
+    /// clinical review (`review`) and its ramps describe the old teeth, and
+    /// the results that need both arches
     /// (Bolton, complexity score, automatic ramps) go with them. The doubts of the
     /// check of the separated teeth and the result of the last separation of
     /// the arch go too, without an id (they were about the old labels).
@@ -889,6 +922,11 @@ impl AlignersState {
         // the teeth slowed by hand were teeth of the old labels
         let slowed = drop_teeth(&mut self.tooth_speed, role);
         note("stages", self.drop_stages_of(role) | slowed);
+
+        // the classifications were made on the teeth that go
+        let n = self.review.len();
+        self.review.retain(|r| r.arch != role);
+        note("review", self.review.len() != n);
 
         let ramps = &mut self.aligner_bite.ramps.ramps;
         let n = ramps.len();

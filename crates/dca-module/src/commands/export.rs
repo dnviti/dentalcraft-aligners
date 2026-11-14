@@ -304,9 +304,19 @@ fn run_export(
     let arches = prepare(state, &data)?;
     let input = input(&arches, &data);
     ctx.check_cancelled()?;
-    let report = export::run(&input, &params).map_err(export_error)?;
+    let report = export::run(&input, &params, &attachments(&data)).map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
     Ok((state.clone(), with_doubts(out, &data)))
+}
+
+/// The teeth with an attachment in the clinical review of each arch, bonded
+/// before its first aligner (the arches without any are left out).
+fn attachments(data: &AlignersState) -> BTreeMap<Arch, Vec<String>> {
+    [Arch::Lower, Arch::Upper]
+        .into_iter()
+        .map(|a| (a, data.attachment_teeth(a.role())))
+        .filter(|(_, teeth)| !teeth.is_empty())
+        .collect()
 }
 
 /// `out` (an object) with the doubts the check of the separated teeth left
@@ -406,8 +416,7 @@ fn run_report(
     let case = CaseInfo {
         patient_code: &state.case.patient_code,
         state: &data,
-        // the attachments are not planned yet (WP: attachments)
-        attachments: BTreeMap::new(),
+        attachments: attachments(&data),
         renders,
         meshes: "",
         notes: Vec::new(),

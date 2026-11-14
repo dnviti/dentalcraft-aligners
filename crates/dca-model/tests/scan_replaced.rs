@@ -10,7 +10,8 @@ use dc_case::{
 use dc_mesh::{BadFaceReport, MeshFormat, TriMesh, Units};
 use dca_model::{
     AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Decision, IprStep, MODULE_ID, Ramp,
-    RampKind, Seed, Stage, StagingSummary, ToothFrame, ToothMeasures, Visit,
+    RampKind, ReviewKind, ReviewRecord, ReviewStatus, Seed, Stage, StagingSummary, ToothFrame,
+    ToothMeasures, Visit,
 };
 use glam::{DQuat, DVec3, Vec3};
 use serde_json::Value;
@@ -160,6 +161,20 @@ fn fill_arch(case: &mut CaseState, st: &mut AlignersState, role: ScanRole, tag: 
         },
     );
     st.tooth_speed.insert(a, 0.5);
+    st.review.push(ReviewRecord {
+        arch: role,
+        kind: ReviewKind::Attachment,
+        fdi: Some(a),
+        computed: "rotation".to_owned(),
+        proposed: "rotation".to_owned(),
+        options: vec!["none".to_owned(), "rotation".to_owned()],
+        detail: Value::Null,
+        refs: Vec::new(),
+        note: None,
+        status: ReviewStatus::Pending,
+        decided: "rotation".to_owned(),
+        decided_at: None,
+    });
     st.aligner_bite.ramps.ramps.push(Ramp {
         fdi: a,
         pose: pose(1.0),
@@ -233,6 +248,7 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         );
         assert!(!st.aligner_bite.ramps.ramps.iter().any(|r| arch(&r.fdi)));
         assert!(!st.visits.iter().any(|v| v.arch == role));
+        assert!(!st.review.iter().any(|r| r.arch == role));
         // the blobs of the cleared records are no longer referenced; the
         // other arch keeps exactly its own (blobs are content addressed)
         let (_, rest) = case_with(&[other(role)]);
@@ -273,6 +289,7 @@ fn only_group(id: &str, role: ScanRole) -> AlignersState {
             st.staging_results = full.staging_results;
             st.tooth_speed = full.tooth_speed;
         }
+        "review" => st.review = full.review,
         "ramps" => st.aligner_bite.ramps.ramps = full.aligner_bite.ramps.ramps,
         "visits" => st.visits = full.visits,
         other => panic!("unknown id {other}"),

@@ -84,6 +84,30 @@ pub fn tooth_type(fdi: Fdi, width_md: f64, width_bl: f64) -> ToothType {
     }
 }
 
+/// The crown measures of the tooth outside their anatomical range: `md`
+/// (mesio-distal diameter), `bl` (bucco-lingual diameter), `height`
+/// (clinical height), in that order (the checks of
+/// `segmentation_plausible`).
+pub fn segmentation_problems(
+    fdi: Fdi,
+    width_md: f64,
+    width_bl: f64,
+    height: f64,
+) -> Vec<&'static str> {
+    let (md, bl) = anatomy::typical_diameters(fdi);
+    let mut out = Vec::new();
+    if !(0.7 * md..=1.35 * md).contains(&width_md) {
+        out.push("md");
+    }
+    if !(0.6 * bl..=1.45 * bl).contains(&width_bl) {
+        out.push("bl");
+    }
+    if !(2.5..=13.0).contains(&height) {
+        out.push("height");
+    }
+    out
+}
+
 /// Whether the crown dimensions are anatomically plausible for the tooth
 /// (`segmentation_plausible`): the reasons when they are not.
 pub fn segmentation_plausible(
@@ -93,24 +117,22 @@ pub fn segmentation_plausible(
     height: f64,
 ) -> (bool, Vec<String>) {
     let (md, bl) = anatomy::typical_diameters(fdi);
-    let mut reasons = Vec::new();
-    if !(0.7 * md..=1.35 * md).contains(&width_md) {
-        reasons.push(format!(
-            "diametro MD {width_md:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
-            0.7 * md,
-            1.35 * md
-        ));
-    }
-    if !(0.6 * bl..=1.45 * bl).contains(&width_bl) {
-        reasons.push(format!(
-            "diametro VL {width_bl:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
-            0.6 * bl,
-            1.45 * bl
-        ));
-    }
-    if !(2.5..=13.0).contains(&height) {
-        reasons.push(format!("altezza clinica {height:.1} mm non plausibile"));
-    }
+    let reasons: Vec<String> = segmentation_problems(fdi, width_md, width_bl, height)
+        .into_iter()
+        .map(|p| match p {
+            "md" => format!(
+                "diametro MD {width_md:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
+                0.7 * md,
+                1.35 * md
+            ),
+            "bl" => format!(
+                "diametro VL {width_bl:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
+                0.6 * bl,
+                1.45 * bl
+            ),
+            _ => format!("altezza clinica {height:.1} mm non plausibile"),
+        })
+        .collect();
     (reasons.is_empty(), reasons)
 }
 
@@ -265,6 +287,27 @@ pub enum Attachment {
 }
 
 impl Attachment {
+    /// Every attachment, in the order of the plugin's `ATTACH`.
+    pub const ALL: [Attachment; 5] = [
+        Attachment::Nessuno,
+        Attachment::Rotazione,
+        Attachment::Estrusione,
+        Attachment::ControlloRadicolare,
+        Attachment::CorporeoAncoraggio,
+    ];
+
+    /// The id the clinical review stores (`none`, `rotation`, `extrusion`,
+    /// `root_control`, `bodily_anchorage`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Attachment::Nessuno => "none",
+            Attachment::Rotazione => "rotation",
+            Attachment::Estrusione => "extrusion",
+            Attachment::ControlloRadicolare => "root_control",
+            Attachment::CorporeoAncoraggio => "bodily_anchorage",
+        }
+    }
+
     /// The plugin's description (`ATTACH`).
     pub fn description(self) -> &'static str {
         match self {
@@ -362,23 +405,36 @@ fn distal_predictable() -> f64 {
     evidence::param_f64("distal_predictable").unwrap_or(2.0)
 }
 
+/// Why the case cannot be treated with aligners only: `extraction` (the
+/// crowding is beyond the extraction threshold), `distalization` (beyond
+/// the predictable distalization), in that order (the checks of
+/// `aligner_suitable_math`).
+pub fn suitability_problems(discrepancy: f64, distal: f64) -> Vec<&'static str> {
+    let extraction = evidence::param_f64("extraction_threshold").unwrap_or(8.0);
+    let mut out = Vec::new();
+    if -discrepancy > extraction {
+        out.push("extraction");
+    }
+    if distal > distal_predictable() {
+        out.push("distalization");
+    }
+    out
+}
+
 /// Whether the case can be treated with aligners only, and why not
 /// (`aligner_suitable_math`). `discrepancy` is available minus required
 /// space (negative = crowding), `distal` the molar distalization (mm).
 pub fn aligner_suitable(discrepancy: f64, distal: f64) -> (bool, Vec<String>) {
-    let extraction = evidence::param_f64("extraction_threshold").unwrap_or(8.0);
     let cite = evidence::cite(&["wang2025consensus"]);
-    let mut reasons = Vec::new();
-    if -discrepancy > extraction {
-        reasons.push(format!(
-            "discrepanza {discrepancy:.1} mm oltre la soglia di estrazione ({cite})"
-        ));
-    }
-    if distal > distal_predictable() {
-        reasons.push(format!(
-            "distalizzazione {distal:.1} mm oltre il limite prevedibile ({cite})"
-        ));
-    }
+    let reasons: Vec<String> = suitability_problems(discrepancy, distal)
+        .into_iter()
+        .map(|p| match p {
+            "extraction" => {
+                format!("discrepanza {discrepancy:.1} mm oltre la soglia di estrazione ({cite})")
+            }
+            _ => format!("distalizzazione {distal:.1} mm oltre il limite prevedibile ({cite})"),
+        })
+        .collect();
     (reasons.is_empty(), reasons)
 }
 

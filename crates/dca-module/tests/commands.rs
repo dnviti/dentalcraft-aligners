@@ -117,6 +117,10 @@ const OUT_OF_THE_MENU: &[&str] = &[
     // the parameters and "Slow a tooth" of the Aligners inspector
     "aligners.settings.staging",
     "aligners.planning.tooth-speed",
+    // the decisions of the Clinical review inspector
+    "aligners.review.decide",
+    "aligners.review.set-value",
+    "aligners.review.bulk",
     // the gizmo of the viewport on a selected 3D component
     "aligners.components.transform",
 ];

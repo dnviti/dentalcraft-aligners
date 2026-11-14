@@ -36,4 +36,4 @@ check:
 	$(PYTHON) -B $(HERE)check.py $(FIX)
 
 clean-stages:
-	for c in $(CASES); do for s in archform worldframe autoseed segmentation teeth diagnosis setup staging schedule; do rm -rf $(FIX)/$$c/$$s; done; done
+	for c in $(CASES); do for s in archform worldframe autoseed segmentation teeth diagnosis setup staging schedule classify; do rm -rf $(FIX)/$$c/$$s; done; done

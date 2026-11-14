@@ -3,21 +3,25 @@
 //!
 //! Sections: summary, renders (optional), diagnosis (space analysis,
 //! Bolton), set-up (IPR, attachments), movement of every tooth, staging,
-//! change calendar, production files and their print check, methods and
-//! references. Everything the page says comes from the case: the diagnosis
-//! and the staging stored in [`AlignersState`], the calendars of the export
-//! and the files it wrote. The text is in [`super::text`].
+//! change calendar, the classifications of the clinical review and the
+//! clinician's decisions, production files and their print check, methods
+//! and references. Everything the page says comes from the case: the
+//! diagnosis, the staging and the review stored in [`AlignersState`], the
+//! calendars of the export and the files it wrote. The text is in
+//! [`super::text`].
 //!
 //! Not ported yet (they need data that the Rust case does not have): the
 //! tracking section of a control visit and the visit history (`visits.rs`),
-//! the clinician review table, the trim and stamp description (`trim.rs`,
-//! `stamp.rs`) and the CAT-CAT items.
+//! the trim and stamp description (`trim.rs`, `stamp.rs`) and the CAT-CAT
+//! items.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use dc_case::Fdi;
-use dca_model::{AlignersState, Stage, StagingPattern, TrimMode};
+use dca_model::{
+    AlignersState, ReviewKind, ReviewRecord, ReviewStatus, Stage, StagingPattern, TrimMode,
+};
 use serde::Serialize;
 
 use super::html::{self, esc, num, png_img};
@@ -629,6 +633,9 @@ pub fn report_html(input: &ReportInput<'_>) -> String {
         o.push_str("</table>");
     }
 
+    // ---- classifications and clinician review ----
+    review_section(&mut o, lang, &st.review, &mut cites);
+
     // ---- production ----
     let _ = write!(o, "<h2>{}</h2>", esc(t("rpt-files")));
     let _ = write!(
@@ -758,6 +765,149 @@ fn trim_key(mode: TrimMode) -> &'static str {
     }
 }
 
+/// The words of a kind of the review.
+fn review_kind_key(kind: ReviewKind) -> &'static str {
+    match kind {
+        ReviewKind::Complexity => "rpt-rk-complexity",
+        ReviewKind::StagingPattern => "rpt-rk-staging-pattern",
+        ReviewKind::AlignerSuitability => "rpt-rk-aligner-suitability",
+        ReviewKind::MovementRisk => "rpt-rk-movement-risk",
+        ReviewKind::Attachment => "rpt-rk-attachment",
+        ReviewKind::Segmentation => "rpt-rk-segmentation",
+        ReviewKind::ToothType => "rpt-rk-tooth-type",
+    }
+}
+
+/// The words of a decision of the review.
+fn review_status_key(status: ReviewStatus) -> &'static str {
+    match status {
+        ReviewStatus::Pending => "rpt-rs-pending",
+        ReviewStatus::Accepted => "rpt-rs-accepted",
+        ReviewStatus::Rejected => "rpt-rs-rejected",
+        ReviewStatus::Modified => "rpt-rs-modified",
+    }
+}
+
+/// The words of a value of the review (`structured`, `root_control`); an
+/// unknown value as it is.
+pub(crate) fn review_value(lang: Lang, value: &str) -> String {
+    let key = format!("rpt-rv-{}", value.replace('_', "-"));
+    let words = text::tr(lang, &key);
+    if words == key {
+        value.to_owned()
+    } else {
+        words.to_owned()
+    }
+}
+
+/// `dd/mm/yyyy hh:mm UTC` of a Unix time.
+fn review_time(lang: Lang, secs: u64) -> String {
+    let day = crate::schedule::Date::from_days((secs / 86_400) as i64);
+    let s = secs % 86_400;
+    format!(
+        "{} {:02}:{:02} UTC",
+        html::date(lang, day),
+        s / 3600,
+        (s % 3600) / 60
+    )
+}
+
+/// The table of the classifications of the clinical review and the
+/// clinician's decisions (the plugin's `report.py`, "Classificazioni e
+/// revisione del clinico"); nothing when the case has none. A record still
+/// to review is marked.
+fn review_section(o: &mut String, lang: Lang, records: &[ReviewRecord], cites: &mut Cites) {
+    if records.is_empty() {
+        return;
+    }
+    let t = |k: &str| text::tr(lang, k).to_owned();
+    let c = crate::review::counts(records);
+    let _ = write!(
+        o,
+        "<h2>{}</h2><p class=\"note\">{}</p><table>{}",
+        esc(&t("rpt-review")),
+        esc(&text::fmt(
+            lang,
+            "rpt-review-note",
+            &[
+                c.pending.to_string(),
+                c.decided().to_string(),
+                c.notes.to_string()
+            ]
+        )),
+        html::head(
+            lang,
+            &[
+                "<rpt-rev-kind",
+                "rpt-rev-subject",
+                "<rpt-rev-computed",
+                "<rpt-rev-proposed",
+                "<rpt-rev-decision",
+                "<rpt-rev-notes"
+            ]
+        )
+    );
+    for r in records {
+        let subject = match r.fdi {
+            Some(f) => f.to_string(),
+            None => {
+                Arch::from_role(r.arch).map_or_else(String::new, |a| arch_name(lang, a).to_owned())
+            }
+        };
+        let mut decision = t(review_status_key(r.status));
+        if !r.decided.is_empty() {
+            decision = format!("{decision}: {}", review_value(lang, &r.decided));
+        }
+        if let Some(at) = r.decided_at {
+            decision = format!("{decision} ({})", review_time(lang, at));
+        }
+        let note = match r.note.as_deref() {
+            Some(crate::review::NOTE_CHECK_NUMBERING) => text::fmt(
+                lang,
+                "rpt-rn-check-numbering",
+                &[review_value(
+                    lang,
+                    r.detail["nearest"].as_str().unwrap_or_default(),
+                )],
+            ),
+            Some(other) => other.to_owned(),
+            None => String::new(),
+        };
+        let refs: Vec<&'static str> = r
+            .refs
+            .iter()
+            .filter_map(|k| evidence::reference(k))
+            .map(|x| x.key)
+            .collect();
+        let sources = if refs.is_empty() {
+            String::new()
+        } else {
+            cites.cite(&refs)
+        };
+        let sep = if note.is_empty() || sources.is_empty() {
+            ""
+        } else {
+            " - "
+        };
+        let _ = write!(
+            o,
+            "{}<td class=\"l\">{}</td><td>{}</td><td class=\"l\">{}</td><td class=\"l\">{}</td><td class=\"l\">{}</td><td class=\"l\">{}{sep}{sources}</td></tr>",
+            html::tr(if r.status == ReviewStatus::Pending {
+                "warn"
+            } else {
+                ""
+            }),
+            esc(&t(review_kind_key(r.kind))),
+            esc(&subject),
+            esc(&review_value(lang, &r.computed)),
+            esc(&review_value(lang, &r.proposed)),
+            esc(&decision),
+            esc(&note),
+        );
+    }
+    o.push_str("</table>");
+}
+
 /// Aligner before which each contact's IPR is done (the first stage that
 /// lists it), keyed by the ordered pair of teeth.
 fn ipr_stages(stages: &[Stage]) -> BTreeMap<(Fdi, Fdi), u32> {
@@ -771,4 +921,101 @@ fn ipr_stages(stages: &[Stage]) -> BTreeMap<(Fdi, Fdi), u32> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::{self, Action, ArchInput, ToothInput};
+
+    fn page(state: &AlignersState, lang: Lang) -> String {
+        report_html(&ReportInput {
+            patient_code: "P1",
+            title: "T",
+            generated: "2026-11-14",
+            version: "0",
+            lang,
+            state,
+            md_sign: &BTreeMap::new(),
+            calendars: &BTreeMap::new(),
+            attachments: &BTreeMap::new(),
+            files: &[],
+            checks: &[],
+            renders: &Renders::default(),
+            workflow: Workflow::Both,
+            notes: &[],
+        })
+    }
+
+    #[test]
+    fn the_review_table_has_every_record_and_the_decisions() {
+        let mut st = AlignersState::default();
+        assert!(!page(&st, Lang::En).contains(text::tr(Lang::En, "rpt-review")));
+        let f = Fdi::new(33).unwrap();
+        let (md, bl) = anatomy::typical_diameters(Fdi::new(36).unwrap());
+        st.review = review::build_records(&ArchInput {
+            arch: Arch::Lower,
+            catcat_score: 30,
+            catcat_items: Default::default(),
+            discrepancy_mm: -2.0,
+            distal_mm: 0.0,
+            pattern: Default::default(),
+            teeth: vec![ToothInput {
+                fdi: f,
+                width_md: md,
+                width_bl: bl,
+                height: 7.0,
+                movement: Some(review::Movement {
+                    desc: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                    aligners: Some(8),
+                }),
+            }],
+        });
+        let i = st
+            .review
+            .iter()
+            .position(|r| r.kind == ReviewKind::Attachment)
+            .unwrap();
+        review::decide(
+            &mut st.review[i],
+            &Action::Value("rotation".into()),
+            86_400 + 3_600,
+        );
+        let en = page(&st, Lang::En);
+        assert!(en.contains("Classifications and the clinician&#39;s review"));
+        assert!(en.contains(
+            "To review: 6; confirmed or changed by the clinician: 1; with a note to check: 1."
+        ));
+        assert!(
+            en.contains("changed: rotation (1970-01-02 01:00 UTC)"),
+            "{en}"
+        );
+        assert!(en.contains("the diameters look more like a first molar: check the numbering"));
+        // the sources are cited and listed
+        assert!(en.contains("Nelson"));
+        let it = page(&st, Lang::It);
+        assert!(it.contains("Complessità del caso") && it.contains("moderato"));
+        assert!(it.contains("modificata: rotazione (02/01/1970 01:00 UTC)"));
+        // every value has its words in both languages
+        let attachments: Vec<&str> = crate::diagnosis::classify::Attachment::ALL
+            .iter()
+            .map(|a| a.id())
+            .collect();
+        for values in [
+            &review::LEVELS[..],
+            &review::PATTERNS[..],
+            &review::SUITABILITY[..],
+            &review::RISK[..],
+            &review::SEGMENTATION[..],
+            &review::TOOTH_TYPES[..],
+            &attachments[..],
+        ] {
+            for v in values {
+                let key = format!("rpt-rv-{}", v.replace('_', "-"));
+                for lang in [Lang::En, Lang::It] {
+                    assert_ne!(text::tr(lang, &key), key, "{v}");
+                }
+            }
+        }
+    }
 }

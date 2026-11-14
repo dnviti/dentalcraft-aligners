@@ -4,7 +4,7 @@
 //! `aligners.auto` runs the automatic stages in pipeline order on the scans
 //! of the case, with their default parameters, in the order of the plugin's
 //! `case_auto.auto_steps` (arch, seeds, segmentation, teeth, diagnosis, the
-//! bite when the arches are not related, setup, staging):
+//! bite when the arches are not related, setup, staging, classifications):
 //!
 //! 0. the arch (`aligners.case.detect-arch`): it may move scans and clear
 //!    their results, so the rest of the list is built from its result;
@@ -33,12 +33,17 @@
 //!    exported in occlusion) are not moved and the step is left out;
 //! 8. setup (`aligners.planning.setup.automatic`);
 //! 9. staging (`aligners.planning.staging.automatic`);
-//! 10. schedule (`aligners.planning.schedule`);
-//! 11. with both arches, the contact map (`aligners.occlusion.contact-map`,
+//! 10. the clinical review (`aligners.review.classify`): the
+//!     classifications, proposals preset and to review; the decisions
+//!     already taken stay where the computed value did not change, and a
+//!     staging pattern decided in the review makes the aligners again;
+//! 11. schedule (`aligners.planning.schedule`), with the attachments of the
+//!     review;
+//! 12. with both arches, the contact map (`aligners.occlusion.contact-map`,
 //!     the summary `occlusion.auto_pair` refreshes after the analysis);
-//!     steps 7 and 11 follow parameter `occlusion`: without them two arches
+//!     steps 7 and 12 follow parameter `occlusion`: without them two arches
 //!     not related stop the run at the setup, which refuses them;
-//! 12. with `export_dir`, the export (`aligners.output.export-stl`, or the
+//! 13. with `export_dir`, the export (`aligners.output.export-stl`, or the
 //!     full package `aligners.output.report` with `full_report`). With
 //!     `shells` the full package has the print files of the shell stage
 //!     (printable models, trimmed aligners, at `quality`, draft by default);
@@ -286,6 +291,8 @@ fn later_steps(state: &CaseState, params: &Params, numbered: &[Arch]) -> Vec<Ste
     steps.extend([
         Step::new("aligners.planning.setup.automatic", Value::Null),
         Step::new("aligners.planning.staging.automatic", Value::Null),
+        // `case_auto.auto_steps`: the classifications after the staging
+        Step::new(super::review::CLASSIFY, Value::Null),
         Step::new(
             "aligners.planning.schedule",
             Value::Object(calendar(params)),
@@ -760,6 +767,7 @@ mod tests {
                 "aligners.occlusion.virtual-bite",
                 "aligners.planning.setup.automatic",
                 "aligners.planning.staging.automatic",
+                super::super::review::CLASSIFY,
                 "aligners.planning.schedule",
                 "aligners.occlusion.contact-map",
                 "aligners.output.export-stl",
@@ -773,8 +781,8 @@ mod tests {
         let when: Vec<bool> = steps.iter().map(|s| s.unless_related).collect();
         assert_eq!(when.iter().filter(|w| **w).count(), 1);
         assert!(when[6]);
-        assert_eq!(steps[9].params["start_date"], "2026-01-05");
-        assert_eq!(steps[11].params["dir"], "x");
+        assert_eq!(steps[10].params["start_date"], "2026-01-05");
+        assert_eq!(steps[12].params["dir"], "x");
         // the seeds of the demo were placed before the run: only checked
         assert_eq!(steps[1].params["correct"], false);
         let numbered = later_steps(&s, &p, &[Arch::Lower]);
@@ -784,9 +792,8 @@ mod tests {
     }
 
     /// The plugin's `steps.ORDER`, with the bite `case_auto.auto_steps` runs
-    /// in the setup step before the final position (`morso`); the
-    /// classifications are not ported.
-    const PLUGIN_ORDER: [&str; 8] = [
+    /// in the setup step before the final position (`morso`).
+    const PLUGIN_ORDER: [&str; 9] = [
         "arcata",
         "semi",
         "segmentazione",
@@ -795,6 +802,7 @@ mod tests {
         "morso",
         "setup",
         "staging",
+        "classificazioni",
     ];
 
     /// The step of the plugin a step of the run belongs to; `None` for the
@@ -810,7 +818,10 @@ mod tests {
             "aligners.diagnosis.space-analysis" => "diagnosi",
             super::super::wrappers::REGISTER | VIRTUAL_BITE => "morso",
             "aligners.planning.setup.automatic" => "setup",
-            "aligners.planning.staging.automatic" | "aligners.planning.schedule" => "staging",
+            "aligners.planning.staging.automatic" => "staging",
+            // the plugin builds the calendar from the plan and the decisions
+            // of the review whenever it shows it: after the classifications
+            super::super::review::CLASSIFY | "aligners.planning.schedule" => "classificazioni",
             _ => return None,
         })
     }

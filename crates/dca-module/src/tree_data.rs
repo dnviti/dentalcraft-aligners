@@ -94,6 +94,13 @@ pub(crate) static GROUPS: &[Node] = &[
                 "stack",
             )
             .key("S"),
+            // the plugin's page "Revisione clinica", after "Allineatori"
+            Node::leaf(
+                "aligners.review.classify",
+                "aligners-menu-review-classify",
+                "aligners-desc-review-classify",
+                "list-checks",
+            ),
         ],
     ),
     Node::group(

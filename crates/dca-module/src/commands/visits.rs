@@ -43,7 +43,7 @@ use dca_algo::frame;
 use dca_algo::gingiva;
 use dca_algo::schedule;
 use dca_algo::segmentation;
-use dca_algo::staging::{self, Complexity, IprPlan, Level, Pattern, ToothMove};
+use dca_algo::staging::{self, IprPlan, Pattern, ToothMove};
 use dca_algo::teeth;
 use dca_algo::visits::{self, MeshRef, ToothInput, VisitError};
 use dca_model::{AlignersState, IprStep, MODULE_ID, Seed, Stage, ToothTracking, Visit};
@@ -53,7 +53,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::messages;
-use super::staging::{aligners_data, arch_name, labelled_scan, md_sign};
+use super::staging::{aligners_data, arch_name, complexity_of, labelled_scan, md_sign};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -574,28 +574,6 @@ pub(crate) struct ReplanParams {
     stage: Option<u32>,
     /// Distribution pattern of the new series (default the case's setting).
     pattern: Option<Pattern>,
-}
-
-/// What the automatic pattern needs: the diagnosis of the arch and the
-/// distal movement of the first molars (as the staging command computes it).
-fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> Complexity {
-    // the values in force: the ones the clinician wrote by hand over the computed
-    let diagnosis = &data.diagnosis;
-    let distal = moves
-        .iter()
-        .filter(|m| anatomy::index(m.fdi) == 6)
-        .map(|m| -(m.delta()[0] * f64::from(m.md_sign)))
-        .fold(0.0_f64, f64::max);
-    Complexity {
-        level: data
-            .diagnosis
-            .complexity_score
-            .map_or(Level::Easy, Level::from_score),
-        crowding_mm: diagnosis.crowding_mm(role).map_or(0.0, |c| c.max(0.0)),
-        little_mm: diagnosis.little_index_mm(role).unwrap_or(0.0),
-        distalization_mm: distal,
-        pattern_override: None,
-    }
 }
 
 /// Puts the series of one arch (`new`, aligners 1..) into the stages of the

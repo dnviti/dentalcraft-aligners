@@ -31,6 +31,7 @@ pub mod manual;
 pub mod occlusion;
 pub mod ramps;
 pub mod reconstruct;
+pub mod review;
 pub mod rotation;
 pub mod scan_base;
 pub mod schedule;

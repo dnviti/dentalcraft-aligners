@@ -96,6 +96,7 @@ pub(crate) mod messages;
 mod occlusion;
 mod ramps;
 mod reconstruct;
+pub(crate) mod review;
 mod schedule;
 mod seed_check;
 mod segmentation;
@@ -129,6 +130,7 @@ pub fn all() -> Vec<CommandSpec> {
         setup::specs,
         setup_line::specs,
         staging::specs,
+        review::specs,
         schedule::specs,
         occlusion::specs,
         bite::specs,

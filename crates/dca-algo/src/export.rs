@@ -501,15 +501,20 @@ fn check_input(input: &Input<'_>, dir: &str) -> Result<(), ExportError> {
     Ok(())
 }
 
-/// Exports the stages: STL files, `stages.csv` and `visits.ics`.
-pub fn run(input: &Input<'_>, params: &Params) -> Result<Report, ExportError> {
+/// Exports the stages: STL files, `stages.csv` and `visits.ics`, the
+/// attachments of each arch (teeth) bonded before its first aligner.
+pub fn run(
+    input: &Input<'_>,
+    params: &Params,
+    attachments: &BTreeMap<Arch, Vec<String>>,
+) -> Result<Report, ExportError> {
     check_input(input, &params.dir)?;
     let dir = PathBuf::from(&params.dir);
     let Plan {
         active,
         total,
         calendars,
-    } = plan_calendars(input, params, &BTreeMap::new())?;
+    } = plan_calendars(input, params, attachments)?;
 
     std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
     // the models: (arch index, stage)
@@ -739,7 +744,7 @@ mod tests {
             interval_days: Some(10),
             ..Params::default()
         };
-        let report = run(&input, &params).unwrap();
+        let report = run(&input, &params, &BTreeMap::new()).unwrap();
         assert_eq!(report.total_aligners, 3);
         assert_eq!(report.start, "2026-02-02");
         assert_eq!(report.end, "2026-03-04");
@@ -800,7 +805,7 @@ mod tests {
             stages: &stages,
         };
         assert!(matches!(
-            run(&input, &Params::default()),
+            run(&input, &Params::default(), &BTreeMap::new()),
             Err(ExportError::NoDir)
         ));
         let dir = temp_dir("err");
@@ -813,16 +818,22 @@ mod tests {
             arches: input.arches.clone(),
             stages: &none,
         };
-        assert!(matches!(run(&empty, &params), Err(ExportError::NoStages)));
+        assert!(matches!(
+            run(&empty, &params, &BTreeMap::new()),
+            Err(ExportError::NoStages)
+        ));
         let bad = Params {
             start_date: Some("soon".into()),
             ..params.clone()
         };
-        assert!(matches!(run(&input, &bad), Err(ExportError::Schedule(_))));
+        assert!(matches!(
+            run(&input, &bad, &BTreeMap::new()),
+            Err(ExportError::Schedule(_))
+        ));
         let short = &labels[..labels.len() - 1];
         input.arches[0].labels = short;
         assert!(matches!(
-            run(&input, &params),
+            run(&input, &params, &BTreeMap::new()),
             Err(ExportError::Labels { .. })
         ));
         assert!(!dir.exists(), "nothing is created when the input is wrong");
