@@ -192,4 +192,10 @@ pub(crate) static TOOLS: &[Node] = &[
         "aligners-desc-planning-movements",
         "arrows-out-cardinal",
     ),
+    Node::leaf(
+        "aligners.occlusion.bite-registration.three-points",
+        "aligners-menu-occlusion-bite-registration-three-points",
+        "aligners-desc-occlusion-bite-registration-three-points",
+        "hand-pointing",
+    ),
 ];

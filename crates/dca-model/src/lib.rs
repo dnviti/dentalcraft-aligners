@@ -11,6 +11,7 @@
 //! poses are [`dc_case::Pose`] (millimetres, radians in the quaternion).
 
 mod bite;
+mod bite_report;
 mod components;
 mod migrate;
 mod settings;
@@ -19,6 +20,9 @@ mod visit;
 
 pub use bite::{
     AlignerBite, BiteClosing, OcclusalMode, OcclusalSettings, Ramp, RampKind, RampSettings,
+};
+pub use bite_report::{
+    BiteFit, BiteMethod, BiteRegistration, BiteReport, BiteScanFit, BiteVerdict,
 };
 pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale, tooth_centre};
 pub use migrate::{ModelError, migrate};

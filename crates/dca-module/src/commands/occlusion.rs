@@ -255,6 +255,8 @@ fn run_virtual_bite(
     // like the registration: the move is baked into the upper mesh, so replacing
     // an arch later has to say that the registration is stale
     data.bite_registered = true;
+    // the source of the relation, clearly an estimate (`bite.mark(VIRTUALE)`)
+    data.bite_report = Some(dca_model::BiteReport::virtual_bite());
     let next = move_arch(state, data, Arch::Upper, &vb.delta, &[]);
     let mut out = serde_json::to_value(&vb).map_err(|e| CommandError::Failed(e.to_string()))?;
     out["source"] = json!("virtual");

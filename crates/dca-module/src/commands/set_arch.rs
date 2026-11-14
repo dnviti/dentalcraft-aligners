@@ -202,7 +202,7 @@ pub(super) fn run_set_arch(
         cleared.extend(others);
 
         let had = held(&data, &moved);
-        if std::mem::take(&mut data.bite_registered) {
+        if data.forget_bite() {
             cleared.insert("bite_registered");
         }
         for &r in &moved {

@@ -63,6 +63,8 @@ aligners-desc-planning-setup-automatic = Propone dove deve arrivare ogni dente, 
 
 aligners-menu-planning-movements = Sposta un dente
 aligners-desc-planning-movements = Sposta e ruota a mano un dente, nella posizione finale o a un allineatore.
+aligners-menu-occlusion-bite-registration-three-points = Tre punti
+aligners-desc-occlusion-bite-registration-three-points = Registra il morso da punti scelti a mano quando la registrazione automatica non riesce: 3 punti ben distanti sull'arcata inferiore e gli stessi 3 sulla scansione del morso, nello stesso ordine; poi, se vuoi, lo stesso per l'arcata superiore.
 
 aligners-menu-planning-aligners = Allineatori
 aligners-desc-planning-aligners = Divide il movimento in una sequenza di allineatori e ti dà il loro calendario.
@@ -163,8 +165,9 @@ aligners-cmd-occlusion-contact-map-doc = Misura i contatti occlusali delle due a
 ## ---- commands: bite ----
 aligners-cmd-bite-icp = Morso dalle scansioni del morso
 aligners-cmd-bite-icp-doc = Registra le due arcate sulle scansioni vestibolari del morso del caso (una o due scansioni con ruolo morso, prese con il paziente in chiusura): ogni scansione del morso viene trovata sulla superficie vestibolare dell'arcata inferiore con una ricerca grossolana e un adattamento fine sulle corone, i suoi punti sull'arcata inferiore vengono tolti e l'arcata superiore viene registrata sul resto. L'arcata inferiore resta ferma; le scansioni del morso si spostano su di essa e la scansione superiore, con i colori dei denti, i punti dente e gli assi dei denti, si sposta su di esse. Restituisce l'adattamento di ogni scansione (area in comune, denti, RMS, coerenza), la concordanza di due scansioni, la compenetrazione e il giudizio con i motivi per verificarla. Nulla viene spostato quando la registrazione è rifiutata (sovrapposizione insufficiente, superfici che non combaciano, arcate che non si fronteggiano o si compenetrano troppo). Servono entrambe le arcate con denti e gengiva separati.
-aligners-cmd-bite-three-points = Morso da tre punti
 aligners-cmd-bite-three-points-doc = Registra le due arcate sulle scansioni del morso come la registrazione automatica, ma parte per la prima scansione del morso da punti scelti a mano: almeno 3 punti sull'arcata inferiore e i punti corrispondenti sulla scansione del morso (distanti tra loro, ad esempio canino, premolare e molare), facoltativamente anche sull'arcata superiore, tutti in coordinate del caso. Da usare quando la ricerca automatica non riesce. Parametri: lower_points, bite_points, upper_points, bite_points_upper (liste di [x, y, z] in mm).
+aligners-cmd-bite-correct = Correggi la compenetrazione
+aligners-cmd-bite-correct-doc = Elimina la compenetrazione delle arcate del caso, come la regolazione del morso dei software degli scanner intraorali (i denti sotto carico si spostano nel legamento parodontale): l'arcata superiore, con i colori dei denti, i segni dei denti, gli assi dei denti, i denti 3D e la gengiva, si allontana rigidamente lungo l'asse occlusale dell'arcata inferiore fino al primo contatto, come con i denti scarichi. Le scansioni non vengono modificate e le scansioni del morso restano dove sono. L'apertura si somma nella relazione del morso, che conserva la compenetrazione data dalla registrazione e riporta quella rimasta e i contatti dopo lo spostamento. Rifiutata quando le arcate non si compenetrano (al massimo 0,021 mm al primo contatto). Servono le due arcate con denti e gengiva separati. Restituisce opening_mm, penetration_mm, contact_points, first_contact (dente superiore e inferiore) e upper_move. Nessun parametro.
 
 ## ---- commands: components ----
 aligners-cmd-components-transform = Sposta, ruota o scala un componente 3D
@@ -355,6 +358,7 @@ aligners-err-why-not-separated = denti e gengiva non sono separati: esegui prima
 aligners-err-why-not-measured = i denti non sono misurati: esegui prima { aligners-menu-teeth-build }
 aligners-err-why-no-setup = non c'è una posizione finale: esegui prima { aligners-menu-planning-setup-automatic }
 aligners-err-setup-bite-first = con le due arcate serve prima il morso (relazione tra le arcate): metti le arcate in occlusione con { aligners-menu-occlusion-align }, poi calcola la posizione finale
+aligners-err-bite-no-penetration = le arcate non si compenetrano: nessuna correzione
 aligners-err-nothing-to-stage = nessuna arcata è pronta: esegui prima { aligners-menu-preparation-segmentation-automatic }, { aligners-menu-teeth-build } e { aligners-menu-planning-setup-automatic }
 aligners-err-no-teeth-any = i denti non sono misurati: esegui prima { aligners-menu-preparation-segmentation-automatic } e { aligners-menu-teeth-build }
 aligners-err-arch-no-teeth = l'arcata { $arch } non ha i denti misurati: esegui prima { aligners-menu-teeth-build }

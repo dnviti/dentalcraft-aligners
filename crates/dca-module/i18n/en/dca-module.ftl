@@ -63,6 +63,8 @@ aligners-desc-planning-setup-automatic = Proposes where every tooth should end u
 
 aligners-menu-planning-movements = Move a tooth
 aligners-desc-planning-movements = Moves and turns one tooth by hand, in the final position or at one aligner.
+aligners-menu-occlusion-bite-registration-three-points = Three points
+aligners-desc-occlusion-bite-registration-three-points = Registers the bite from points picked by hand when the automatic registration fails: 3 points far apart on the lower arch and the same 3 on the bite scan, in the same order; then, if you like, the same for the upper arch.
 
 aligners-menu-planning-aligners = Aligners
 aligners-desc-planning-aligners = Divides the movement into a sequence of aligners and gives you their calendar.
@@ -163,8 +165,9 @@ aligners-cmd-occlusion-contact-map-doc = Measures the occlusal contacts of the t
 ## ---- commands: bite ----
 aligners-cmd-bite-icp = Bite from the bite scans
 aligners-cmd-bite-icp-doc = Registers the two arches to the buccal bite scans of the case (one or two scans with the role bite, taken with the patient biting): each bite scan is found on the buccal surface of the lower arch by a coarse search and a fine fit on the crowns, its points on the lower arch are removed and the upper arch is registered to the rest. The lower arch stays in place; the bite scans move onto it and the upper scan, with its tooth colours, tooth marks and tooth axes, moves onto them. Returns the fit of every scan (overlap area, teeth, RMS, coherence), the agreement of two scans, the interpenetration and the verdict with the reasons to review it. Nothing is moved when the registration is rejected (too little overlap, surfaces that do not match, arches that do not face each other or interpenetrate too much). Needs both arches with teeth and gum separated.
-aligners-cmd-bite-three-points = Bite from three points
 aligners-cmd-bite-three-points-doc = Registers the two arches to the bite scans like the automatic registration, but starts the first bite scan from points picked by hand: at least 3 points on the lower arch and the matching points on the bite scan (far apart, for example canine, premolar and molar), optionally also on the upper arch, all in case coordinates. Use it when the automatic search fails. Parameters: lower_points, bite_points, upper_points, bite_points_upper (lists of [x, y, z] in mm).
+aligners-cmd-bite-correct = Correct the interpenetration
+aligners-cmd-bite-correct-doc = Removes the interpenetration of the arches in the case, as the bite adjustment of intraoral scanner software (the teeth under bite force move in their periodontal ligament): the upper arch, with its tooth colours, tooth marks, tooth axes, 3D teeth and gingiva, moves rigidly along the occlusal axis of the lower arch until the first contact, as with the teeth unloaded. The scans are not reshaped and the bite scans stay where they are. The opening is added to the report of the bite, which keeps the interpenetration the registration gave and gives the one left and the contacts after the move. Refused when the arches do not interpenetrate (at most 0.021 mm to the first contact). Needs both arches with teeth and gum separated. Returns opening_mm, penetration_mm, contact_points, first_contact (upper and lower tooth) and upper_move. No parameters.
 
 ## ---- commands: components ----
 aligners-cmd-components-transform = Move, turn or scale a 3D component
@@ -355,6 +358,7 @@ aligners-err-why-not-separated = teeth and gum are not separated: run { aligners
 aligners-err-why-not-measured = the teeth are not measured: run { aligners-menu-teeth-build } first
 aligners-err-why-no-setup = there is no final position: run { aligners-menu-planning-setup-automatic } first
 aligners-err-setup-bite-first = with both arches the bite comes first (the relation between the arches): put the arches in occlusion with { aligners-menu-occlusion-align }, then compute the final position
+aligners-err-bite-no-penetration = the arches do not interpenetrate: nothing to correct
 aligners-err-nothing-to-stage = no arch is ready: run { aligners-menu-preparation-segmentation-automatic }, { aligners-menu-teeth-build } and { aligners-menu-planning-setup-automatic } first
 aligners-err-no-teeth-any = the teeth are not measured: run { aligners-menu-preparation-segmentation-automatic } and { aligners-menu-teeth-build } first
 aligners-err-arch-no-teeth = the { $arch } arch has no measured teeth: run { aligners-menu-teeth-build } first

@@ -94,7 +94,8 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.planning.schedule",
     "aligners.occlusion.virtual-bite",
     "aligners.occlusion.bite-registration.icp",
-    "aligners.occlusion.bite-registration.three-points",
+    // the correction button of the Bite inspector (Three points is a tool)
+    "aligners.occlusion.bite-correct",
     "aligners.occlusion.contact-map",
     "aligners.occlusion.bite-with-aligners",
     "aligners.occlusion.bite-ramps",

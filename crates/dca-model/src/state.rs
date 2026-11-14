@@ -335,6 +335,11 @@ pub struct AlignersState {
     /// into the mesh: nothing undoes it when an arch is replaced, so
     /// [`AlignersState::clear_arch`] reports it once, as `bite_registered`.
     pub bite_registered: bool,
+    /// The last bite of the case: how the relation was found and the report
+    /// of a registration on the bite scans (the plugin's `bite_json`). It
+    /// goes with [`AlignersState::bite_registered`], reported with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bite_report: Option<crate::BiteReport>,
     /// What the check of the separated teeth
     /// (`aligners.preparation.segmentation.check`) left implausible in each
     /// arch, in words (its problems, then its notes): the plugin's
@@ -473,6 +478,15 @@ fn last_active_stage(stages: &[Stage]) -> u32 {
 }
 
 impl AlignersState {
+    /// Forgets the bite of the case: the `bite_registered` flag and the
+    /// report of the last bite ([`AlignersState::bite_report`]). `true` when
+    /// either was there (the id `bite_registered` reports both).
+    pub fn forget_bite(&mut self) -> bool {
+        let flag = std::mem::take(&mut self.bite_registered);
+        let report = self.bite_report.take().is_some();
+        flag || report
+    }
+
     /// Drops everything computed from, or entered about, the scan of the
     /// arch `role`, and returns the ids of the groups that held data, in the
     /// order of [`CLEARED_IDS`]. A bite role clears nothing.
@@ -508,7 +522,7 @@ impl AlignersState {
             return Vec::new();
         }
         let mut cleared = Vec::new();
-        if std::mem::take(&mut self.bite_registered) {
+        if self.forget_bite() {
             cleared.push("bite_registered");
         }
         let n = self.seeds.len();
