@@ -101,6 +101,7 @@ mod seed_check;
 mod segmentation;
 pub mod set_arch;
 mod setup;
+pub(crate) mod setup_line;
 mod shell;
 mod staging;
 mod stamp;
@@ -126,6 +127,7 @@ pub fn all() -> Vec<CommandSpec> {
         gingiva::specs,
         diagnosis::specs,
         setup::specs,
+        setup_line::specs,
         staging::specs,
         schedule::specs,
         occlusion::specs,

@@ -236,6 +236,7 @@ fn the_manual_tools_are_registered_commands_out_of_the_menu() {
             "aligners.preparation.segmentation.manual-brush",
             "aligners.preparation.segmentation.clean-borders",
             "aligners.planning.movements",
+            "aligners.planning.setup.line",
             "aligners.occlusion.bite-registration.three-points",
         ]
     );

@@ -187,7 +187,15 @@ pub(crate) fn move_arch(
     for s in data.seeds.iter_mut().filter(|s| Arch::of(s.fdi) == arch) {
         s.position = delta.transform_point3(s.position);
     }
-    if let Some(line) = data.setup.lines.get_mut(&arch.role()) {
+    // the line the setup used and the one drawn by the clinician
+    let role = arch.role();
+    for line in [
+        data.setup.lines.get_mut(&role),
+        data.setup.drawn.get_mut(&role),
+    ]
+    .into_iter()
+    .flatten()
+    {
         for p in line {
             *p = delta.transform_point3(*p);
         }
