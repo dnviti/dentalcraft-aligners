@@ -1296,6 +1296,49 @@ mod tests {
     }
 
     #[test]
+    fn the_report_shows_the_values_in_force_and_marks_the_ones_written_by_hand() {
+        use dca_model::ArchEdits;
+        let render = |f: &Fixture, lang: Lang, name: &str| {
+            let dir = temp(name);
+            let mut p = params(&dir);
+            p.lang = lang;
+            run(&f.input(), &f.case(), &Cubes { broken: None }, &p).unwrap();
+            let report = std::fs::read_to_string(dir.join("report.html")).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            report
+        };
+        // computed: discrepancy 70 - 80.5 = -10.5 (beyond the extraction threshold), little 4.2
+        let mut f = fixture();
+        let plain = render(&f, Lang::En, "hand-none");
+        assert!(plain.contains("<td>-10.50</td>") && plain.contains("<td>4.20</td>"));
+        assert!(plain.contains("the consensus indicates extraction"));
+        assert!(!plain.contains(" *</td>") && !plain.contains("written by the clinician"));
+
+        f.state.diagnosis.edits.insert(
+            ScanRole::Upper,
+            ArchEdits {
+                discrepancy_mm: Some(-2.5),
+                little_index_mm: Some(7.5),
+                ..ArchEdits::default()
+            },
+        );
+        let hand = render(&f, Lang::En, "hand-en");
+        // the values in force, marked; the others are as computed and not marked
+        assert!(hand.contains("<td>-2.50 *</td>") && hand.contains("<td>7.50 *</td>"));
+        assert!(hand.contains("<td>1.20</td>") && hand.contains("<td>0.40</td>"));
+        assert!(!hand.contains("-10.50"));
+        // the score follows: the mark is on it too
+        assert!(hand.contains("<td>0 *</td>"));
+        // the extraction warning follows the value in force
+        assert!(!hand.contains("the consensus indicates extraction"));
+        assert!(hand.contains("* Value written by the clinician"));
+        check_wellformed(&hand).unwrap();
+        let it = render(&f, Lang::It, "hand-it");
+        assert!(it.contains("<td>-2,50 *</td>") && it.contains("<td>7,50 *</td>"));
+        assert!(it.contains("* Valore scritto dal clinico"));
+    }
+
+    #[test]
     fn the_default_provider_gives_the_deformed_scans_as_models() {
         let f = fixture();
         let input = f.input();

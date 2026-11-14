@@ -128,6 +128,34 @@ impl ArchSpace {
     }
 }
 
+/// Values the clinician measured by hand for one arch, in place of the
+/// computed ones (the plugin's `oa.diagnosis_edit`). `None` is a value left
+/// to the computation. They are kept apart from the computed values
+/// ([`ArchSpace`], [`ArchDetails`]), which a reset brings back.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchEdits {
+    /// Space available minus space required (mm): negative is crowding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discrepancy_mm: Option<f64>,
+    /// Little irregularity index (mm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub little_index_mm: Option<f64>,
+    /// Offset of the dental midline from the middle of the arch (mm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midline_offset_mm: Option<f64>,
+    /// Largest space between two adjacent crowns (mm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub largest_space_mm: Option<f64>,
+}
+
+impl ArchEdits {
+    /// No value was written by hand.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Results of the diagnosis; `None` until computed.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -138,10 +166,68 @@ pub struct Diagnosis {
     pub bolton_anterior: Option<f64>,
     /// Bolton overall ratio (lower / upper, per cent).
     pub bolton_overall: Option<f64>,
-    /// Complexity score of the case.
+    /// Complexity score of the case: the largest CAT-CAT score of the arches
+    /// with the values the clinician wrote by hand ([`Diagnosis::edits`])
+    /// taken in place of the computed ones.
     pub complexity_score: Option<f64>,
     /// Further results per arch.
     pub details: BTreeMap<ScanRole, ArchDetails>,
+    /// Values written by hand per arch. A new analysis of the arch clears
+    /// them, as in the plugin, where `analyze` writes the diagnosis anew.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub edits: BTreeMap<ScanRole, ArchEdits>,
+}
+
+impl Diagnosis {
+    /// The values written by hand for the arch (none when it has none).
+    pub fn edits_of(&self, role: ScanRole) -> ArchEdits {
+        self.edits.get(&role).copied().unwrap_or_default()
+    }
+
+    /// Space available minus required of the arch (mm, negative is
+    /// crowding): the value written by hand, else the computed one. `None`
+    /// until the arch is analysed.
+    pub fn discrepancy_mm(&self, role: ScanRole) -> Option<f64> {
+        let space = self.arches.get(&role)?;
+        Some(
+            self.edits_of(role)
+                .discrepancy_mm
+                .unwrap_or(-space.crowding_mm()),
+        )
+    }
+
+    /// Crowding (positive) or spacing (negative) of the arch, mm, with the
+    /// value written by hand when there is one.
+    pub fn crowding_mm(&self, role: ScanRole) -> Option<f64> {
+        self.discrepancy_mm(role).map(|d| -d)
+    }
+
+    /// Little irregularity index of the arch (mm), the value written by
+    /// hand or the computed one.
+    pub fn little_index_mm(&self, role: ScanRole) -> Option<f64> {
+        let space = self.arches.get(&role)?;
+        Some(
+            self.edits_of(role)
+                .little_index_mm
+                .unwrap_or(space.little_index_mm),
+        )
+    }
+
+    /// Dental midline offset of the arch (mm; 0 when not analysed), the
+    /// value written by hand or the computed one.
+    pub fn midline_offset_mm(&self, role: ScanRole) -> f64 {
+        self.edits_of(role)
+            .midline_offset_mm
+            .unwrap_or_else(|| self.details.get(&role).map_or(0.0, |d| d.midline_offset_mm))
+    }
+
+    /// Largest space between crowns of the arch (mm; 0 when not analysed),
+    /// the value written by hand or the computed one.
+    pub fn largest_space_mm(&self, role: ScanRole) -> f64 {
+        self.edits_of(role)
+            .largest_space_mm
+            .unwrap_or_else(|| self.details.get(&role).map_or(0.0, |d| d.largest_space_mm))
+    }
 }
 
 /// Final position of the teeth (the setup).
@@ -697,7 +783,9 @@ impl AlignersState {
             || !self.diagnosis.details.contains_key(&other);
         let space = self.diagnosis.arches.remove(&role).is_some();
         let details = self.diagnosis.details.remove(&role).is_some();
-        note("diagnosis", space || details);
+        // the values written by hand were about the teeth that go
+        let edits = self.diagnosis.edits.remove(&role).is_some();
+        note("diagnosis", space || details || edits);
         let bolton = self.diagnosis.bolton_anterior.take().is_some()
             | self.diagnosis.bolton_overall.take().is_some();
         note("bolton", bolton);
@@ -1036,6 +1124,46 @@ mod tests {
         let mut st = both();
         st.clear_label_dependents(ScanRole::Bite);
         assert_eq!(st, both());
+    }
+
+    #[test]
+    fn values_written_by_hand_are_kept_apart_and_win() {
+        let mut st = sample();
+        let up = ScanRole::Upper;
+        // nothing written: the computed values, and the bytes of an old project
+        assert!(st.diagnosis.edits_of(up).is_empty());
+        assert_eq!(st.diagnosis.crowding_mm(up), Some(3.5));
+        assert_eq!(st.diagnosis.little_index_mm(up), Some(4.2));
+        assert_eq!(st.diagnosis.crowding_mm(ScanRole::Lower), None);
+        assert!(serde_json::to_value(&st).unwrap()["diagnosis"]["edits"].is_null());
+        // written: they win in the accessors, the computed ones stay
+        st.diagnosis.edits.insert(
+            up,
+            ArchEdits {
+                discrepancy_mm: Some(-6.0),
+                midline_offset_mm: Some(2.5),
+                ..ArchEdits::default()
+            },
+        );
+        assert_eq!(st.diagnosis.crowding_mm(up), Some(6.0));
+        assert_eq!(st.diagnosis.little_index_mm(up), Some(4.2));
+        assert_eq!(st.diagnosis.midline_offset_mm(up), 2.5);
+        assert_eq!(st.diagnosis.largest_space_mm(up), 0.0);
+        assert_eq!(st.diagnosis.arches[&up].crowding_mm(), 3.5);
+        // saved and read back; a project without the field reads as none
+        let json = serde_json::to_value(&st).unwrap();
+        assert_eq!(json["diagnosis"]["edits"]["upper"]["discrepancy_mm"], -6.0);
+        assert!(json["diagnosis"]["edits"]["upper"]["little_index_mm"].is_null());
+        let back: AlignersState = serde_json::from_value(json).unwrap();
+        assert_eq!(back, st);
+        let mut old = serde_json::to_value(sample()).unwrap();
+        old["diagnosis"].as_object_mut().unwrap().remove("edits");
+        let old: AlignersState = serde_json::from_value(old).unwrap();
+        assert!(old.diagnosis.edits.is_empty());
+        // a new separation of the arch clears them with its diagnosis
+        let cleared = st.clear_label_dependents(up);
+        assert!(cleared.contains(&"diagnosis"));
+        assert!(st.diagnosis.edits.is_empty());
     }
 
     #[test]

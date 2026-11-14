@@ -381,9 +381,50 @@ def _data_dict(ctx):
     return {"teeth": t["teeth"], "seq": t["seq"], "V": ctx.V_arch, "T": ctx.T, "lab": t["labels"]}
 
 
+# Hand values the oracle writes with `manual.diagnosis_override` (oa.diagnosis_edit): each scenario is
+# a sequence of calls on the same case.  A value of a step may be the automatic one (a "reset" in
+# the port: the plugin has no other way back to the automatic value).
+EDIT_SCENARIOS = {
+    "crowding": [{"discrepancy": -8.5}],
+    "three_values": [{"little": 12.3, "midline_offset": 3.1, "largest_space": 4.0}],
+    "spacing": [{"discrepancy": 2.0}],
+    "sequence": [{"discrepancy": -9.0, "midline_offset": 4.0}, {"little": 7.5}, "auto:discrepancy",
+                 "auto:little,midline_offset"],
+}
+
+
+def _diagnosis_edits(ctx, res):
+    """The plugin's `diagnosis_override` itself (extracted from manual.py) on the analysis `res`, for
+    each scenario of EDIT_SCENARIOS: per step the values given, those equal to the automatic ones
+    (`reset`), and the diagnosis it leaves."""
+    ns = {"json": json, "case": SimpleNamespace(CaseError=ValueError), "plan_outdated": lambda obj: None,
+          "mark_manual": lambda obj, step: None}
+    plugin.extract("manual", ["DIAG_KEYS", "diagnosis_values", "diagnosis_override"], ns)
+    out = {}
+    for name, steps in EDIT_SCENARIOS.items():
+        obj = SimpleNamespace(oa=SimpleNamespace(analysis_json=json.dumps(res)))
+        auto = ns["diagnosis_values"](obj)
+        rec = []
+        for step in steps:
+            if isinstance(step, str):          # "auto:key,key": those values written as the automatic ones
+                step = {k: auto[k] for k in step.split(":")[1].split(",")}
+            a = ns["diagnosis_override"](obj, **step)
+            rec.append({
+                "values": step,
+                "reset": sorted(k for k, v in step.items() if abs(v - auto[k]) <= 1e-9),
+                "result": {"discrepancy": a["space"]["discrepancy"], "little": a["little"],
+                           "little_category": a["little_category"], "midline_offset": a["midline_offset"],
+                           "largest_space": a["largest_space"], "catcat_items": a["catcat_items"],
+                           "catcat_score": a["catcat_score"], "level": a["level"], "manuale": a["manuale"]},
+            })
+        out[name] = rec
+    return out
+
+
 def stage_diagnosis(ctx, out):
     """Space analysis, Little index, largest space, CAT-CAT items and level: `case_plan.analyze`
-    itself (extracted), on the oracle's teeth."""
+    itself (extracted), on the oracle's teeth.  `edits`: the same analysis with values written by hand,
+    `manual.diagnosis_override` itself (extracted), see EDIT_SCENARIOS."""
     d = _data_dict(ctx)
     ns = _plan_ns(ctx)
     ns["_data"] = lambda obj, s=None: d
@@ -393,7 +434,8 @@ def stage_diagnosis(ctx, out):
     state = {"analysis": res, "obj": obj}
     if out:
         dump(out, "diagnosis.json", {"case": ctx.name, "arch": ctx.arch,
-                                     "inputs": {"teeth": "../teeth/teeth.json"}, "analysis": res})
+                                     "inputs": {"teeth": "../teeth/teeth.json"}, "analysis": res,
+                                     "edits": _diagnosis_edits(ctx, res)})
     return state
 
 

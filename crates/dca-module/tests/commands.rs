@@ -88,6 +88,8 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.diagnosis.little-index",
     "aligners.diagnosis.bolton",
     "aligners.diagnosis.complexity",
+    // the manual corrections of the Case analysis inspector
+    "aligners.diagnosis.edit-values",
     "aligners.planning.staging.automatic",
     "aligners.planning.schedule",
     "aligners.occlusion.virtual-bite",

@@ -25,6 +25,7 @@ use super::manifest::Entry;
 use super::printcheck::PrintCheck;
 use super::{Workflow, local_poses, text};
 use crate::anatomy::{self, Arch};
+use crate::diagnosis::edit;
 use crate::schedule::{Calendar, Lang};
 use crate::{evidence, staging};
 
@@ -337,21 +338,31 @@ pub fn report_html(input: &ReportInput<'_>) -> String {
                 continue;
             };
             let d = st.diagnosis.details.get(role).copied().unwrap_or_default();
+            // the values in force: the clinician's own over the computed ones
+            let hand = st.diagnosis.edits_of(*role);
+            let mark = |by_hand: bool| if by_hand { " *" } else { "" };
             // discrepancy: + space, - crowding
-            let disc = -sp.crowding_mm();
+            let disc = st.diagnosis.discrepancy_mm(*role).unwrap_or(0.0);
+            let little = st.diagnosis.little_index_mm(*role).unwrap_or(0.0);
+            let score = edit::effective_score(st, *role).unwrap_or(d.catcat_score);
             let class = if -disc > threshold { "warn" } else { "" };
             let _ = write!(
                 o,
-                "{}<td class=\"l\">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "{}<td class=\"l\">{}</td><td>{}</td><td>{}</td><td>{}{}</td><td>{}{}</td><td>{}{}</td><td>{}{}</td><td>{}{}</td></tr>",
                 html::tr(class),
                 esc(arch_name(lang, arch)),
                 n(sp.available_mm, 2),
                 n(sp.required_mm, 2),
                 n(disc, 2),
-                n(sp.little_index_mm, 2),
-                n(d.largest_space_mm, 2),
-                n(d.midline_offset_mm, 2),
-                d.catcat_score,
+                mark(hand.discrepancy_mm.is_some()),
+                n(little, 2),
+                mark(hand.little_index_mm.is_some()),
+                n(st.diagnosis.largest_space_mm(*role), 2),
+                mark(hand.largest_space_mm.is_some()),
+                n(st.diagnosis.midline_offset_mm(*role), 2),
+                mark(hand.midline_offset_mm.is_some()),
+                score,
+                mark(!hand.is_empty()),
             );
             if -disc > threshold {
                 let _ = write!(
@@ -369,6 +380,13 @@ pub fn report_html(input: &ReportInput<'_>) -> String {
             esc(t("rpt-space-note")),
             cites.cite(&["alharbi2008", "little1975"]),
         );
+        if st.diagnosis.edits.values().any(|e| !e.is_empty()) {
+            let _ = write!(
+                o,
+                "<div class=\"note\">{}</div>",
+                esc(t("rpt-by-hand-note"))
+            );
+        }
         if st.diagnosis.bolton_anterior.is_some() || st.diagnosis.bolton_overall.is_some() {
             let mut parts = Vec::new();
             if let Some(b) = st.diagnosis.bolton_overall {

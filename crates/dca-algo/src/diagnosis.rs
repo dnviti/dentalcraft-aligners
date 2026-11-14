@@ -40,6 +40,7 @@ use crate::archform::{self, ArchModel};
 use crate::teeth::{ToothGeom, Which};
 
 pub mod classify;
+pub mod edit;
 
 /// Errors of the diagnosis stage.
 #[derive(Debug, thiserror::Error, PartialEq)]

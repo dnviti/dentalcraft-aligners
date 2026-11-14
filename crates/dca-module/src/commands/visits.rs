@@ -579,7 +579,8 @@ pub(crate) struct ReplanParams {
 /// What the automatic pattern needs: the diagnosis of the arch and the
 /// distal movement of the first molars (as the staging command computes it).
 fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> Complexity {
-    let space = data.diagnosis.arches.get(&role);
+    // the values in force: the ones the clinician wrote by hand over the computed
+    let diagnosis = &data.diagnosis;
     let distal = moves
         .iter()
         .filter(|m| anatomy::index(m.fdi) == 6)
@@ -590,8 +591,8 @@ fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> C
             .diagnosis
             .complexity_score
             .map_or(Level::Easy, Level::from_score),
-        crowding_mm: space.map_or(0.0, |s| s.crowding_mm().max(0.0)),
-        little_mm: space.map_or(0.0, |s| s.little_index_mm),
+        crowding_mm: diagnosis.crowding_mm(role).map_or(0.0, |c| c.max(0.0)),
+        little_mm: diagnosis.little_index_mm(role).unwrap_or(0.0),
         distalization_mm: distal,
         pattern_override: None,
     }

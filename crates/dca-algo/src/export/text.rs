@@ -210,6 +210,11 @@ static TABLE: &[(&str, &str, &str)] = &[
         "Available space is measured from mesial of the first molar to mesial of the first molar; required space is the sum of the mesio-distal widths.",
         "Lo spazio disponibile e misurato da mesiale del primo molare a mesiale del primo molare; lo spazio richiesto e la somma dei diametri mesio-distali.",
     ),
+    (
+        "rpt-by-hand-note",
+        "* Value written by the clinician, or worked out from values written by the clinician.",
+        "* Valore scritto dal clinico, o calcolato da valori scritti dal clinico.",
+    ),
     ("rpt-bolton", "Bolton analysis", "Analisi di Bolton"),
     (
         "rpt-bolton-overall",
