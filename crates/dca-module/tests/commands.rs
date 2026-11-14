@@ -104,6 +104,8 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.settings.study-models",
     "aligners.settings.find-teeth",
     "aligners.settings.segmentation",
+    // the gizmo of the viewport on a selected 3D component
+    "aligners.components.transform",
 ];
 
 #[test]

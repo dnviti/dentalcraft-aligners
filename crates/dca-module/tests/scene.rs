@@ -96,6 +96,35 @@ fn a_stage_moves_the_teeth_with_a_pose() {
 }
 
 #[test]
+fn a_stage_turns_a_tooth_about_its_centre_of_resistance_as_the_plan_does() {
+    let mut s = built();
+    let f11 = Fdi::new(11).unwrap();
+    let mut data = s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+    let frame = ToothFrame {
+        pose: Pose::new(
+            DVec3::new(10.0, 0.0, 0.0),
+            glam::DQuat::from_rotation_z(0.4),
+        ),
+        center_of_resistance: DVec3::new(0.0, 0.0, -8.0),
+    };
+    data.tooth_frames.insert(f11, frame);
+    let turn = Pose::from_rotation(glam::DQuat::from_rotation_x(0.2));
+    data.stages[0].poses.insert(f11, turn);
+    s.set_module(MODULE_ID, ModuleState::new(data));
+    let entries = AlignersModule::new().scene_at(&s, Some(2));
+    let t11 = entries.iter().find(|e| e.tooth == Some(11)).unwrap();
+    // the move the setup, the staging and the export read from the pose
+    let rest = dca_algo::teeth::rest_pose(&frame);
+    let planned = rest.compose(&turn).compose(&rest.inverse());
+    assert!(xform(t11).approx_eq(&planned, 1e-9, 1e-9), "{t11:?}");
+    // the centre of resistance stays where it is, the crown turns about it
+    let cor = frame.pose.apply_point(frame.center_of_resistance);
+    assert!(xform(t11).apply_point(cor).abs_diff_eq(cor, 1e-9));
+    let tip = frame.pose.apply_point(DVec3::ZERO);
+    assert!(xform(t11).apply_point(tip).distance(tip) > 1.0);
+}
+
+#[test]
 fn the_registry_collects_it_and_the_scan_is_hidden() {
     let mut reg = ModuleRegistry::new();
     reg.register(Box::new(AlignersModule::new())).unwrap();

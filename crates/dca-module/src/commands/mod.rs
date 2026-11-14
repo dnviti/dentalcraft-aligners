@@ -83,6 +83,7 @@ macro_rules! stage_command {
 mod auto;
 pub(crate) mod autoseed;
 mod bite;
+mod components;
 mod demo;
 mod diagnosis;
 mod export;
@@ -126,6 +127,7 @@ pub fn all() -> Vec<CommandSpec> {
         schedule::specs,
         occlusion::specs,
         bite::specs,
+        components::specs,
         ramps::specs,
         shell::specs,
         trim::specs,

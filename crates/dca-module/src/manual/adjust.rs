@@ -61,7 +61,7 @@ impl Default for PoseDelta {
 }
 
 impl PoseDelta {
-    fn pose(&self) -> Result<Pose, CommandError> {
+    pub(crate) fn pose(&self) -> Result<Pose, CommandError> {
         let t = DVec3::from_array(self.t);
         let q = DQuat::from_array(self.q);
         if !t.is_finite() || !q.is_finite() || q.length() < 1e-9 {

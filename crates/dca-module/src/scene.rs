@@ -8,6 +8,7 @@ use dc_case::{BlobRef, CaseState, Fdi, Pose, ScanRole};
 use dc_mesh::TriMesh;
 use dc_scene::{Color, LabelPalette, MeshColoring, SceneEntry, SceneItem};
 use dca_algo::gingiva::{self, DeformPrep, GumSurface};
+use dca_algo::teeth;
 use dca_model::{AlignersState, MODULE_ID};
 use glam::DMat4;
 
@@ -157,8 +158,10 @@ fn arch_of(fdi: Fdi) -> ScanRole {
 /// - One entry per arch in `gingiva`: uniform [`GINGIVA_COLOR`], tagged
 ///   with the arch (it hides no scan itself: the teeth of the arch do).
 /// - For `Some(n)`, `n > 0`, a tooth is moved by the pose of the stage with
-///   index `n`, relative to its rest frame (`frame * pose * frame^-1`, as
-///   the workspace poses the scans); a tooth with no pose or frame stays.
+///   index `n`, relative to its rest pose ([`teeth::rest_pose`]: the frame
+///   of the tooth with its origin at the centre of resistance), that is by
+///   `rest * pose * rest^-1`, as the setup, the staging and the export read
+///   it; a tooth with no pose or frame stays.
 ///   The gingiva follows the moved teeth of its arch, blended with its gum
 ///   weights (`gingiva::deform`, as the plugin animates it): the entry
 ///   carries the deformed mesh.
@@ -186,8 +189,8 @@ pub(crate) fn built_scene(
         .keys()
         .filter_map(|fdi| {
             let p = posed?.poses.get(fdi)?;
-            let fr = data.tooth_frames.get(fdi)?;
-            Some((*fdi, fr.pose.compose(p).compose(&fr.pose.inverse())))
+            let rest = teeth::rest_pose(data.tooth_frames.get(fdi)?);
+            Some((*fdi, rest.compose(p).compose(&rest.inverse())))
         })
         .collect();
     let mut out = Vec::new();
