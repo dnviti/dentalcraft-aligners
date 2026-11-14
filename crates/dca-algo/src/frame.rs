@@ -36,6 +36,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::anatomy::{self, Arch};
+use crate::rotation;
 
 /// Translation below which the patient is already on the axes (mm).
 pub const TOL_MM: f64 = 0.01;
@@ -131,16 +132,6 @@ pub fn rot_axis_angle(axis: DVec3, angle: f64) -> DMat3 {
         return DMat3::IDENTITY;
     }
     DMat3::from_axis_angle(a, angle)
-}
-
-/// Rotation matrix of the rotation vector `r` (axis times angle).
-pub fn rotvec_to_matrix(r: DVec3) -> DMat3 {
-    DMat3::from_quat(DQuat::from_scaled_axis(r))
-}
-
-/// Rotation vector (axis times angle, angle in `[0, π]`) of a rotation matrix.
-pub fn matrix_to_rotvec(m: &DMat3) -> DVec3 {
-    DQuat::from_mat3(m).normalize().to_scaled_axis()
 }
 
 /// Frame matrix with columns `x`, `y`, `z` and translation `origin`.
@@ -301,20 +292,13 @@ pub fn world_delta(frame: &ArchFrame, arch: Arch, centre: DVec3) -> Pose {
     let r = world * local.transpose();
     Pose {
         t: -(r * centre),
-        q: DQuat::from_mat3(&r).normalize(),
+        q: rotation::canonical(DQuat::from_mat3(&r)),
     }
-}
-
-/// Rotation angle of the pose in degrees.
-pub fn rotation_degrees(pose: &Pose) -> f64 {
-    let m = DMat3::from_quat(pose.q);
-    let tr = m.x_axis.x + m.y_axis.y + m.z_axis.z;
-    ((tr - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
 /// `true` when the pose is within [`TOL_MM`] / [`TOL_DEG`] of the identity.
 pub fn is_identity(pose: &Pose) -> bool {
-    rotation_degrees(pose) < TOL_DEG && pose.t.length() < TOL_MM
+    rotation::degrees(pose) < TOL_DEG && pose.t.length() < TOL_MM
 }
 
 /// Fraction of the occlusal height used for the occlusal plane of the
@@ -609,20 +593,14 @@ mod tests {
     }
 
     #[test]
-    fn rotation_helpers_round_trip() {
-        let r = rot_axis_angle(DVec3::new(1.0, 2.0, -0.5), 0.8);
-        let v = matrix_to_rotvec(&r);
-        assert!((v.length() - 0.8).abs() < 1e-12);
-        assert!(rotvec_to_matrix(v).abs_diff_eq(r, 1e-12));
-        assert_eq!(rotvec_to_matrix(DVec3::ZERO), DMat3::IDENTITY);
-        assert_eq!(matrix_to_rotvec(&DMat3::IDENTITY), DVec3::ZERO);
-        // 180 degrees
-        let half = rot_axis_angle(DVec3::Z, std::f64::consts::PI);
-        assert!((matrix_to_rotvec(&half).length() - std::f64::consts::PI).abs() < 1e-9);
+    fn axis_angle_rotation() {
         assert_eq!(rot_axis_angle(DVec3::ZERO, 1.0), DMat3::IDENTITY);
         // 90 degrees about Z takes X to Y
         let q = rot_axis_angle(DVec3::Z, std::f64::consts::FRAC_PI_2);
         assert!((q * DVec3::X - DVec3::Y).length() < 1e-12);
+        // the axis is normalised first
+        let r = rot_axis_angle(DVec3::new(1.0, 2.0, -0.5), 0.8);
+        assert!((rotation::matrix_to_rotvec(&r).length() - 0.8).abs() < 1e-12);
     }
 
     #[test]
@@ -758,7 +736,7 @@ mod tests {
         let c = arch_centre(&f, &seeds);
         let d = world_delta(&f, Arch::Lower, c);
         assert!(is_identity(&d), "{d:?}");
-        assert!(rotation_degrees(&d) < 1e-6);
+        assert!(rotation::degrees(&d) < 1e-6);
     }
 
     #[test]
@@ -777,7 +755,7 @@ mod tests {
             0.002
         ))));
         assert!(
-            (rotation_degrees(&Pose::from_rotation(DQuat::from_rotation_z(1.0)))
+            (rotation::degrees(&Pose::from_rotation(DQuat::from_rotation_z(1.0)))
                 - 57.29577951308232)
                 .abs()
                 < 1e-9

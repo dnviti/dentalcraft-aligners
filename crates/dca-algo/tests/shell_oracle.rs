@@ -19,7 +19,8 @@ use std::time::Instant;
 
 use dc_case::Fdi;
 use dc_mesh::TriMesh;
-use dca_algo::frame::{rigid_inverse, rotvec_to_matrix};
+use dca_algo::frame::rigid_inverse;
+use dca_algo::rotation::rotvec_to_matrix;
 use dca_algo::shell::{self, Design, Input, Outputs, Params};
 use glam::{DMat4, DVec3};
 use serde_json::Value;

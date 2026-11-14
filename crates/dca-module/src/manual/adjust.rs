@@ -26,6 +26,7 @@ use dc_module_api::CommandOutput;
 use dca_algo::anatomy::{self, Arch};
 use dca_algo::frame;
 use dca_algo::manual::{self, ClinicalDelta};
+use dca_algo::rotation;
 use dca_algo::staging;
 use dca_algo::teeth;
 use dca_model::AlignersState;
@@ -124,7 +125,7 @@ fn pose_json(p: &Pose, md_sign: i8) -> Value {
     let c = staging::describe_q(&q, md_sign);
     json!({
         "translation_mm": p.t.to_array(),
-        "rotation_deg": p.q.normalize().to_axis_angle().1.to_degrees(),
+        "rotation_deg": rotation::degrees(p),
         "pose": p,
         "clinical": {
             "mesial_mm": c[0], "buccal_mm": c[1], "extrusion_mm": c[2],
@@ -301,7 +302,8 @@ pub(crate) fn run_adjust(
     if let Some(d) = delta {
         pose = if p.absolute { d } else { pose.compose(&d) };
     }
-    pose = pose.compose(&clinical.pose(md_sign));
+    // stored as the staging stores it: the shortest rotation, w >= 0
+    let pose = rotation::canonical_pose(&pose.compose(&clinical.pose(md_sign)));
 
     let contacts_before = contacts(state, &data, p.stage, f, &before);
     let contacts_after = contacts(state, &data, p.stage, f, &pose);

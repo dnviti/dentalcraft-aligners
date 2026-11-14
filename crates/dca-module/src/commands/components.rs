@@ -22,7 +22,7 @@ use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
-use dca_algo::{frame, teeth};
+use dca_algo::{rotation, teeth};
 use dca_model::{TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -120,7 +120,7 @@ impl Plan {
 fn pose_json(p: &Pose) -> Value {
     json!({
         "translation_mm": p.t.to_array(),
-        "rotation_deg": frame::rotation_degrees(p),
+        "rotation_deg": rotation::degrees(p),
         "pose": p,
     })
 }
@@ -453,6 +453,33 @@ mod tests {
             json!({ "component": "tooth", "fdi": f.get(), "reset": true }),
         );
         assert!(!data(&back).setup.poses.contains_key(&f));
+    }
+
+    #[test]
+    fn a_gizmo_turn_sent_with_negative_w_is_stored_and_reported_the_short_way() {
+        // the viewport sends whichever quaternion sign it has: -q is the same 4 degree turn
+        let s = built();
+        let f = a_lower_tooth(&s);
+        let turn = DQuat::from_axis_angle(DVec3::new(0.2, 0.1, 1.0).normalize(), 4f64.to_radians());
+        let (next, out) = exec(
+            TRANSFORM,
+            &s,
+            json!({ "component": "tooth", "fdi": f.get(), "move": mv([0.0; 3], -turn) }),
+        );
+        let local = data(&next).setup.poses[&f];
+        assert!(local.q.w >= 0.0, "{local:?}");
+        assert!((rotation::degrees(&local) - 4.0).abs() < 1e-9);
+        for key in ["total", "plan"] {
+            let deg = if key == "total" {
+                &out["total"]["rotation_deg"]
+            } else {
+                &out["plan"]["after"]["rotation_deg"]
+            };
+            assert!((deg.as_f64().unwrap() - 4.0).abs() < 1e-9, "{key}: {out}");
+        }
+        // the staging reads the short turn: 4 degrees, not 356 the other way
+        let q = dca_algo::staging::q_from_pose(&local);
+        assert!((DVec3::new(q[3], q[4], q[5]).length().to_degrees() - 4.0).abs() < 1e-9);
     }
 
     #[test]

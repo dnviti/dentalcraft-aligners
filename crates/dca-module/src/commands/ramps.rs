@@ -26,7 +26,7 @@ use dca_algo::aligner_bite::occlusal::{self, ArchStage, Design};
 use dca_algo::anatomy::Arch;
 use dca_algo::occlusion::{self, ArchModel};
 use dca_algo::ramps::{self, ProposeInput, ProposeTooth, RampSolid};
-use dca_algo::{frame, staging};
+use dca_algo::{frame, staging, teeth};
 use dca_model::{
     AlignersState, BiteClosing, MODULE_ID, OcclusalMode, OcclusalSettings, Ramp, RampKind,
 };
@@ -315,7 +315,8 @@ fn arch_case(
 
 /// The rigid transform of every tooth of an arch at aligner `k` in case
 /// coordinates (`x' = D x`): the local pose of the last stage up to `k` that
-/// mentions the tooth, in the rest frame of the tooth.
+/// mentions the tooth, in the rest frame of the tooth ([`teeth::rest_pose`],
+/// centre of resistance origin, as the staging plans it).
 fn stage_deltas(data: &AlignersState, arch: Arch, k: u32) -> BTreeMap<Fdi, DMat4> {
     let mut stages: Vec<_> = data.stages.iter().filter(|s| s.index <= k).collect();
     stages.sort_by_key(|s| s.index);
@@ -330,7 +331,7 @@ fn stage_deltas(data: &AlignersState, arch: Arch, k: u32) -> BTreeMap<Fdi, DMat4
     local
         .into_iter()
         .filter_map(|(f, p)| {
-            let rest = data.tooth_frames.get(&f)?.pose;
+            let rest = teeth::rest_pose(data.tooth_frames.get(&f)?);
             Some((f, staging::world_delta(&rest, &p).to_mat4()))
         })
         .collect()

@@ -38,7 +38,10 @@
 //! and the rotation of the rotation vector `q[3..6]`, both in the rest
 //! frame of the tooth. [`pose_from_q`] and [`q_from_pose`] convert,
 //! [`world_delta`] gives the rigid transform of the tooth in the coordinates
-//! of its rest frame.
+//! of its rest frame. Every rotation vector is the shortest rotation (angle
+//! in `[0, π]`, [`crate::rotation`]), whatever the sign of the stored
+//! quaternion: the plugin reads its rotation vectors from matrices, with the
+//! angle from the trace, so it never meets the sign of a quaternion.
 //!
 //! The crown points should be the closed crown of `reconstruct.rs`
 //! (`reconstruct.closed_tooth`). Until that stage lands, the command feeds
@@ -48,11 +51,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use dc_case::{Fdi, Pose};
 use dca_model::{PerioStage, StagingPattern, StagingSettings};
-use glam::{DMat3, DMat4, DQuat, DVec3};
+use glam::{DMat3, DMat4, DVec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{anatomy, evidence, frame, teeth};
+use crate::{anatomy, evidence, frame, rotation, teeth};
 
 /// Movement of a tooth: `(t_md, t_bl, t_ax, r_md, r_bl, r_ax)` in the tooth
 /// rest frame (mm and rad).
@@ -503,7 +506,7 @@ fn rotvec(q: &Q6) -> DVec3 {
 
 /// The rigid transform of a movement in the rest frame (`local_pose`).
 pub fn local_pose(q: &Q6) -> DMat4 {
-    let r = frame::rotvec_to_matrix(rotvec(q));
+    let r = rotation::rotvec_to_matrix(rotvec(q));
     DMat4::from_cols(
         r.x_axis.extend(0.0),
         r.y_axis.extend(0.0),
@@ -516,7 +519,7 @@ pub fn local_pose(q: &Q6) -> DMat4 {
 /// `frame` (`q_from_delta`).
 pub fn q_from_delta(frame_m: &DMat4, delta: &DMat4) -> Q6 {
     let l = frame::rigid_inverse(frame_m) * *delta * *frame_m;
-    let r = frame::matrix_to_rotvec(&DMat3::from_mat4(l));
+    let r = rotation::matrix_to_rotvec(&DMat3::from_mat4(l));
     let t = l.w_axis.truncate();
     [t.x, t.y, t.z, r.x, r.y, r.z]
 }
@@ -528,17 +531,18 @@ pub fn delta_from_q(frame_m: &DMat4, q: &Q6) -> DMat4 {
 }
 
 /// The movement `q` as a [`Pose`] (translation and rotation, both in the
-/// rest frame of the tooth).
+/// rest frame of the tooth; the quaternion [`rotation::canonical`]).
 pub fn pose_from_q(q: &Q6) -> Pose {
     Pose::new(
         DVec3::new(q[0], q[1], q[2]),
-        DQuat::from_scaled_axis(rotvec(q)),
+        rotation::from_rotvec(rotvec(q)),
     )
 }
 
-/// The movement `q` of a [`Pose`] stored by [`pose_from_q`].
+/// The movement `q` of a [`Pose`] stored by [`pose_from_q`]: the shortest
+/// rotation vector, whatever the sign of the quaternion.
 pub fn q_from_pose(p: &Pose) -> Q6 {
-    let r = p.q.normalize().to_scaled_axis();
+    let r = rotation::to_rotvec(p.q);
     [p.t.x, p.t.y, p.t.z, r.x, r.y, r.z]
 }
 
@@ -1323,6 +1327,7 @@ fn stage_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::DQuat;
 
     fn fdi(n: u8) -> Fdi {
         Fdi::new(n).unwrap()
@@ -1367,6 +1372,83 @@ mod tests {
         let rest = Pose::from_mat4(&frame);
         let wd = world_delta(&rest, &pose).to_mat4();
         assert!(wd.abs_diff_eq(d, 1e-12));
+    }
+
+    /// The largest rotation (degrees) of a tooth over the stages of a plan, and
+    /// the largest rotation from one stage to the next.
+    fn turns(plan: &Plan, f: Fdi) -> (f64, f64) {
+        let poses: Vec<Pose> = plan.q[&f].iter().map(pose_from_q).collect();
+        let most = poses.iter().map(rotation::degrees).fold(0.0, f64::max);
+        let step = poses
+            .windows(2)
+            .map(|w| rotation::degrees(&w[1].compose(&w[0].inverse())))
+            .fold(0.0, f64::max);
+        (most, step)
+    }
+
+    fn plan_one(q: Q6) -> Plan {
+        let moves = [tooth(11, 0.0, q)];
+        let input = Input {
+            moves: &moves,
+            ipr: &[],
+            complexity: Complexity::default(),
+        };
+        run(&input, &Params::default()).unwrap()
+    }
+
+    #[test]
+    fn a_stored_pose_with_negative_w_is_staged_the_short_way() {
+        // the setup stored a 4 degree turn with w < 0 (the 719-stage anomaly): read the long
+        // way round it was a 356 degree turn, about 180 aligners spinning the tooth
+        let turn =
+            DQuat::from_axis_angle(DVec3::new(0.1, -0.2, 1.0).normalize(), 4f64.to_radians());
+        let t = DVec3::new(0.3, -0.2, 0.1);
+        let stored = Pose { t, q: -turn };
+        assert!(stored.q.w < 0.0);
+        let q = q_from_pose(&stored);
+        let short = q_from_pose(&Pose::new(t, turn));
+        assert!(
+            q.iter().zip(&short).all(|(a, b)| (a - b).abs() < 1e-15),
+            "{q:?} {short:?}"
+        );
+        assert!((rotvec(&q).length().to_degrees() - 4.0).abs() < 1e-9);
+        let plan = plan_one(q);
+        assert_eq!(plan.n_stages, plan_one(short).n_stages);
+        // 4 degrees about the long axis (2 per aligner) and 0.37 mm, with crown points 6 mm
+        // from the axis: 0.8 mm of crown travel at 0.33 mm per aligner (the crown cap)
+        assert_eq!(plan.n_stages, 3);
+        let (most, step) = turns(&plan, fdi(11));
+        assert!(most <= 4.0 + 1e-9 && step <= 2.0 + 1e-9, "{most} {step}");
+        // the last aligner is the stored pose (the same rotation, w >= 0)
+        let last = pose_from_q(plan.q[&fdi(11)].last().unwrap());
+        assert!(last.t.distance(stored.t) < 1e-12);
+        assert!(rotation::angle(last.q * stored.q.inverse()) < 1e-12);
+        assert!(last.q.w >= 0.0);
+    }
+
+    #[test]
+    fn a_turn_next_to_180_degrees_is_staged_the_short_way() {
+        // 181 degrees one way is 179 degrees the other way: the same aligners
+        for (deg, short) in [(179.0, 179.0), (181.0, -179.0)] {
+            let q = q_from_pose(&Pose::from_rotation(DQuat::from_rotation_z(
+                f64::to_radians(deg),
+            )));
+            assert!(
+                (q[5] - f64::to_radians(short)).abs() < 1e-12,
+                "{deg}: {q:?}"
+            );
+            let plan = plan_one(q);
+            // 179 degrees at 2 degrees per aligner, capped by the crown travel
+            let (most, step) = turns(&plan, fdi(11));
+            assert!(
+                most <= 179.0 + 1e-9 && step <= 2.0 + 1e-9,
+                "{deg}: {most} {step}"
+            );
+            assert_eq!(
+                plan.n_stages,
+                plan_one([0.0, 0.0, 0.0, 0.0, 0.0, f64::to_radians(179.0)]).n_stages
+            );
+        }
     }
 
     #[test]

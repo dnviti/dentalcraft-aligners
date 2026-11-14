@@ -39,8 +39,9 @@ use dc_case::{CaseState, Fdi, ModuleState, Pose};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::CommandOutput;
 use dca_algo::anatomy::Arch;
-use dca_algo::teeth::Which;
-use dca_model::{AlignersState, MODULE_ID};
+use dca_algo::rotation;
+use dca_algo::teeth::{self, Which};
+use dca_model::{AlignersState, MODULE_ID, ToothFrame};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -186,12 +187,15 @@ fn remove_tooth(data: &mut AlignersState, f: Fdi) -> bool {
     had
 }
 
-/// The setup pose `local` (relative to the rest frame `old`) of a tooth whose
-/// rest frame becomes `new`, with the same move in the world:
-/// `new^-1 * (old * local * old^-1) * new` (the plugin's `T0 * R0^-1 * F`).
-fn carried_pose(old: &Pose, new: &Pose, local: &Pose) -> Pose {
+/// The setup pose `local` of a tooth whose frame goes from `old` to `new`,
+/// with the same move in the world. The pose is relative to the rest pose of
+/// the frame ([`teeth::rest_pose`], centre of resistance origin), so with
+/// `R0` and `F` the old and new rest poses: `F^-1 * (R0 * local * R0^-1) * F`
+/// (the plugin's target `T0 * R0^-1 * F`).
+fn carried_pose(old: &ToothFrame, new: &ToothFrame, local: &Pose) -> Pose {
+    let (old, new) = (teeth::rest_pose(old), teeth::rest_pose(new));
     let world = old.compose(local).compose(&old.inverse());
-    new.inverse().compose(&world).compose(new)
+    rotation::canonical_pose(&new.inverse().compose(&world).compose(&new))
 }
 
 /// The steps run so far and how many are planned (for the progress bar).
@@ -340,7 +344,7 @@ pub(super) fn run_teeth(
         }
         let mut gone = Vec::new();
         for &f in todo {
-            let Some(new) = d.tooth_frames.get(&f).map(|fr| fr.pose) else {
+            let Some(new) = d.tooth_frames.get(&f).copied() else {
                 // no labels left: a missing tooth
                 if remove_tooth(&mut d, f) {
                     gone.push(f.get());
@@ -353,7 +357,7 @@ pub(super) fn run_teeth(
             } else if let (Some(old), Some(p)) =
                 (before.tooth_frames.get(&f), d.setup.poses.get(&f).copied())
             {
-                d.setup.poses.insert(f, carried_pose(&old.pose, &new, &p));
+                d.setup.poses.insert(f, carried_pose(old, &new, &p));
             }
         }
         current.set_module(MODULE_ID, ModuleState::new(d));
@@ -537,9 +541,11 @@ mod tests {
         assert!(out["arches"].get("upper").is_none(), "{out}");
     }
 
-    /// `p` moved by the frame `frame` into the world.
-    fn world(frame: &Pose, p: &Pose) -> Pose {
-        frame.compose(p).compose(&frame.inverse())
+    /// `p` moved by the rest pose of `frame` into the world (the plan's
+    /// convention: centre of resistance origin).
+    fn world(frame: &ToothFrame, p: &Pose) -> Pose {
+        let rest = teeth::rest_pose(frame);
+        rest.compose(p).compose(&rest.inverse())
     }
 
     #[test]
@@ -559,7 +565,7 @@ mod tests {
             let fr = d.tooth_frames.get_mut(&fdi(f)).unwrap();
             fr.pose = nudge.compose(&fr.pose);
         }
-        let old_36 = d.tooth_frames[&fdi(36)].pose;
+        let old_36 = d.tooth_frames[&fdi(36)];
         let moved = Pose::new(
             DVec3::new(0.5, 0.1, 0.0),
             glam::DQuat::from_rotation_x(0.05),
@@ -586,8 +592,8 @@ mod tests {
             }
         }
         // the rebuilt tooth is measured again and keeps its move in the world
-        let new_36 = d.tooth_frames[&fdi(36)].pose;
-        assert!(!new_36.approx_eq(&old_36, 1e-3, 1e-3));
+        let new_36 = d.tooth_frames[&fdi(36)];
+        assert!(!new_36.pose.approx_eq(&old_36.pose, 1e-3, 1e-3));
         let p = d.setup.poses[&fdi(36)];
         assert!(
             !p.approx_eq(&moved, 1e-3, 1e-3),
@@ -608,10 +614,20 @@ mod tests {
 
     #[test]
     fn carrying_a_pose_keeps_the_move_in_the_world() {
-        let old = Pose::new(DVec3::new(1.0, 2.0, 3.0), glam::DQuat::from_rotation_y(0.4));
-        let new = Pose::new(
+        let frame = |t: DVec3, q: glam::DQuat, cres: DVec3| ToothFrame {
+            pose: Pose::new(t, q),
+            center_of_resistance: cres,
+        };
+        // the centre of resistance far from the frame origin: the pivot matters
+        let old = frame(
+            DVec3::new(1.0, 2.0, 3.0),
+            glam::DQuat::from_rotation_y(0.4),
+            DVec3::new(0.2, -0.1, -9.0),
+        );
+        let new = frame(
             DVec3::new(-1.0, 0.5, 2.0),
             glam::DQuat::from_rotation_z(-0.7),
+            DVec3::new(-0.3, 0.4, -8.5),
         );
         let p = Pose::new(
             DVec3::new(0.3, -0.2, 0.1),
@@ -620,6 +636,14 @@ mod tests {
         let q = carried_pose(&old, &new, &p);
         assert!(world(&new, &q).approx_eq(&world(&old, &p), 1e-12, 1e-12));
         assert!(carried_pose(&old, &old, &p).approx_eq(&p, 1e-12, 1e-12));
+        // turning about the frame origin instead would move the tooth elsewhere
+        let about_origin =
+            |fr: &ToothFrame, l: &Pose| fr.pose.compose(l).compose(&fr.pose.inverse());
+        assert!(about_origin(&old, &p).t.distance(world(&old, &p).t) > 1.0);
+        // a stored quaternion with w < 0 comes back with w >= 0
+        let flipped = Pose { t: p.t, q: -p.q };
+        let r = carried_pose(&old, &new, &flipped);
+        assert!(r.q.w >= 0.0 && r.approx_eq(&q, 1e-12, 1e-12));
     }
 
     #[test]

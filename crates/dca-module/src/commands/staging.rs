@@ -397,13 +397,24 @@ fn stages_of_plan(plan: &staging::Plan, ipr: &[IprPlan]) -> Vec<Stage> {
 
 /// Puts the series of one arch into the stages of the case, replacing what
 /// the arch had. `seq` are the teeth of the arch (all of them get a pose in
-/// every stage). The arch that finishes first repeats its last pose.
+/// every stage). The arch that finishes first repeats its last pose. The
+/// aligners after the end of both series are dropped: an older, longer plan
+/// of this arch leaves nothing behind.
 fn merge_arch(stages: &mut Vec<Stage>, arch: Arch, new: &[Stage], seq: &[Fdi]) {
     for s in stages.iter_mut() {
         s.poses.retain(|f, _| Arch::of(*f) != arch);
         s.ipr.retain(|r| Arch::of(r.between[0]) != arch);
     }
     stages.sort_by_key(|s| s.index);
+    // where the series of the other arch ends: its last movement or IPR
+    let other_end = [Arch::Lower, Arch::Upper]
+        .into_iter()
+        .filter(|a| *a != arch)
+        .map(|a| dca_algo::schedule::active_stages(a, stages))
+        .chain(stages.iter().filter(|s| !s.ipr.is_empty()).map(|s| s.index))
+        .max()
+        .unwrap_or(0);
+    stages.retain(|s| s.index as usize <= new.len().max(other_end as usize));
     let total = stages.len().max(new.len());
     for k in stages.len() + 1..=total {
         stages.push(Stage::new(k as u32));
@@ -577,6 +588,58 @@ pub(crate) mod tests {
                 .len()
                 > n
         );
+    }
+
+    #[test]
+    fn staging_again_drops_the_aligners_of_a_longer_old_plan() {
+        // the long-way turns left plans of 700 aligners: staged again, only the new ones stay
+        let id = "aligners.planning.staging.automatic";
+        let s = staged_input("lower", &CaseState::default());
+        let (planned, out) = exec(id, &s, Value::Null).unwrap();
+        let n = out["lower"]["aligners"].as_u64().unwrap() as usize;
+        let mut d = aligners_data(&planned).unwrap();
+        let last = d.stages.last().unwrap().clone();
+        for k in d.stages.len() as u32 + 1..=700 {
+            let mut st = last.clone();
+            st.index = k;
+            st.ipr.clear();
+            d.stages.push(st);
+        }
+        let mut old = planned.clone();
+        old.set_module(MODULE_ID, ModuleState::new(d));
+        let (again, out) = exec(id, &old, Value::Null).unwrap();
+        assert_eq!(out["total_aligners"], n);
+        let stages = &aligners_data(&again).unwrap().stages;
+        assert_eq!(stages.len(), n);
+        assert_eq!(*stages, aligners_data(&planned).unwrap().stages);
+    }
+
+    #[test]
+    fn setup_poses_saved_with_negative_w_are_staged_the_short_way() {
+        // projects saved before the fix hold the setup turns with w < 0: read the
+        // long way round, a 3 degree turn was 357 degrees, hundreds of aligners
+        let s = staged_input("lower", &CaseState::default());
+        let mut d = aligners_data(&s).unwrap();
+        for p in d.setup.poses.values_mut() {
+            p.q = -p.q;
+        }
+        let mut saved = s.clone();
+        saved.set_module(MODULE_ID, ModuleState::new(d));
+        let id = "aligners.planning.staging.automatic";
+        let (a, out_a) = exec(id, &s, Value::Null).unwrap();
+        let (b, out_b) = exec(id, &saved, Value::Null).unwrap();
+        assert_eq!(out_b["lower"]["aligners"], out_a["lower"]["aligners"]);
+        let (da, db) = (aligners_data(&a).unwrap(), aligners_data(&b).unwrap());
+        assert_eq!(db.stages.len(), da.stages.len());
+        for (sa, sb) in da.stages.iter().zip(&db.stages) {
+            for (f, p) in &sb.poses {
+                // the same rotation vectors to the bit: the same poses
+                assert_eq!(*p, sa.poses[f], "{f}");
+                // never more than the 3 degrees of the setup, w >= 0 as stored now
+                assert!(dca_algo::rotation::degrees(p) <= 3.0 + 1e-9, "{f}");
+                assert!(p.q.w >= 0.0, "{f}");
+            }
+        }
     }
 
     #[test]

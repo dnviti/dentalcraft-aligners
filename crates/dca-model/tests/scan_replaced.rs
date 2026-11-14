@@ -468,6 +468,37 @@ fn stages_follow_merge_arch_with_an_empty_series() {
 }
 
 #[test]
+fn the_repeats_of_the_other_arch_go_with_the_longer_series() {
+    // as the staging leaves it: the lower series ends at the second aligner
+    // and repeats its last pose while the upper one goes on to the fourth
+    let mut stages = Vec::new();
+    for k in 1..=4u32 {
+        let mut s = Stage::new(k);
+        s.poses.insert(fdi(11), pose(f64::from(k)));
+        s.poses.insert(fdi(31), pose(f64::from(k.min(2))));
+        stages.push(s);
+    }
+    let mut st = AlignersState {
+        stages: stages.clone(),
+        ..AlignersState::default()
+    };
+    assert_eq!(st.scan_replaced(Upper), ["stages"]);
+    // the lower arch keeps its own two aligners, as in the plugin (each arch
+    // has its own series)
+    let indexes: Vec<u32> = st.stages.iter().map(|s| s.index).collect();
+    assert_eq!(indexes, [1, 2]);
+    assert_eq!(st.stages[1].poses[&fdi(31)], pose(2.0));
+    // the longer arch keeps all of its aligners
+    let mut st = AlignersState {
+        stages,
+        ..AlignersState::default()
+    };
+    assert_eq!(st.scan_replaced(Lower), ["stages"]);
+    assert_eq!(st.stages.len(), 4);
+    assert!(st.stages.iter().all(|s| !s.poses.contains_key(&fdi(31))));
+}
+
+#[test]
 fn visits_of_the_other_arch_keep_their_numbers() {
     let mut st = AlignersState {
         visits: vec![

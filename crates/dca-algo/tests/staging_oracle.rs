@@ -9,6 +9,8 @@
 //! `setup/setup.json`, the complexity of the oracle's diagnosis and the
 //! default parameters. Bounds (PLAN section 5): poses within 0.01 mm and
 //! 0.05 degrees; the number of stages, the phases and the IPR timing equal.
+//! The same plan comes out of the target poses as the case stores them
+//! (`Setup::poses`), whatever the sign of their quaternions.
 
 use std::path::PathBuf;
 
@@ -147,6 +149,82 @@ fn pose_error(a: &staging::Q6, b: &staging::Q6) -> (f64, f64) {
     let rb = staging::pose_from_q(b).q;
     let deg = ra.angle_between(rb).to_degrees();
     (t, deg)
+}
+
+/// The largest rotation (degrees) of any tooth from one aligner to the next.
+fn max_turn_per_stage<'a>(series: impl Iterator<Item = &'a [staging::Q6]>) -> f64 {
+    series
+        .flat_map(|qs| qs.windows(2).map(|w| pose_error(&w[0], &w[1]).1))
+        .fold(0.0, f64::max)
+}
+
+/// The plugin reads each target as a matrix (`q_from_delta`); the case
+/// stores it as a pose (`staging::pose_from_q`, what the setup command
+/// stores) and the staging command reads it back (`staging::q_from_pose`).
+/// Projects saved before the fix hold the same rotations with `w < 0`: both
+/// signs give the plugin's aligners, never a tooth spun the long way round.
+#[test]
+fn stored_target_poses_of_either_quaternion_sign_give_the_plugins_aligners() {
+    for case in CASES {
+        let c = load(case);
+        let want = &c.plan;
+        let want_q: Vec<Vec<staging::Q6>> = want["q"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_array().unwrap().iter().map(q6).collect())
+            .collect();
+        let plugin_turn = max_turn_per_stage(want_q.iter().map(Vec::as_slice));
+        for flip in [false, true] {
+            let moves: Vec<ToothMove> = c
+                .moves
+                .iter()
+                .map(|m| {
+                    let mut stored = staging::pose_from_q(&m.q);
+                    assert!(stored.q.w >= 0.0, "{case} {}", m.fdi);
+                    if flip {
+                        stored.q = -stored.q;
+                    }
+                    let q = staging::q_from_pose(&stored);
+                    for (i, (a, b)) in q.iter().zip(&m.q).enumerate() {
+                        assert!((a - b).abs() < 1e-12, "{case} {} {i}", m.fdi);
+                    }
+                    ToothMove::new(m.fdi, m.frame, q, m.pts.clone(), m.md_sign)
+                })
+                .collect();
+            let plan = staging::run(
+                &staging::Input {
+                    moves: &moves,
+                    ipr: &c.ipr,
+                    complexity: c.complexity,
+                },
+                &Params::default(),
+            )
+            .unwrap();
+            let n = want["n_stages"].as_u64().unwrap() as u32;
+            assert_eq!(plan.n_stages, n, "{case} flip {flip}: number of aligners");
+            for (f, w) in want["q"].as_object().unwrap() {
+                let got = &plan.q[&fdi(f.parse().unwrap())];
+                for (k, (g, w)) in got.iter().zip(w.as_array().unwrap()).enumerate() {
+                    let (mm, deg) = pose_error(g, &q6(w));
+                    assert!(
+                        mm < TOL_MM && deg < TOL_DEG,
+                        "{case} {f} stage {k}: {mm} mm {deg} deg"
+                    );
+                }
+            }
+            let turn = max_turn_per_stage(plan.q.values().map(Vec::as_slice));
+            assert!(
+                (turn - plugin_turn).abs() < TOL_DEG,
+                "{case}: {turn} vs {plugin_turn}"
+            );
+            if flip {
+                eprintln!(
+                    "{case}: {n} aligners (plugin {n}), largest turn of a tooth per aligner {turn:.3} deg (plugin {plugin_turn:.3} deg)"
+                );
+            }
+        }
+    }
 }
 
 #[test]

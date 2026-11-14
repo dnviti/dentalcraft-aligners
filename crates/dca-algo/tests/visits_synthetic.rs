@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use dc_case::{Fdi, Pose};
 use dca_algo::anatomy::Arch;
 use dca_algo::demo::{Draws, SeededDraws};
-use dca_algo::frame;
 use dca_algo::gingiva;
 use dca_algo::visits::{self, MeshRef, ToothInput};
+use dca_algo::{frame, rotation};
 use dca_model::{Decision, Stage};
 use glam::{DMat3, DMat4, DQuat, DVec3};
 use golden_case::Case;
@@ -60,8 +60,8 @@ fn crown(case: &Case, f: Fdi, rest_inv: &DMat4) -> (Vec<DVec3>, Vec<DVec3>) {
 fn pose_error(got: &DMat4, truth: &DMat4, c: DVec3) -> (f64, f64) {
     let e = *got * frame::rigid_inverse(truth);
     let mm = e.transform_point3(c).distance(c);
-    let q = DQuat::from_mat3(&DMat3::from_mat4(e)).normalize();
-    (mm, q.to_scaled_axis().length().to_degrees())
+    let rv = rotation::matrix_to_rotvec(&DMat3::from_mat4(e));
+    (mm, rv.length().to_degrees())
 }
 
 /// Runs a simulated visit and checks the decisions; returns the worst error
