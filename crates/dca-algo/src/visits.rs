@@ -49,7 +49,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::anatomy::{self, Arch};
-use crate::{autoseed, evidence, frame};
+use crate::{autoseed, evidence, frame, rotation};
 
 /// Fewest pairs an ICP iteration needs (the add-on's `12`).
 const MIN_PAIRS: usize = 12;
@@ -468,7 +468,7 @@ pub fn tooth_deviation(
     let r_e = rot(expected);
     let lin = r_e.transpose() * (t_f.transform_point3(centre) - centre);
     let rv =
-        (r_e.transpose() * frame::matrix_to_rotvec(&rot(t_f))) * (180.0 / std::f64::consts::PI);
+        (r_e.transpose() * rotation::matrix_to_rotvec(&rot(t_f))) * (180.0 / std::f64::consts::PI);
     let md = f64::from(md_sign);
     ToothDeviation {
         mesial_mm: lin.x * md,
@@ -644,7 +644,7 @@ fn tooth_tracking(tt: &ToothInput, p: &Pass, params: &Params) -> ToothTracking {
     let deviation = tooth_deviation(&tt.expected, &p.t, centre, tt.md_sign);
     let (linear_mm, angular_deg) = (deviation.linear_mm(), deviation.angular_deg());
     // the achieved position relative to the rest pose, the convention of `Stage::poses`
-    let achieved = Pose::from_mat4(&(frame::rigid_inverse(&tt.rest) * p.t * tt.expected));
+    let achieved = rotation::pose_from_mat4(&(frame::rigid_inverse(&tt.rest) * p.t * tt.expected));
     ToothTracking {
         on_track: linear_mm <= params.linear_mm && angular_deg <= params.angular_deg,
         linear_mm,

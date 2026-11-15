@@ -84,6 +84,30 @@ pub fn tooth_type(fdi: Fdi, width_md: f64, width_bl: f64) -> ToothType {
     }
 }
 
+/// The crown measures of the tooth outside their anatomical range: `md`
+/// (mesio-distal diameter), `bl` (bucco-lingual diameter), `height`
+/// (clinical height), in that order (the checks of
+/// `segmentation_plausible`).
+pub fn segmentation_problems(
+    fdi: Fdi,
+    width_md: f64,
+    width_bl: f64,
+    height: f64,
+) -> Vec<&'static str> {
+    let (md, bl) = anatomy::typical_diameters(fdi);
+    let mut out = Vec::new();
+    if !(0.7 * md..=1.35 * md).contains(&width_md) {
+        out.push("md");
+    }
+    if !(0.6 * bl..=1.45 * bl).contains(&width_bl) {
+        out.push("bl");
+    }
+    if !(2.5..=13.0).contains(&height) {
+        out.push("height");
+    }
+    out
+}
+
 /// Whether the crown dimensions are anatomically plausible for the tooth
 /// (`segmentation_plausible`): the reasons when they are not.
 pub fn segmentation_plausible(
@@ -93,24 +117,22 @@ pub fn segmentation_plausible(
     height: f64,
 ) -> (bool, Vec<String>) {
     let (md, bl) = anatomy::typical_diameters(fdi);
-    let mut reasons = Vec::new();
-    if !(0.7 * md..=1.35 * md).contains(&width_md) {
-        reasons.push(format!(
-            "diametro MD {width_md:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
-            0.7 * md,
-            1.35 * md
-        ));
-    }
-    if !(0.6 * bl..=1.45 * bl).contains(&width_bl) {
-        reasons.push(format!(
-            "diametro VL {width_bl:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
-            0.6 * bl,
-            1.45 * bl
-        ));
-    }
-    if !(2.5..=13.0).contains(&height) {
-        reasons.push(format!("altezza clinica {height:.1} mm non plausibile"));
-    }
+    let reasons: Vec<String> = segmentation_problems(fdi, width_md, width_bl, height)
+        .into_iter()
+        .map(|p| match p {
+            "md" => format!(
+                "diametro MD {width_md:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
+                0.7 * md,
+                1.35 * md
+            ),
+            "bl" => format!(
+                "diametro VL {width_bl:.1} mm fuori dall'intervallo atteso ({:.1}-{:.1})",
+                0.6 * bl,
+                1.45 * bl
+            ),
+            _ => format!("altezza clinica {height:.1} mm non plausibile"),
+        })
+        .collect();
     (reasons.is_empty(), reasons)
 }
 
@@ -135,15 +157,21 @@ pub struct MovementDesc {
 pub struct MovementFlag {
     /// 1 = caution, 2 = high risk.
     pub severity: u8,
+    /// Which note it is (stable, for the interface to word it):
+    /// `round-rotation`, `canine-rotation`, `extrusion`,
+    /// `lower-incisor-intrusion`, `torque`, `expansion-tipping`,
+    /// `distalisation`, `distalisation-limit`.
+    pub id: &'static str,
     /// The note (plugin text).
     pub text: String,
     /// Keys of the references behind it ([`evidence::reference`]).
     pub refs: Vec<&'static str>,
 }
 
-fn flag(severity: u8, text: &str, refs: &[&'static str]) -> MovementFlag {
+fn flag(severity: u8, id: &'static str, text: &str, refs: &[&'static str]) -> MovementFlag {
     MovementFlag {
         severity,
+        id,
         text: text.to_owned(),
         refs: refs.to_vec(),
     }
@@ -159,6 +187,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if anatomy::is_round_crown(fdi) && rot > 15.0 {
         out.push(flag(
             if rot > 30.0 { 2 } else { 1 },
+            "round-rotation",
             "rotazione >15 gradi di corona tonda: accuratezza ~24%; valutare attachment e \
              ipercorrezione",
             &["simon2014", "palone2023"],
@@ -167,6 +196,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if anatomy::index(fdi) == 3 && rot > 5.0 {
         out.push(flag(
             1,
+            "canine-rotation",
             "rotazione del canino poco prevedibile",
             &["kravitz2008", "koletsi2021"],
         ));
@@ -174,6 +204,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if ext > 0.5 {
         out.push(flag(
             if ext > 1.5 { 2 } else { 1 },
+            "extrusion",
             "estrusione: movimento meno prevedibile; attachment rettangolare orizzontale",
             &["kravitz2009", "elshazly2024"],
         ));
@@ -181,6 +212,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if ext < -0.5 && anatomy::arch_of(fdi) == Arch::Lower && anatomy::is_incisor(fdi) {
         out.push(flag(
             1,
+            "lower-incisor-intrusion",
             "intrusione incisivi inferiori: accuratezza 35%",
             &["haouili2020"],
         ));
@@ -188,6 +220,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if tor > 3.0 {
         out.push(flag(
             1,
+            "torque",
             "torque >3 gradi: power ridge/attachment",
             &["wang2025consensus"],
         ));
@@ -195,6 +228,7 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if !anatomy::is_anterior(fdi) && bl > 0.5 {
         out.push(flag(
             1,
+            "expansion-tipping",
             "espansione ottenuta soprattutto per tipping; attachment consigliati",
             &["houle2017", "zhou2020", "wang2025consensus"],
         ));
@@ -202,12 +236,14 @@ pub fn movement_flags(fdi: Fdi, d: &MovementDesc) -> Vec<MovementFlag> {
     if anatomy::is_molar(fdi) && md < -0.5 {
         out.push(flag(
             1,
+            "distalisation",
             "distalizzazione: schema sequenziale e attachment",
             &["ravera2016"],
         ));
         if md < -distal_predictable() {
             out.push(flag(
                 2,
+                "distalisation-limit",
                 "oltre il limite prevedibile di 2 mm",
                 &["wang2025consensus"],
             ));
@@ -251,6 +287,27 @@ pub enum Attachment {
 }
 
 impl Attachment {
+    /// Every attachment, in the order of the plugin's `ATTACH`.
+    pub const ALL: [Attachment; 5] = [
+        Attachment::Nessuno,
+        Attachment::Rotazione,
+        Attachment::Estrusione,
+        Attachment::ControlloRadicolare,
+        Attachment::CorporeoAncoraggio,
+    ];
+
+    /// The id the clinical review stores (`none`, `rotation`, `extrusion`,
+    /// `root_control`, `bodily_anchorage`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Attachment::Nessuno => "none",
+            Attachment::Rotazione => "rotation",
+            Attachment::Estrusione => "extrusion",
+            Attachment::ControlloRadicolare => "root_control",
+            Attachment::CorporeoAncoraggio => "bodily_anchorage",
+        }
+    }
+
     /// The plugin's description (`ATTACH`).
     pub fn description(self) -> &'static str {
         match self {
@@ -348,23 +405,36 @@ fn distal_predictable() -> f64 {
     evidence::param_f64("distal_predictable").unwrap_or(2.0)
 }
 
+/// Why the case cannot be treated with aligners only: `extraction` (the
+/// crowding is beyond the extraction threshold), `distalization` (beyond
+/// the predictable distalization), in that order (the checks of
+/// `aligner_suitable_math`).
+pub fn suitability_problems(discrepancy: f64, distal: f64) -> Vec<&'static str> {
+    let extraction = evidence::param_f64("extraction_threshold").unwrap_or(8.0);
+    let mut out = Vec::new();
+    if -discrepancy > extraction {
+        out.push("extraction");
+    }
+    if distal > distal_predictable() {
+        out.push("distalization");
+    }
+    out
+}
+
 /// Whether the case can be treated with aligners only, and why not
 /// (`aligner_suitable_math`). `discrepancy` is available minus required
 /// space (negative = crowding), `distal` the molar distalization (mm).
 pub fn aligner_suitable(discrepancy: f64, distal: f64) -> (bool, Vec<String>) {
-    let extraction = evidence::param_f64("extraction_threshold").unwrap_or(8.0);
     let cite = evidence::cite(&["wang2025consensus"]);
-    let mut reasons = Vec::new();
-    if -discrepancy > extraction {
-        reasons.push(format!(
-            "discrepanza {discrepancy:.1} mm oltre la soglia di estrazione ({cite})"
-        ));
-    }
-    if distal > distal_predictable() {
-        reasons.push(format!(
-            "distalizzazione {distal:.1} mm oltre il limite prevedibile ({cite})"
-        ));
-    }
+    let reasons: Vec<String> = suitability_problems(discrepancy, distal)
+        .into_iter()
+        .map(|p| match p {
+            "extraction" => {
+                format!("discrepanza {discrepancy:.1} mm oltre la soglia di estrazione ({cite})")
+            }
+            _ => format!("distalizzazione {distal:.1} mm oltre il limite prevedibile ({cite})"),
+        })
+        .collect();
     (reasons.is_empty(), reasons)
 }
 

@@ -20,9 +20,9 @@ use std::path::PathBuf;
 
 use dc_case::Fdi;
 use dca_algo::anatomy::Arch;
-use dca_algo::frame;
 use dca_algo::visits::{self, MeshRef, ToothInput};
-use glam::{DMat3, DMat4, DQuat, DVec3};
+use dca_algo::{frame, rotation};
+use glam::{DMat3, DMat4, DVec3};
 use golden_case::Case;
 use serde_json::Value;
 
@@ -50,10 +50,11 @@ fn fdi(n: u64) -> Fdi {
 /// Displacement (mm) of `c` and rotation (degrees) between two transforms.
 fn difference(a: &DMat4, b: &DMat4, c: DVec3) -> (f64, f64) {
     let e = *a * frame::rigid_inverse(b);
-    let q = DQuat::from_mat3(&DMat3::from_mat4(e)).normalize();
     (
         e.transform_point3(c).distance(c),
-        q.to_scaled_axis().length().to_degrees(),
+        rotation::matrix_to_rotvec(&DMat3::from_mat4(e))
+            .length()
+            .to_degrees(),
     )
 }
 

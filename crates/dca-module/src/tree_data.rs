@@ -94,6 +94,13 @@ pub(crate) static GROUPS: &[Node] = &[
                 "stack",
             )
             .key("S"),
+            // the plugin's page "Revisione clinica", after "Allineatori"
+            Node::leaf(
+                "aligners.review.classify",
+                "aligners-menu-review-classify",
+                "aligners-desc-review-classify",
+                "list-checks",
+            ),
         ],
     ),
     Node::group(
@@ -191,5 +198,17 @@ pub(crate) static TOOLS: &[Node] = &[
         "aligners-menu-planning-movements",
         "aligners-desc-planning-movements",
         "arrows-out-cardinal",
+    ),
+    Node::leaf(
+        "aligners.planning.setup.line",
+        "aligners-menu-planning-setup-line",
+        "aligners-desc-planning-setup-line",
+        "bezier-curve",
+    ),
+    Node::leaf(
+        "aligners.occlusion.bite-registration.three-points",
+        "aligners-menu-occlusion-bite-registration-three-points",
+        "aligners-desc-occlusion-bite-registration-three-points",
+        "hand-pointing",
     ),
 ];

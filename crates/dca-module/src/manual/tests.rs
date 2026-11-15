@@ -1046,6 +1046,144 @@ fn rebuilding_a_tooth_checks_the_region_and_replaces_only_its_solid() {
     assert!(invalid(exec(REBUILD, &s, json!({ "fdi": 16 }))).contains("no upper scan"));
 }
 
+// ---- the region of a tooth and its margin line ------------------------------------------------------------
+
+const REGION: &str = "aligners.manual.tooth-region";
+
+/// The demo with a crown-sized patch of its gum painted as tooth 38: the demo teeth are shells of their own (no
+/// boundary with the gum), a patch of the gum shell has one.
+fn with_patch(state: &CaseState, radius: f64) -> (CaseState, Vec<u32>) {
+    let truth = labels(state);
+    let v = vertices(state);
+    let g = gum_vertex(state);
+    let patch: Vec<u32> = (0..v.len() as u32)
+        .filter(|&i| truth[i as usize] == 0 && v[i as usize].distance(v[g]) < radius)
+        .collect();
+    assert!(patch.len() > 30, "{}", patch.len());
+    let (s, _) = ok(BRUSH, state, json!({ "label": 38, "vertices": patch }));
+    (s, patch)
+}
+
+#[test]
+fn the_region_of_a_tooth_is_reported_and_the_case_is_not_touched() {
+    let state = demo();
+    let truth = labels(&state);
+    let tris = state
+        .mesh(&state.case.scan(ScanRole::Lower).unwrap().mesh)
+        .unwrap()
+        .tris
+        .clone();
+    for f in [47u8, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37] {
+        let (after, out) = ok(REGION, &state, json!({ "fdi": f, "detail": true }));
+        let tooth = region(&truth, f);
+        assert_eq!(out["fdi"], f);
+        assert_eq!(out["arch"], "lower");
+        assert_eq!(out["vertices"].as_u64().unwrap() as usize, tooth.len());
+        assert_eq!(out["vertex_indices"], json!(tooth), "tooth {f}");
+        // the faces listed have all their vertices in the region
+        let faces = out["face_indices"].as_array().unwrap();
+        assert_eq!(out["faces"].as_u64().unwrap() as usize, faces.len());
+        assert!(!faces.is_empty(), "tooth {f}");
+        for k in faces {
+            let t = tris[k.as_u64().unwrap() as usize];
+            assert!(t.iter().all(|&i| truth[i as usize] == u16::from(f)));
+        }
+        // a tooth that is a shell of its own has no boundary with the gum: no line
+        let margin = &out["margin"];
+        assert_eq!(margin["segments"], 0, "tooth {f}: {margin}");
+        assert_eq!(margin["loops"], json!([]));
+        assert_eq!(margin["closed"], false);
+        assert!(out["message"].as_str().unwrap().starts_with("Tooth "));
+        // a query: the case is as it was
+        assert_eq!(al(&after).labels, al(&state).labels);
+        assert_eq!(al(&after).crowns, al(&state).crowns);
+        assert_eq!(al(&after).seeds, al(&state).seeds);
+    }
+    // without detail: counts only
+    let (_, out) = ok(REGION, &state, json!({ "fdi": 36 }));
+    assert!(out.get("vertex_indices").is_none() && out["margin"].get("polylines").is_none());
+    assert!(out["region"]["errors"].as_array().is_some(), "{out}");
+}
+
+#[test]
+fn the_margin_is_a_closed_loop_on_the_boundary_of_the_colour() {
+    let (state, patch) = with_patch(&demo(), 5.0);
+    let truth = labels(&state);
+    let v = vertices(&state);
+    let tris = state
+        .mesh(&state.case.scan(ScanRole::Lower).unwrap().mesh)
+        .unwrap()
+        .tris
+        .clone();
+    // one mesh step: how far a point of the line may be from both sides
+    let step = tris
+        .iter()
+        .flat_map(|t| (0..3).map(move |k| (t[k], t[(k + 1) % 3])))
+        .map(|(a, b)| v[a as usize].distance(v[b as usize]))
+        .fold(0.0, f64::max);
+    let (_, out) = ok(REGION, &state, json!({ "fdi": 38, "detail": true }));
+    assert_eq!(out["vertices"].as_u64().unwrap() as usize, patch.len());
+    let margin = &out["margin"];
+    assert_eq!(margin["closed"], true, "{margin}");
+    assert!(margin["length_mm"].as_f64().unwrap() > 8.0, "{margin}");
+    let lines = margin["polylines"].as_array().unwrap();
+    assert_eq!(lines.len(), margin["loops"].as_array().unwrap().len());
+    let mut points = 0;
+    for l in lines {
+        assert_eq!(l["closed"], true);
+        for p in l["points"].as_array().unwrap() {
+            let p = DVec3::new(
+                p[0].as_f64().unwrap(),
+                p[1].as_f64().unwrap(),
+                p[2].as_f64().unwrap(),
+            );
+            let near = |own: bool| {
+                (0..v.len())
+                    .filter(|&i| (truth[i] == 38) == own)
+                    .map(|i| v[i].distance(p))
+                    .fold(f64::MAX, f64::min)
+            };
+            assert!(near(true) <= step && near(false) <= step, "{p:?}");
+            points += 1;
+        }
+    }
+    assert_eq!(points, margin["points"].as_u64().unwrap());
+}
+
+#[test]
+fn the_margin_follows_the_colours_and_nothing_is_stored() {
+    let (small, _) = with_patch(&demo(), 4.0);
+    let (big, _) = with_patch(&demo(), 6.0);
+    let (_, a) = ok(REGION, &small, json!({ "fdi": 38 }));
+    let (_, b) = ok(REGION, &big, json!({ "fdi": 38 }));
+    let (la, lb) = (
+        a["margin"]["length_mm"].as_f64().unwrap(),
+        b["margin"]["length_mm"].as_f64().unwrap(),
+    );
+    assert!(la > 0.0 && lb > la, "{la} {lb}");
+    // no region: no line, and the check says why
+    let (_, none) = ok(REGION, &demo(), json!({ "fdi": 38 }));
+    assert_eq!(none["vertices"], 0);
+    assert_eq!(none["margin"]["segments"], 0);
+    assert_eq!(none["margin"]["closed"], false);
+    assert!(none["message"].as_str().unwrap().contains("no region"));
+}
+
+#[test]
+fn the_region_query_refuses_an_unseparated_arch_and_a_missing_scan() {
+    let mut state = demo();
+    let mut data = al(&state).clone();
+    data.labels.clear();
+    state.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+    let msg = invalid(exec(REGION, &state, json!({ "fdi": 36 })));
+    assert!(
+        msg.to_lowercase().contains("tooth colours") || msg.contains("lower"),
+        "{msg}"
+    );
+    assert!(invalid(exec(REGION, &demo(), json!({ "fdi": 16 }))).contains("no upper scan"));
+    assert!(invalid(exec(REGION, &demo(), json!({ "fdi": 99 }))).contains("99"));
+}
+
 // ---- adjust a tooth by hand -----------------------------------------------------------------------------
 
 fn framed() -> CaseState {
@@ -1133,6 +1271,78 @@ fn adjusting_a_tooth_updates_its_pose_in_the_clinical_frame() {
             ADJUST,
             &state,
             json!({ "fdi": 33, "lock": true, "stage": 0, "mesial_mm": 1.0 })
+        ))
+        .contains("lock")
+    );
+}
+
+#[test]
+fn exact_values_set_the_whole_movement_and_a_tooth_is_unlocked() {
+    let state = framed();
+    let moved = undoable(
+        &state,
+        ADJUST,
+        json!({ "fdi": 33, "mesial_mm": 0.3, "torque_deg": 4.0 }),
+    );
+    // "Write the exact values": every component reads back as given, from wherever the tooth was
+    let want = [
+        ("mesial_mm", -0.6),
+        ("buccal_mm", 0.25),
+        ("extrusion_mm", -0.1),
+        ("torque_deg", 3.0),
+        ("tip_deg", -2.0),
+        ("rotation_deg", 12.0),
+    ];
+    let mut p = json!({ "fdi": 33, "exact": true });
+    for (k, v) in want {
+        p[k] = json!(v);
+    }
+    let exact = undoable(&moved, ADJUST, p.clone());
+    let (_, out) = ok(ADJUST, &moved, p);
+    for (k, v) in want {
+        assert!((clinical(&out, "after", k) - v).abs() < 1e-9, "{k} {out}");
+    }
+    // from rest too, and the stored pose is the same
+    let mut p0 = json!({ "fdi": 33, "exact": true });
+    for (k, v) in want {
+        p0[k] = json!(v);
+    }
+    let (from_rest, _) = ok(ADJUST, &state, p0);
+    let (a, b) = (
+        al(&exact).setup.poses[&fdi(33)],
+        al(&from_rest).setup.poses[&fdi(33)],
+    );
+    assert!(a.approx_eq(&b, 1e-12, 1e-12));
+    // all zero: back at rest
+    let (rest, _) = ok(ADJUST, &moved, json!({ "fdi": 33, "exact": true }));
+    assert!(!al(&rest).setup.poses.contains_key(&fdi(33)));
+    // exact gives the whole movement: not with a delta or a reset
+    for bad in [
+        json!({ "fdi": 33, "exact": true, "reset": true }),
+        json!({ "fdi": 33, "exact": true, "delta": { "t": [0.0, 0.0, 1.0] } }),
+        json!({ "fdi": 33, "exact": true, "rotation_deg": 200.0 }),
+    ] {
+        assert!(
+            matches!(
+                exec(ADJUST, &moved, bad.clone()),
+                Err(CommandError::Invalid(_))
+            ),
+            "{bad}"
+        );
+    }
+    // lock alone, then unlock alone: the pose stays
+    let locked = undoable(&moved, ADJUST, json!({ "fdi": 33, "lock": true }));
+    assert!(al(&locked).setup.locked.contains(&fdi(33)));
+    assert_eq!(al(&locked).setup.poses, al(&moved).setup.poses);
+    let (unlocked, out) = ok(ADJUST, &locked, json!({ "fdi": 33, "lock": false }));
+    assert!(!al(&unlocked).setup.locked.contains(&fdi(33)));
+    assert_eq!(al(&unlocked).setup.poses, al(&moved).setup.poses);
+    assert_eq!(out["locked"], false);
+    assert!(
+        invalid(exec(
+            ADJUST,
+            &locked,
+            json!({ "fdi": 33, "lock": false, "stage": 1 })
         ))
         .contains("lock")
     );

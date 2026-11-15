@@ -71,12 +71,16 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.frame",
     "aligners.demo",
     "aligners.case.detect-arch",
+    // the scan corrections of the Import scans inspector
+    "aligners.case.set-arch",
+    "aligners.case.make-base",
     "aligners.preparation.orientation.automatic",
     "aligners.preparation.numbering.automatic",
     "aligners.teeth.frames",
     "aligners.preparation.reconstruction.automatic",
     "aligners.preparation.reconstruction.rebuild-tooth",
     "aligners.manual.rebuild-tooth",
+    "aligners.manual.tooth-region",
     "aligners.preparation.numbering.sequence",
     "aligners.preparation.numbering.clear-seeds",
     "aligners.preparation.gingiva",
@@ -84,11 +88,14 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.diagnosis.little-index",
     "aligners.diagnosis.bolton",
     "aligners.diagnosis.complexity",
+    // the manual corrections of the Case analysis inspector
+    "aligners.diagnosis.edit-values",
     "aligners.planning.staging.automatic",
     "aligners.planning.schedule",
     "aligners.occlusion.virtual-bite",
     "aligners.occlusion.bite-registration.icp",
-    "aligners.occlusion.bite-registration.three-points",
+    // the correction button of the Bite inspector (Three points is a tool)
+    "aligners.occlusion.bite-correct",
     "aligners.occlusion.contact-map",
     "aligners.occlusion.bite-with-aligners",
     "aligners.occlusion.bite-ramps",
@@ -104,6 +111,24 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.settings.study-models",
     "aligners.settings.find-teeth",
     "aligners.settings.segmentation",
+    // the parameters and the reset of the Final position inspector
+    "aligners.settings.setup",
+    "aligners.planning.setup.reset",
+    // the parameters and "Slow a tooth" of the Aligners inspector
+    "aligners.settings.staging",
+    "aligners.planning.tooth-speed",
+    // the decisions of the Clinical review inspector
+    "aligners.review.decide",
+    "aligners.review.set-value",
+    "aligners.review.bulk",
+    // the parameters and the aligner end of the Export for printing inspector
+    "aligners.settings.production",
+    "aligners.production.aligner-end",
+    // the gizmo of the viewport on a selected 3D component
+    "aligners.components.transform",
+    // the aligner in the view: the toolbar layer and the Aligners inspector
+    "aligners.view.aligner",
+    "aligners.view.aligner-exact",
 ];
 
 #[test]

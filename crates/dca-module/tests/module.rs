@@ -181,6 +181,12 @@ const TREE: &[(&str, &str, &str, &str)] = &[
         "Allineatori",
     ),
     (
+        "aligners.planning",
+        "aligners.review.classify",
+        "Clinical review",
+        "Revisione clinica",
+    ),
+    (
         "aligners.production",
         "aligners.output.export-all",
         "Export for printing",
@@ -236,6 +242,8 @@ fn the_manual_tools_are_registered_commands_out_of_the_menu() {
             "aligners.preparation.segmentation.manual-brush",
             "aligners.preparation.segmentation.clean-borders",
             "aligners.planning.movements",
+            "aligners.planning.setup.line",
+            "aligners.occlusion.bite-registration.three-points",
         ]
     );
     for tool in tree::tools() {
@@ -287,10 +295,10 @@ fn the_shell_is_told_what_to_ask_before_a_leaf_runs() {
     }
 }
 
-/// What the menu shows as the progress of the case: the eight steps of the
+/// What the menu shows as the progress of the case: the nine steps of the
 /// workflow, in menu order. Everything else is a shortcut, an export or a
 /// follow-up (the corrections are tools of the inspectors, not entries).
-const STEPS: [&str; 8] = [
+const STEPS: [&str; 9] = [
     "aligners.case.import-scans",
     "aligners.teeth.find",
     "aligners.preparation.segmentation.automatic",
@@ -299,10 +307,11 @@ const STEPS: [&str; 8] = [
     "aligners.occlusion.align",
     "aligners.planning.setup.automatic",
     "aligners.planning.aligners",
+    "aligners.review.classify",
 ];
 
 #[test]
-fn eight_steps_count_and_nothing_else() {
+fn nine_steps_count_and_nothing_else() {
     let menu = AlignersModule::new().menu();
     assert_eq!(menu.step_ids(), STEPS);
     for not_a_step in [

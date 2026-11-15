@@ -4,8 +4,13 @@
 //! stored by the staging: delivery and last day of each aligner, the days of
 //! wear (fixed, or 7/14 days by the movements of the aligner), what to do
 //! before it (attachments, IPR) and the passive aligners that keep the two
-//! arches in step. The calendar is returned; the case is not modified. The
-//! `.ics` file is written by the export.
+//! arches in step. The start date, the days and the policy not given are
+//! those of the case settings (`Settings::start_date`, `interval_days`,
+//! `interval_policy`; no start date: today). The attachments bonded before
+//! the first aligner are those of the clinical review of the arch (the
+//! plugin's `schedule.build`) unless the parameters give them. The calendar
+//! is returned; the case is not modified. The `.ics` file is written by the
+//! export.
 
 use dc_case::CaseState;
 use dc_command::{CommandError, JobCtx};
@@ -37,16 +42,18 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
 pub(crate) struct Params {
     /// Arches (all that have aligners).
     arch: Which,
-    /// Delivery date of the first aligner, `YYYY-MM-DD` (default today).
+    /// Delivery date of the first aligner, `YYYY-MM-DD` (default: the case
+    /// settings, else today).
     start_date: Option<String>,
     /// Days of wear of each aligner (default: the case settings).
     interval_days: Option<u32>,
-    /// Interval policy.
-    policy: Policy,
+    /// Interval policy (default: the case settings).
+    policy: Option<Policy>,
     /// Language of the text of the to-do items.
     lang: Lang,
-    /// Teeth that get an attachment, bonded before aligner 1.
-    attachments: Vec<String>,
+    /// Teeth that get an attachment, bonded before aligner 1 (default: the
+    /// teeth with an attachment in the clinical review of the arch).
+    attachments: Option<Vec<String>>,
 }
 
 /// The arches that have aligners in the case, lower first.
@@ -77,17 +84,24 @@ fn run_schedule(
     let start = params
         .start_date
         .clone()
+        .or_else(|| data.settings.start_date.clone())
         .unwrap_or_else(|| schedule::Date::today().to_iso());
     let cal_params = schedule::Params {
         start_date: Some(start),
         interval_days: params.interval_days.unwrap_or(data.settings.interval_days),
-        policy: params.policy,
+        policy: params
+            .policy
+            .unwrap_or_else(|| data.settings.interval_policy.into()),
         wear_hours: data.settings.wear_hours,
         lang: params.lang,
     };
     let mut out = serde_json::Map::new();
     for arch in arches {
-        let mut input = schedule::input_from_stages(arch, &data.stages, params.attachments.clone());
+        let attachments = params
+            .attachments
+            .clone()
+            .unwrap_or_else(|| data.attachment_teeth(arch.role()));
+        let mut input = schedule::input_from_stages(arch, &data.stages, attachments);
         input.n_total = Some(total);
         let cal =
             schedule::run(&input, &cal_params).map_err(|e| CommandError::Invalid(e.to_string()))?;

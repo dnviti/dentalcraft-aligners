@@ -5,7 +5,8 @@
 //!   STL (`upper_stage_00.stl` is the initial situation), `stages.csv` with
 //!   the movement of every tooth at every stage and the dates, and
 //!   `visits.ics` with the aligner changes of both arches. Parameters:
-//!   `dir`, `start_date`, `interval_days`, `policy`, `lang`.
+//!   `dir`, `start_date`, `interval_days`, `policy`, `lang`; the calendar
+//!   values not given are those of the case settings.
 //! * `aligners.output.report` is the full export package: the models and
 //!   the aligners of every stage, the print check of every mesh, the tables
 //!   and calendars, the programme of the patient for each arch, the HTML
@@ -53,7 +54,7 @@ use dca_algo::export::report::Renders;
 use dca_algo::export::{self, ArchSeries, GumDeform};
 use dca_algo::schedule;
 use dca_algo::teeth;
-use dca_model::AlignersState;
+use dca_model::{AlignersState, Settings};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -114,6 +115,7 @@ fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, Com
         if schedule::active_stages(arch, &data.stages) == 0 {
             continue;
         }
+        // the scan of the case: a scan closed with a base is printed with it
         if let Some(scan) = labelled_scan(state, data, arch.role())? {
             let fdis: Vec<Fdi> = data
                 .tooth_frames
@@ -130,11 +132,12 @@ fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, Com
                 .iter()
                 .map(|&f| (f, md_sign(data, &seq, &rest, f)))
                 .collect();
+            // the gingiva was built on the scan as it was read
             let gum = match data.gingiva.get(&arch.role()) {
                 Some(r) => Some(
                     GumDeform::new(
                         state.blobs.require(r)?,
-                        scan.mesh.vertex_count(),
+                        scan.scanned,
                         &dca_algo::gingiva::Params::default(),
                     )
                     .map_err(|e| CommandError::Invalid(format!("the stored gingiva: {e}")))?,
@@ -182,6 +185,9 @@ struct MeshChoice {
     stamp: bool,
     stamp_code: String,
     date: schedule::Date,
+    /// The first day of every aligner when the stamp carries it (empty: the
+    /// stamp carries `date`).
+    stamp_dates: BTreeMap<(Arch, u32), schedule::Date>,
     /// Stops the building of the meshes between their steps.
     cancel: dc_command::CancelToken,
 }
@@ -224,7 +230,9 @@ fn mesh_provider<'a>(
         stamp: choice.stamp,
         stamp_code: choice.stamp_code.clone(),
         date: choice.date,
+        stamp_dates: choice.stamp_dates.clone(),
         cancel: choice.cancel.clone(),
+        checked: true,
     };
     match shells::ShellProvider::new(state, data, input, options)? {
         Ok(p) => {
@@ -264,6 +272,21 @@ fn export_error(e: export::ExportError) -> CommandError {
     }
 }
 
+/// The start date, days and policy of the calendar not given: those of the
+/// case settings (no start date in the case either: today, in the export).
+fn calendar_defaults(
+    start_date: &mut Option<String>,
+    interval_days: &mut Option<u32>,
+    policy: &mut Option<schedule::Policy>,
+    settings: &Settings,
+) {
+    if start_date.is_none() {
+        start_date.clone_from(&settings.start_date);
+    }
+    interval_days.get_or_insert(settings.interval_days);
+    policy.get_or_insert(settings.interval_policy.into());
+}
+
 fn run_export(
     state: &CaseState,
     mut params: export::Params,
@@ -279,15 +302,28 @@ fn run_export(
             "dir: the target directory is required".to_owned(),
         ));
     }
-    params
-        .interval_days
-        .get_or_insert(data.settings.interval_days);
+    calendar_defaults(
+        &mut params.start_date,
+        &mut params.interval_days,
+        &mut params.policy,
+        &data.settings,
+    );
     let arches = prepare(state, &data)?;
     let input = input(&arches, &data);
     ctx.check_cancelled()?;
-    let report = export::run(&input, &params).map_err(export_error)?;
+    let report = export::run(&input, &params, &attachments(&data)).map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
     Ok((state.clone(), with_doubts(out, &data)))
+}
+
+/// The teeth with an attachment in the clinical review of each arch, bonded
+/// before its first aligner (the arches without any are left out).
+fn attachments(data: &AlignersState) -> BTreeMap<Arch, Vec<String>> {
+    [Arch::Lower, Arch::Upper]
+        .into_iter()
+        .map(|a| (a, data.attachment_teeth(a.role())))
+        .filter(|(_, teeth)| !teeth.is_empty())
+        .collect()
 }
 
 /// `out` (an object) with the doubts the check of the separated teeth left
@@ -371,10 +407,14 @@ fn run_report(
         ));
     }
     let arches = prepare(state, &data)?;
-    params
-        .interval_days
-        .get_or_insert(data.settings.interval_days);
+    calendar_defaults(
+        &mut params.start_date,
+        &mut params.interval_days,
+        &mut params.policy,
+        &data.settings,
+    );
     let input = input(&arches, &data);
+    let choice = report_choice(&data, &input, &mut params, ctx.cancel_token().clone())?;
     let renders = if params.report && params.embed_renders {
         render_views(state, &data)
     } else {
@@ -384,20 +424,10 @@ fn run_report(
     let case = CaseInfo {
         patient_code: &state.case.patient_code,
         state: &data,
-        // the attachments are not planned yet (WP: attachments)
-        attachments: BTreeMap::new(),
+        attachments: attachments(&data),
         renders,
         meshes: "",
         notes: Vec::new(),
-    };
-    let choice = MeshChoice {
-        shells: params.shells,
-        quality: params.quality,
-        voxel_mm: params.voxel_mm,
-        stamp: params.stamp,
-        stamp_code: params.stamp_code.clone(),
-        date: export_date(params.generated.as_deref())?,
-        cancel: ctx.cancel_token().clone(),
     };
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
     let case = CaseInfo {
@@ -413,6 +443,176 @@ fn run_report(
         .map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
     Ok((state.clone(), with_doubts(out, &data)))
+}
+
+/// How `aligners.output.report` chooses its print files from `params`: the
+/// quality, the stamp and its code the call does not give are those of the
+/// case settings (written back into `params`, which the package reads), the
+/// stamp carries the day of the export or the first day of every aligner.
+/// The aligner of the 3D view built as the export writes it
+/// (`aligners.view.aligner-exact`) takes the same choice.
+fn report_choice(
+    data: &AlignersState,
+    input: &export::Input<'_>,
+    params: &mut FullParams,
+    cancel: dc_command::CancelToken,
+) -> Result<MeshChoice, CommandError> {
+    let stamp_settings = &data.settings.stamp;
+    let quality = *params.quality.get_or_insert(data.settings.quality);
+    let stamp = *params.stamp.get_or_insert(stamp_settings.enabled);
+    if params.stamp_code.trim().is_empty() {
+        params.stamp_code = stamp_settings.code.clone();
+    }
+    // the stamp carries the day of the export or the first day of the aligner
+    let stamp_dates = if stamp_settings.date == dca_model::StampDate::Start {
+        export::start_dates(input, &params.base())
+    } else {
+        BTreeMap::new()
+    };
+    Ok(MeshChoice {
+        shells: params.shells,
+        quality,
+        voxel_mm: params.voxel_mm,
+        stamp,
+        stamp_code: params.stamp_code.clone(),
+        date: export_date(params.generated.as_deref())?,
+        stamp_dates,
+        cancel,
+    })
+}
+
+// ---- the aligner of the 3D view ----------------------------------------------------------------------------------
+
+/// How the aligner of the 3D view is built (`aligners.view.*`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ViewBuild {
+    /// The preview (the plugin's `aligner_solid` at `preview_params`): the
+    /// construction of the print file at `voxel_mm`, reduced within
+    /// `tolerance_mm` as it comes, without the stamp and the checks of the
+    /// print files.
+    Preview {
+        /// Detail of the fields (mm).
+        voxel_mm: f64,
+        /// Tolerance of the surface (mm).
+        tolerance_mm: f64,
+    },
+    /// The aligner `aligners.output.export-all` writes, at `quality`.
+    Exact {
+        /// Quality of the print files.
+        quality: Quality,
+    },
+}
+
+/// An aligner built for the 3D view (case coordinates).
+pub(crate) struct ViewAligner {
+    pub arch: Arch,
+    pub stage: u32,
+    pub mesh: dc_mesh::TriMesh,
+    pub seconds: f64,
+}
+
+/// The aligner of every `(arch, stage)` of `wanted` built for the 3D view by
+/// the provider of the export, as `build` says, the arches at the same time;
+/// also the notes of the provider. The arches of the input are those with
+/// aligners, a separated scan, closed teeth and a gingiva: with both, the
+/// input of the export, so an exact aligner is the solid the export writes.
+pub(crate) fn view_aligners(
+    state: &CaseState,
+    data: &AlignersState,
+    wanted: &[(Arch, u32)],
+    build: ViewBuild,
+    ctx: &JobCtx,
+) -> Result<(Vec<ViewAligner>, Vec<Note>), CommandError> {
+    let built = |a: Arch| {
+        data.gingiva.contains_key(&a.role()) && data.crowns.keys().any(|f| Arch::of(*f) == a)
+    };
+    let arches: Vec<ArchData> = prepare(state, data)?
+        .into_iter()
+        .filter(|a| built(a.arch))
+        .collect();
+    if let Some((a, _)) = wanted
+        .iter()
+        .find(|(a, _)| !arches.iter().any(|d| d.arch == *a))
+    {
+        return Err(messages::invalid(
+            "aligners-err-no-3d-teeth",
+            &[("arch", &messages::arch_word(*a))],
+        ));
+    }
+    let input = input(&arches, data);
+    let provider: Box<dyn MeshProvider + '_> = match build {
+        ViewBuild::Exact { quality } => {
+            // `aligners.output.export-all`: the shells required, the quality
+            // asked, the rest from the case settings
+            let mut params = FullParams {
+                shells: Some(true),
+                quality: Some(quality),
+                ..FullParams::default()
+            };
+            calendar_defaults(
+                &mut params.start_date,
+                &mut params.interval_days,
+                &mut params.policy,
+                &data.settings,
+            );
+            let choice = report_choice(data, &input, &mut params, ctx.cancel_token().clone())?;
+            mesh_provider(state, data, &input, &choice)?.0
+        }
+        ViewBuild::Preview {
+            voxel_mm,
+            tolerance_mm,
+        } => {
+            let options = shells::Options {
+                voxel_mm,
+                tolerance_mm,
+                stamp: false,
+                stamp_code: String::new(),
+                date: schedule::Date::today(),
+                stamp_dates: BTreeMap::new(),
+                cancel: ctx.cancel_token().clone(),
+                checked: false,
+            };
+            match shells::ShellProvider::new(state, data, &input, options)? {
+                Ok(p) => Box::new(p),
+                Err(why) => return Err(CommandError::Invalid(why)),
+            }
+        }
+    };
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let provider = provider.as_ref();
+    let results: Vec<Result<Option<ViewAligner>, export::ExportError>> = std::thread::scope(|s| {
+        let jobs: Vec<_> = wanted
+            .iter()
+            .map(|&(arch, stage)| {
+                let done = &done;
+                s.spawn(move || {
+                    let t = std::time::Instant::now();
+                    let mesh = provider.aligner(arch, stage)?;
+                    let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    ctx.set_fraction(n as f32 / wanted.len() as f32);
+                    Ok(mesh.map(|mesh| ViewAligner {
+                        arch,
+                        stage,
+                        mesh,
+                        seconds: t.elapsed().as_secs_f64(),
+                    }))
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| {
+                j.join()
+                    .unwrap_or_else(|_| Err(export::ExportError::Package("panicked".into())))
+            })
+            .collect()
+    });
+    let mut out = Vec::new();
+    for r in results {
+        if let Some(a) = r.map_err(export_error)? {
+            out.push(a);
+        }
+    }
+    Ok((out, provider.notes()))
 }
 
 // ---- print check -------------------------------------------------------------------------------------------------
@@ -431,8 +631,9 @@ pub struct PrintCheckParams {
     /// Files from the shell stage (models and aligners): `null` when the
     /// case has the closed teeth and the gingiva, `false` the scans.
     pub shells: Option<bool>,
-    /// Quality of the shell-stage files.
-    pub quality: Quality,
+    /// Quality of the shell-stage files; default the quality stored in the
+    /// case.
+    pub quality: Option<Quality>,
     /// Detail of the models and shells (mm), instead of the quality's.
     pub voxel_mm: Option<f64>,
     /// Thinnest wall allowed in an aligner (mm); `null` skips the thickness.
@@ -446,7 +647,7 @@ impl Default for PrintCheckParams {
             self_intersections: true,
             build_plate_mm: Some(printcheck::DEFAULT_PLATE_MM),
             shells: None,
-            quality: Quality::default(),
+            quality: None,
             voxel_mm: None,
             min_thickness_mm: Some(0.3),
         }
@@ -464,11 +665,12 @@ fn run_print_check(
     let input = input(&arches, &data);
     let choice = MeshChoice {
         shells: params.shells,
-        quality: params.quality,
+        quality: params.quality.unwrap_or(data.settings.quality),
         voxel_mm: params.voxel_mm,
         stamp: false,
         stamp_code: String::new(),
         date: schedule::Date::today(),
+        stamp_dates: BTreeMap::new(),
         cancel: ctx.cancel_token().clone(),
     };
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
@@ -499,7 +701,7 @@ fn run_print_check(
                 let Some(mesh) = mesh.map_err(export_error)? else {
                     continue;
                 };
-                let check = printcheck::check(
+                let mut check = printcheck::check(
                     &mesh,
                     &CheckOptions {
                         min_thickness_mm: if aligner {
@@ -510,6 +712,10 @@ fn run_print_check(
                         ..options.clone()
                     },
                 );
+                // no fin, no flap far from the teeth (`shell_reach`)
+                if aligner && let Some(reach) = provider.reach(a.arch, k) {
+                    printcheck::add_reach(&mut check, reach);
+                }
                 results.push(serde_json::json!({
                     "arch": if a.arch.is_upper() { "upper" } else { "lower" },
                     "stage": k,
@@ -601,7 +807,7 @@ fn run_manifest(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::{Value, json};
 
@@ -915,7 +1121,19 @@ mod tests {
     #[test]
     #[ignore = "reconstruction, gingiva and the shells of every stage: run with --release --ignored"]
     fn the_shells_of_a_golden_arch_pass_the_print_check() {
-        let mut s = super::super::reconstruct::golden_state("demo_lower_mild");
+        golden_arch_export("demo_lower_mild", "lower");
+    }
+
+    /// The upper arch has the narrowest faces: with the embrasure fills the
+    /// models lost their stamp when the label was wider than the plugin's.
+    #[test]
+    #[ignore = "reconstruction, gingiva and the shells of every stage: run with --release --ignored"]
+    fn the_models_of_an_upper_golden_arch_keep_their_stamps() {
+        golden_arch_export("demo_upper_mild", "upper");
+    }
+
+    fn golden_arch_export(case: &str, arch: &str) {
+        let mut s = super::super::reconstruct::golden_state(case);
         for id in [
             "aligners.teeth.frames",
             "aligners.preparation.reconstruction.automatic",
@@ -927,7 +1145,7 @@ mod tests {
             s = exec(id, &s, Value::Null).unwrap().0;
             eprintln!("{id}: {:.1} s", t.elapsed().as_secs_f64());
         }
-        let dir = temp("shells");
+        let dir = temp(&format!("shells-{case}"));
         let quality = std::env::var("DCA_QUALITY").unwrap_or_else(|_| "draft".to_owned());
         let t = std::time::Instant::now();
         let (_, out) = exec(
@@ -946,7 +1164,14 @@ mod tests {
         eprintln!("export ({quality}): {:.1} s", t.elapsed().as_secs_f64());
         eprintln!("notes: {:#}", out["notes"]);
         assert_eq!(out["meshes"], "shells");
-        let n = out["aligners"]["lower"].as_u64().unwrap();
+        let dropped: Vec<&Value> = out["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n.as_str().unwrap().contains("no stamp"))
+            .collect();
+        assert!(dropped.is_empty(), "{dropped:#?}");
+        let n = out["aligners"][arch].as_u64().unwrap();
         let files = out["files"].as_array().unwrap();
         let stl = |p: &str| {
             files
@@ -973,6 +1198,108 @@ mod tests {
             out["print_check"]
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The golden scans of both arches as the app imports them (STL files in
+    /// a new case), through the automatic pipeline up to the bite.
+    pub(crate) fn golden_pipeline() -> CaseState {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/fixtures");
+        let dir = temp("pipeline");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = CaseState::default();
+        for (fixture, name, role, id) in [
+            ("demo_lower_mild", "lower.stl", "lower", 1),
+            ("demo_upper_mild", "upper.stl", "upper", 2),
+        ] {
+            let bytes = std::fs::read(root.join(fixture).join("scan.dcm")).unwrap();
+            let mesh = dc_mesh::dcm::decode(&bytes).unwrap();
+            let path = dir.join(name);
+            dc_mesh::io::write(&path, &mesh, dc_mesh::io::MeshFormat::Stl).unwrap();
+            let mut mesh = dc_mesh::io::read(&path).unwrap();
+            dc_mesh::io::normalize_units(&mut mesh).unwrap();
+            let blob = s.blobs.insert(mesh);
+            let scan: dc_case::Scan = serde_json::from_value(json!({
+                "id": format!("de300000-0000-4000-8000-{id:012x}"),
+                "role": role,
+                "source_name": name,
+                "source_units": "mm",
+                "import_xform": { "t": [0.0, 0.0, 0.0], "q": [0.0, 0.0, 0.0, 1.0] },
+                "mesh": blob,
+            }))
+            .unwrap();
+            s.case.scans.push(scan);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        let t = std::time::Instant::now();
+        let s = exec("aligners.auto", &s, json!({ "start_date": "2026-11-02" }))
+            .unwrap()
+            .0;
+        eprintln!("pipeline: {:.1} s", t.elapsed().as_secs_f64());
+        s
+    }
+
+    /// One aligner of each arch through the provider of the full export, at
+    /// the Standard quality (`DCA_QUALITY` for another one): the upper one
+    /// (`DCA_STAGE`, 1 by default) and the lower 01. The hard cut of the
+    /// occlusal shaping left 3 handles in the first and a crossing in the
+    /// second, on the outer surface of the wall.
+    #[test]
+    #[ignore = "the golden pipeline and two aligners at 0.1 mm: run with --release --ignored"]
+    fn standard_aligners_of_the_golden_arches_print() {
+        let s = golden_pipeline();
+        let data = aligners_data(&s).unwrap();
+        // every closed tooth of the pipeline knows its scanned part: the
+        // models draw their stumps under the gingiva
+        assert_eq!(data.crown_scanned.len(), data.crowns.len());
+        for arch in [Arch::Upper, Arch::Lower] {
+            let print = crate::commands::shell::ArchPrint::new(&s, &data, arch)
+                .unwrap()
+                .unwrap();
+            let g = print.stage(&data.stages, 1);
+            assert!(g.stumps.iter().any(|t| !t.below.is_empty()), "{arch:?}");
+        }
+        let arches = prepare(&s, &data).unwrap();
+        let input = input(&arches, &data);
+        let quality = std::env::var("DCA_QUALITY").unwrap_or_else(|_| "standard".to_owned());
+        let quality: Quality = serde_json::from_value(json!(quality)).unwrap();
+        let choice = MeshChoice {
+            shells: Some(true),
+            quality,
+            voxel_mm: None,
+            stamp: true,
+            stamp_code: String::new(),
+            date: schedule::Date::parse("2026-11-01").unwrap(),
+            stamp_dates: BTreeMap::new(),
+            cancel: dc_command::CancelToken::new(),
+        };
+        let (provider, _, _) = mesh_provider(&s, &data, &input, &choice).unwrap();
+        let upper: u32 = std::env::var("DCA_STAGE").map_or(1, |k| k.parse().unwrap());
+        let options = CheckOptions {
+            min_thickness_mm: Some(0.3),
+            ..CheckOptions::default()
+        };
+        let mut failed = Vec::new();
+        for (arch, k) in [(Arch::Upper, upper), (Arch::Lower, 1)] {
+            let t = std::time::Instant::now();
+            let mesh = provider.aligner(arch, k).unwrap().unwrap();
+            let c = printcheck::check(&mesh, &options);
+            eprintln!(
+                "{arch:?} {k}: {:.1} s, {} faces, genus {:?}, {:?} crossings, wall {:?}, {:?}",
+                t.elapsed().as_secs_f64(),
+                c.triangles,
+                c.genus,
+                c.self_intersections,
+                c.min_thickness_mm,
+                c.problem_texts(schedule::Lang::En)
+            );
+            if !c.ok {
+                failed.push((arch, k));
+            }
+        }
+        for n in provider.notes() {
+            eprintln!("note: {n:?}");
+        }
+        assert!(failed.is_empty(), "not printable: {failed:?}");
     }
 
     #[test]

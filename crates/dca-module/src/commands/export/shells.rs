@@ -15,11 +15,12 @@
 //!   reaching `clearance + wall`, [`shell::closed_grid_for`]), the shell
 //!   field between its levels at `clearance` and `clearance + wall`, the
 //!   ramps united with it on the field and the cavity of their tooth cut
-//!   again ([`dca_algo::ramps::apply_to_grid`]), the occlusal thickness and
-//!   the grinding of the bite with the aligners worn cut from the field
-//!   ([`occlusal::shape_field`], when the case asks for it and both arches
-//!   are there), the trim (cutter, reach of the crowns, rounded rim:
-//!   [`dca_algo::trim::run`]), the reduction within the mesh tolerance
+//!   again ([`dca_algo::ramps::apply_to_grid`]), the trim (cutter, reach of
+//!   the crowns, rounded rim: [`dca_algo::trim::run`]), and in it, after the
+//!   rim is rounded, the occlusal thickness and the grinding of the bite with
+//!   the aligners worn cut from the field, its crease blended
+//!   ([`occlusal::shape_cutter`], when the case asks for it and both arches
+//!   are there), the reduction within the mesh tolerance
 //!   ([`shell::reduce_to`]), then the stamp engraved inside the wall.
 //!
 //! The reduction and the stamp are checked as the print check would, in
@@ -78,8 +79,17 @@ pub(crate) struct Options {
     pub stamp_code: String,
     /// Date of the stamp (the day of the export).
     pub date: Date,
+    /// The first day of every aligner when the stamp carries it instead
+    /// (`stamp_date` START; an aligner without one carries `date`).
+    pub stamp_dates: BTreeMap<(Arch, u32), Date>,
     /// Stops the build of a mesh at the end of its current step.
     pub cancel: dc_command::CancelToken,
+    /// The files are checked as print files: a reduction is kept only when
+    /// it is no worse to print than the full resolution, and the reach of an
+    /// EQUATOR border is measured for the print check. `false` (the preview
+    /// of the 3D view, `aligners.view.aligner`): reduced within the
+    /// tolerance as it comes, the plugin's `_reduce` (`check=False`).
+    pub checked: bool,
 }
 
 /// The models and the aligners of every stage from the shell stage.
@@ -98,6 +108,8 @@ pub(crate) struct ShellProvider<'a> {
     n_lower: u32,
     n_upper: u32,
     notes: Mutex<Vec<Note>>,
+    /// The reach of every aligner made (EQUATOR border), for its print check.
+    reaches: Mutex<BTreeMap<(Arch, u32), printcheck::Reach>>,
 }
 
 fn rigid(m: &DMat4, mesh: &TriMesh) -> TriMesh {
@@ -118,15 +130,6 @@ fn merged(meshes: &[TriMesh]) -> TriMesh {
         out.tris.extend(m.tris.iter().map(|t| t.map(|i| i + base)));
     }
     out
-}
-
-fn trim_mode(m: TrimMode) -> trim::Mode {
-    match m {
-        TrimMode::Equator => trim::Mode::Equator,
-        TrimMode::Straight => trim::Mode::Straight,
-        TrimMode::Scalloped => trim::Mode::Scalloped,
-        TrimMode::Smooth => trim::Mode::Smooth,
-    }
 }
 
 fn package(what: &str, arch: Arch, k: u32, e: impl std::fmt::Display) -> ExportError {
@@ -172,14 +175,7 @@ impl<'a> ShellProvider<'a> {
             });
         }
         let t = &data.trim;
-        let trim = trim::Params {
-            mode: trim_mode(t.mode),
-            margin_gap_mm: t.margin_gap_mm,
-            scallop_mm: t.scallop_mm,
-            equator_offset_mm: t.equator_offset_mm,
-            extension_mm: t.extension_mm,
-            ..trim::Params::default()
-        };
+        let trim = super::super::trim::case_trim_params(t);
         let shell_blockout = if t.mode == TrimMode::Smooth {
             SMOOTH_BLOCKOUT_MM
         } else {
@@ -209,6 +205,7 @@ impl<'a> ShellProvider<'a> {
             n_lower,
             n_upper,
             notes: Mutex::new(notes),
+            reaches: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -235,7 +232,8 @@ impl<'a> ShellProvider<'a> {
     }
 
     /// The trim inputs of a stage in the arch coordinates of `to_arch`: the
-    /// labelled scan moved to the stage, its crowns, margins and border; the
+    /// labelled scan moved to the stage, the crowns, margins and border of
+    /// the teeth the aligner covers (`covered`; `None`: every tooth); the
     /// teeth are the closed ones of the shell stage.
     fn trim_parts(
         &self,
@@ -243,6 +241,7 @@ impl<'a> ShellProvider<'a> {
         g: &StageGeometry,
         to_arch: &DMat4,
         closed: &[TriMesh],
+        covered: Option<&std::collections::BTreeSet<Fdi>>,
     ) -> Option<trim::model::ModelParts> {
         let series = self.input.arches.iter().find(|s| s.arch == arch)?;
         let scan = export::deform_series(series, &g.deltas);
@@ -265,7 +264,7 @@ impl<'a> ShellProvider<'a> {
                 Some((*f, (origin, e_bl)))
             })
             .collect();
-        let mut parts = trim::model::parts(&vertices, &scan.tris, series.labels, &frames, None);
+        let mut parts = trim::model::parts(&vertices, &scan.tris, series.labels, &frames, covered);
         let by_fdi: BTreeMap<Fdi, &TriMesh> = g.fdis.iter().copied().zip(closed).collect();
         for t in &mut parts.teeth {
             if let Some(m) = by_fdi.get(&t.fdi) {
@@ -319,6 +318,11 @@ impl<'a> ShellProvider<'a> {
         if tol <= 0.0 {
             return Ok((full, None));
         }
+        if !self.options.checked {
+            let r = shell::reduce_to(&full, tol, Some(to_case))
+                .map_err(|e| package("reduction", arch, k, e))?;
+            return Ok((r, None));
+        }
         let base = check(&rigid(to_case, &full), min_wall);
         let wall = |c: &printcheck::PrintCheck| c.min_thickness_mm.unwrap_or(f64::INFINITY);
         let floor = min_wall.map_or(0.0, |m| wall(&base).min(m));
@@ -341,10 +345,11 @@ impl<'a> ShellProvider<'a> {
         Ok((full, base.self_intersections))
     }
 
-    /// The stamp on `mesh` (arch coordinates): the mesh stamped, or `None`
-    /// with a note (no room, or the text would fold the surface: more
-    /// self-intersections in case coordinates, `to_case`, than `before`, the
-    /// ones of `mesh` there when known).
+    /// The stamp on `mesh` (arch coordinates), on one of the `covered`
+    /// teeth of `sites`: the mesh stamped, or `None` with a note (no room, or
+    /// the text would fold the surface: more self-intersections in case
+    /// coordinates, `to_case`, than `before`, the ones of `mesh` there when
+    /// known).
     fn stamped(
         &self,
         mesh: &TriMesh,
@@ -352,25 +357,42 @@ impl<'a> ShellProvider<'a> {
         to_case: &DMat4,
         (arch, k): (Arch, u32),
         kind: stamp::Kind,
-        sites: Vec<ToothSite>,
+        (sites, covered): (Vec<ToothSite>, &std::collections::BTreeSet<Fdi>),
     ) -> Option<TriMesh> {
         let aligner = kind == stamp::Kind::Shell;
+        // the text, the tooth, the face and the sizes of the case settings
+        let case = match super::super::stamp::case_stamp_params(
+            &self.data.settings.stamp,
+            &serde_json::Map::new(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                self.note(arch, k, aligner, "rpt-note-stamp", e.to_string());
+                return None;
+            }
+        };
+        let date = self
+            .options
+            .stamp_dates
+            .get(&(arch, k))
+            .unwrap_or(&self.options.date);
         let params = stamp::Params {
             number: k,
             code: stamp::clean_code(&self.options.stamp_code),
-            date: Some(self.options.date.to_iso()),
+            date: Some(date.to_iso()),
             clearance: if aligner {
                 self.design.clearance_mm
             } else {
                 0.0
             },
             kind,
-            ..stamp::Params::default()
+            ..case
         };
         let input = stamp::Input {
             mesh,
             arch,
             teeth: sites,
+            covered: Some(covered),
         };
         let why = match stamp::run(&input, &params) {
             Ok(Outcome::Stamped(done)) => {
@@ -460,7 +482,7 @@ impl MeshProvider for ShellProvider<'_> {
         }
         let to_arch = print.to_arch();
         let from_arch = dca_algo::frame::rigid_inverse(&to_arch);
-        let Some(parts) = self.trim_parts(arch, &g, &to_arch, &[]) else {
+        let Some(parts) = self.trim_parts(arch, &g, &to_arch, &[], None) else {
             return Ok(Some(model));
         };
         let sites = self.stamp_sites(&parts, &g, &to_arch);
@@ -472,7 +494,7 @@ impl MeshProvider for ShellProvider<'_> {
                 &from_arch,
                 (arch, k),
                 stamp::Kind::Model,
-                sites,
+                (sites, &print.covered),
             ) {
                 Some(done) => rigid(&from_arch, &done),
                 None => model,
@@ -567,7 +589,7 @@ impl MeshProvider for ShellProvider<'_> {
         self.stop()?;
 
         // the trim
-        let Some(tp) = self.trim_parts(arch, &g, &to_arch, &teeth) else {
+        let Some(tp) = self.trim_parts(arch, &g, &to_arch, &teeth, Some(&print.covered)) else {
             return Ok(None);
         };
         let input = trim::Input {
@@ -607,14 +629,49 @@ impl MeshProvider for ShellProvider<'_> {
 
         // the stamp, engraved inside the wall
         if self.options.stamp {
-            let sites = self.stamp_sites(&tp, &g, &to_arch);
-            if let Some(done) =
-                self.stamped(&mesh, si, &from_arch, (arch, k), stamp::Kind::Shell, sites)
-            {
+            // the centre of the arch from every crown, the tooth among those
+            // the aligner covers (`case_stamp`)
+            let sites = if g.fdis.iter().all(|f| print.covered.contains(f)) {
+                self.stamp_sites(&tp, &g, &to_arch)
+            } else {
+                self.trim_parts(arch, &g, &to_arch, &[], None)
+                    .map(|all| self.stamp_sites(&all, &g, &to_arch))
+                    .unwrap_or_default()
+            };
+            if let Some(done) = self.stamped(
+                &mesh,
+                si,
+                &from_arch,
+                (arch, k),
+                stamp::Kind::Shell,
+                (sites, &print.covered),
+            ) {
                 mesh = done;
             }
         }
+
+        // no fin, no flap far from the teeth (EQUATOR: a straight or
+        // scalloped border covers the gingiva on purpose)
+        if self.options.checked && self.trim.mode == trim::Mode::Equator {
+            let (teeth_mesh, face_fdi) = shell::reach_teeth(&print.input(&g));
+            let outer = self.design.clearance_mm + self.design.thickness_mm;
+            let reach =
+                printcheck::shell_reach(&mesh.positions, &teeth_mesh, &face_fdi, outer, &[])
+                    .map_err(|e| err("reach", &e))?;
+            self.reaches
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((arch, k), reach);
+        }
         Ok(Some(rigid(&from_arch, &mesh)))
+    }
+
+    fn reach(&self, arch: Arch, k: u32) -> Option<printcheck::Reach> {
+        self.reaches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(arch, k))
+            .cloned()
     }
 
     fn notes(&self) -> Vec<Note> {

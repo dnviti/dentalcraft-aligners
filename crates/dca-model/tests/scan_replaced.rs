@@ -10,7 +10,8 @@ use dc_case::{
 use dc_mesh::{BadFaceReport, MeshFormat, TriMesh, Units};
 use dca_model::{
     AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Decision, IprStep, MODULE_ID, Ramp,
-    RampKind, Seed, Stage, ToothFrame, ToothMeasures, Visit,
+    RampKind, ReviewKind, ReviewRecord, ReviewStatus, Seed, Stage, StagingSummary, ToothFrame,
+    ToothMeasures, Visit,
 };
 use glam::{DQuat, DVec3, Vec3};
 use serde_json::Value;
@@ -151,6 +152,29 @@ fn fill_arch(case: &mut CaseState, st: &mut AlignersState, role: ScanRole, tag: 
             });
         }
     }
+    st.staging_results.insert(
+        role,
+        StagingSummary {
+            aligners: 3,
+            slowed: [(a, 0.5)].into(),
+            ..StagingSummary::default()
+        },
+    );
+    st.tooth_speed.insert(a, 0.5);
+    st.review.push(ReviewRecord {
+        arch: role,
+        kind: ReviewKind::Attachment,
+        fdi: Some(a),
+        computed: "rotation".to_owned(),
+        proposed: "rotation".to_owned(),
+        options: vec!["none".to_owned(), "rotation".to_owned()],
+        detail: Value::Null,
+        refs: Vec::new(),
+        note: None,
+        status: ReviewStatus::Pending,
+        decided: "rotation".to_owned(),
+        decided_at: None,
+    });
     st.aligner_bite.ramps.ramps.push(Ramp {
         fdi: a,
         pose: pose(1.0),
@@ -160,6 +184,8 @@ fn fill_arch(case: &mut CaseState, st: &mut AlignersState, role: ScanRole, tag: 
     let scan = blob(0.4);
     st.visits
         .push(visit(if role == Upper { 1 } else { 2 }, role, scan));
+    let study = blob(0.5);
+    st.study_models.insert(role, study);
 }
 
 /// Results that need both arches.
@@ -215,6 +241,8 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         assert!(!st.setup.ipr.iter().any(|r| arch(&r.between[0])));
         assert!(!st.setup.lines.contains_key(&role));
         assert!(st.stages.iter().all(|s| !s.poses.keys().any(arch)));
+        assert!(!st.staging_results.contains_key(&role));
+        assert!(!st.tooth_speed.keys().any(arch));
         assert!(
             st.stages
                 .iter()
@@ -222,6 +250,8 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         );
         assert!(!st.aligner_bite.ramps.ramps.iter().any(|r| arch(&r.fdi)));
         assert!(!st.visits.iter().any(|v| v.arch == role));
+        assert!(!st.review.iter().any(|r| r.arch == role));
+        assert!(!st.study_models.contains_key(&role));
         // the blobs of the cleared records are no longer referenced; the
         // other arch keeps exactly its own (blobs are content addressed)
         let (_, rest) = case_with(&[other(role)]);
@@ -230,7 +260,7 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         live.sort();
         want.sort();
         assert_eq!(live, want, "{role:?}");
-        assert_eq!(live.len(), 5);
+        assert_eq!(live.len(), 6);
     }
 }
 
@@ -257,9 +287,15 @@ fn only_group(id: &str, role: ScanRole) -> AlignersState {
         }
         "complexity" => st.diagnosis.complexity_score = Some(12.0),
         "setup" => st.setup = full.setup,
-        "stages" => st.stages = full.stages,
+        "stages" => {
+            st.stages = full.stages;
+            st.staging_results = full.staging_results;
+            st.tooth_speed = full.tooth_speed;
+        }
+        "review" => st.review = full.review,
         "ramps" => st.aligner_bite.ramps.ramps = full.aligner_bite.ramps.ramps,
         "visits" => st.visits = full.visits,
+        "study_models" => st.study_models = full.study_models,
         other => panic!("unknown id {other}"),
     }
     st
@@ -465,6 +501,37 @@ fn stages_follow_merge_arch_with_an_empty_series() {
     assert_eq!(st.stages.len(), 1);
     assert_eq!(st.scan_replaced(Lower), ["stages"]);
     assert!(st.stages.is_empty());
+}
+
+#[test]
+fn the_repeats_of_the_other_arch_go_with_the_longer_series() {
+    // as the staging leaves it: the lower series ends at the second aligner
+    // and repeats its last pose while the upper one goes on to the fourth
+    let mut stages = Vec::new();
+    for k in 1..=4u32 {
+        let mut s = Stage::new(k);
+        s.poses.insert(fdi(11), pose(f64::from(k)));
+        s.poses.insert(fdi(31), pose(f64::from(k.min(2))));
+        stages.push(s);
+    }
+    let mut st = AlignersState {
+        stages: stages.clone(),
+        ..AlignersState::default()
+    };
+    assert_eq!(st.scan_replaced(Upper), ["stages"]);
+    // the lower arch keeps its own two aligners, as in the plugin (each arch
+    // has its own series)
+    let indexes: Vec<u32> = st.stages.iter().map(|s| s.index).collect();
+    assert_eq!(indexes, [1, 2]);
+    assert_eq!(st.stages[1].poses[&fdi(31)], pose(2.0));
+    // the longer arch keeps all of its aligners
+    let mut st = AlignersState {
+        stages,
+        ..AlignersState::default()
+    };
+    assert_eq!(st.scan_replaced(Lower), ["stages"]);
+    assert_eq!(st.stages.len(), 4);
+    assert!(st.stages.iter().all(|s| !s.poses.contains_key(&fdi(31))));
 }
 
 #[test]

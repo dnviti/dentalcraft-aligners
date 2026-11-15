@@ -67,8 +67,8 @@ pub struct FullParams {
     pub start_date: Option<String>,
     /// Days of wear of each aligner (default: the one of the case, 14).
     pub interval_days: Option<u32>,
-    /// Interval policy of the calendar.
-    pub policy: Policy,
+    /// Interval policy of the calendar (default fixed).
+    pub policy: Option<Policy>,
     /// Language of the report, the patient programmes and the calendar.
     pub lang: Lang,
     /// Name of the case in the calendar events and the report.
@@ -98,15 +98,17 @@ pub struct FullParams {
     /// gingiva, else the deformed scans as the models and no aligner;
     /// `true` requires them, `false` uses the scans.
     pub shells: Option<bool>,
-    /// Quality of the shell-stage files (detail and surface tolerance).
-    pub quality: Quality,
+    /// Quality of the shell-stage files (detail and surface tolerance);
+    /// default the quality stored in the case.
+    pub quality: Option<Quality>,
     /// Detail of the models and shells (mm), instead of the quality's.
     pub voxel_mm: Option<f64>,
     /// Identification stamp: embossed on the models, engraved in the
-    /// aligners (arch, number, date of the export, `stamp_code`).
-    pub stamp: bool,
+    /// aligners (arch, number, date of the export, `stamp_code`); default
+    /// the stamp setting of the case (on).
+    pub stamp: Option<bool>,
     /// Case code in the stamp (letters, digits, `-`; at most 8; never the
-    /// name of the patient).
+    /// name of the patient); empty: the code of the stamp settings.
     pub stamp_code: String,
     /// Files built at the same time (default: what one build can afford, at
     /// most the threads).
@@ -133,9 +135,9 @@ impl Default for FullParams {
             threads: None,
             generated: None,
             shells: None,
-            quality: Quality::default(),
+            quality: None,
             voxel_mm: None,
-            stamp: true,
+            stamp: None,
             stamp_code: String::new(),
             parallel: None,
         }
@@ -494,6 +496,13 @@ fn run_inner(
                 build_plate_mm: params.build_plate_mm,
                 ..CheckOptions::default()
             };
+            let mut check = printcheck::check(&mesh, &options);
+            // no fin, no flap far from the teeth (the check passes them)
+            if kind == Kind::Aligner
+                && let Some(reach) = provider.reach(arch, k)
+            {
+                printcheck::add_reach(&mut check, reach);
+            }
             FileCheck {
                 name: name.clone(),
                 arch,
@@ -503,7 +512,7 @@ fn run_inner(
                 } else {
                     "aligner"
                 },
-                check: printcheck::check(&mesh, &options),
+                check,
             }
         });
         entry.printable = check.as_ref().map(|c| c.check.ok);
@@ -715,7 +724,7 @@ fn run_inner(
             "title": params.title,
             "start": first.start.to_iso(),
             "interval_days": params.interval_days.unwrap_or(case.state.settings.interval_days),
-            "policy": params.policy,
+            "policy": params.policy.unwrap_or_default(),
             "lang": params.lang,
             "workflow": params.workflow,
             "wear_hours": first.wear_hours,
@@ -724,9 +733,9 @@ fn run_inner(
             "shell_thickness_mm": case.state.settings.shell_thickness_mm,
             "clearance_mm": case.state.settings.clearance_mm,
             "meshes": case.meshes,
-            "quality": params.quality,
-            "voxel_mm": params.voxel_mm.unwrap_or(params.quality.voxel_mm()),
-            "stamp": params.stamp,
+            "quality": params.quality.unwrap_or_default(),
+            "voxel_mm": params.voxel_mm.unwrap_or(params.quality.unwrap_or_default().voxel_mm()),
+            "stamp": params.stamp.unwrap_or(true),
         }),
         aligners: aligners.clone(),
         total_aligners: plan.total,
@@ -1293,6 +1302,49 @@ mod tests {
         assert!(en.1.contains("(passive)") && it.1.contains("(passivo)"));
         assert!(en.0.contains("7.0") || en.0.contains("0.30"));
         assert!(it.0.contains("0,30"));
+    }
+
+    #[test]
+    fn the_report_shows_the_values_in_force_and_marks_the_ones_written_by_hand() {
+        use dca_model::ArchEdits;
+        let render = |f: &Fixture, lang: Lang, name: &str| {
+            let dir = temp(name);
+            let mut p = params(&dir);
+            p.lang = lang;
+            run(&f.input(), &f.case(), &Cubes { broken: None }, &p).unwrap();
+            let report = std::fs::read_to_string(dir.join("report.html")).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            report
+        };
+        // computed: discrepancy 70 - 80.5 = -10.5 (beyond the extraction threshold), little 4.2
+        let mut f = fixture();
+        let plain = render(&f, Lang::En, "hand-none");
+        assert!(plain.contains("<td>-10.50</td>") && plain.contains("<td>4.20</td>"));
+        assert!(plain.contains("the consensus indicates extraction"));
+        assert!(!plain.contains(" *</td>") && !plain.contains("written by the clinician"));
+
+        f.state.diagnosis.edits.insert(
+            ScanRole::Upper,
+            ArchEdits {
+                discrepancy_mm: Some(-2.5),
+                little_index_mm: Some(7.5),
+                ..ArchEdits::default()
+            },
+        );
+        let hand = render(&f, Lang::En, "hand-en");
+        // the values in force, marked; the others are as computed and not marked
+        assert!(hand.contains("<td>-2.50 *</td>") && hand.contains("<td>7.50 *</td>"));
+        assert!(hand.contains("<td>1.20</td>") && hand.contains("<td>0.40</td>"));
+        assert!(!hand.contains("-10.50"));
+        // the score follows: the mark is on it too
+        assert!(hand.contains("<td>0 *</td>"));
+        // the extraction warning follows the value in force
+        assert!(!hand.contains("the consensus indicates extraction"));
+        assert!(hand.contains("* Value written by the clinician"));
+        check_wellformed(&hand).unwrap();
+        let it = render(&f, Lang::It, "hand-it");
+        assert!(it.contains("<td>-2,50 *</td>") && it.contains("<td>7,50 *</td>"));
+        assert!(it.contains("* Valore scritto dal clinico"));
     }
 
     #[test]

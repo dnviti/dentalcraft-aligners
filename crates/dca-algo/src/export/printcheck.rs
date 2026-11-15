@@ -15,9 +15,11 @@
 //! one, nearly coplanar triangles left out); the thickness casts a ray into
 //! the solid from the centre of the faces.
 //!
-//! Not ported: `shell_reach` (fins and flaps of an EQUATOR shell far from
-//! the teeth) needs the teeth and bars of the stage, so it belongs to the
-//! shell code.
+//! The reach of a shell ([`shell_reach`], `printcheck.shell_reach`): an
+//! EQUATOR shell has no vertex farther from the teeth of its stage (and the
+//! blockout of their contacts) than its wall and [`REACH_FAR_MM`], else it
+//! has a fin or a flap over the gingiva ([`add_reach`] makes that a problem
+//! of the check). The export measures it, since it needs the teeth.
 
 use std::collections::HashMap;
 
@@ -127,6 +129,11 @@ pub enum Problem {
         /// Build volume (mm).
         plate_mm: [f64; 3],
     },
+    /// Shell vertices far from the teeth: a fin or a flap ([`shell_reach`]).
+    Flap {
+        /// Vertices beyond the limit.
+        count: usize,
+    },
 }
 
 impl Problem {
@@ -157,6 +164,7 @@ impl Problem {
                     ),
                 ],
             ),
+            Problem::Flap { count } => n("chk-flap", &[count.to_string()]),
         }
     }
 }
@@ -197,6 +205,9 @@ pub struct PrintCheck {
     pub fits_plate: Option<bool>,
     /// Thinnest wall found (mm; `None` when not measured).
     pub min_thickness_mm: Option<f64>,
+    /// How far a shell reaches from the teeth (`None` when not measured,
+    /// [`add_reach`]).
+    pub reach: Option<Reach>,
     /// Nothing prevents printing it.
     pub ok: bool,
     /// What does.
@@ -252,6 +263,12 @@ fn area2(c: &[DVec3; 3]) -> f64 {
     (c[1] - c[0]).cross(c[2] - c[0]).length()
 }
 
+/// A triangle with a repeated corner or (almost) no area
+/// ([`DEGENERATE_AREA2`]): a degenerate triangle of the print check.
+pub(crate) fn degenerate(pos: &[Vec3], t: [u32; 3]) -> bool {
+    t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || area2(&corners(pos, t)) < DEGENERATE_AREA2
+}
+
 fn find(parent: &mut [u32], mut x: u32) -> u32 {
     while parent[x as usize] != x {
         parent[x as usize] = parent[parent[x as usize] as usize];
@@ -281,6 +298,7 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
         size_mm: [0.0; 3],
         fits_plate: None,
         min_thickness_mm: None,
+        reach: None,
         ok: false,
         problems: Vec::new(),
     };
@@ -304,14 +322,10 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
     // edges
     let mut undirected: HashMap<(u32, u32), u32> = HashMap::with_capacity(tris.len() * 2);
     let mut directed: HashMap<(u32, u32), u32> = HashMap::with_capacity(tris.len() * 3);
-    let mut degenerate = 0;
+    let mut degenerate_count = 0;
     for t in &tris {
-        if t[0] == t[1]
-            || t[1] == t[2]
-            || t[0] == t[2]
-            || area2(&corners(&pos, *t)) < DEGENERATE_AREA2
-        {
-            degenerate += 1;
+        if degenerate(&pos, *t) {
+            degenerate_count += 1;
         }
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             if a == b {
@@ -321,7 +335,7 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
             *undirected.entry((a.min(b), a.max(b))).or_insert(0) += 1;
         }
     }
-    out.degenerate = degenerate;
+    out.degenerate = degenerate_count;
     out.boundary_edges = undirected.values().filter(|&&c| c == 1).count();
     out.nonmanifold_edges = undirected.values().filter(|&&c| c > 2).count();
     out.flipped_edges = directed.values().filter(|&&c| c > 1).count();
@@ -461,6 +475,173 @@ pub fn check_file(
     Ok(check(&mesh, options))
 }
 
+// ---- reach of a shell (fins, flaps) ---------------------------------------------------------------------------
+
+/// EQUATOR border: a shell vertex farther than the wall (clearance +
+/// thickness) and this from every closed tooth of its stage and from every
+/// contact bridge (the blockout of a contact and of the embrasure under it,
+/// on which the wall rests) stands off the teeth: a fin, or a flap over the
+/// gingiva (`REACH_FAR_MM`).
+pub const REACH_FAR_MM: f64 = 0.6;
+/// Vertices allowed beyond that (`REACH_FAR_VERTS`: none, a flap of 24
+/// vertices is a flap).
+pub const REACH_FAR_VERTS: usize = 0;
+/// Vertices beyond the limit within this of the worst one are one fin,
+/// reported together (mm, `REACH_CLUSTER_MM`).
+pub const REACH_CLUSTER_MM: f64 = 3.0;
+/// Distances are measured up to this; a vertex farther away counts as this
+/// (mm, `REACH_QUERY_MM`).
+pub const REACH_QUERY_MM: f64 = 10.0;
+/// Fins reported at most (the plugin's 5).
+const REACH_FINS: usize = 5;
+
+/// The vertices beyond the limit around the farthest one of them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Fin {
+    /// The farthest vertex (mm, to 0.1 mm as the plugin reports it).
+    pub at: [f64; 3],
+    /// Its distance from the teeth (mm, to 0.01 mm).
+    pub max_mm: f64,
+    /// Vertices beyond the limit within [`REACH_CLUSTER_MM`] of it.
+    pub vertices: usize,
+    /// The tooth nearest to it: `Some(0)` a contact bridge, `None` when the
+    /// faces of the teeth are not labelled.
+    pub fdi: Option<u8>,
+}
+
+/// How far the vertices of a shell are from the teeth
+/// (`printcheck.shell_reach`); the vertices on a bar are set aside.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Reach {
+    /// Largest distance (mm).
+    pub max_mm: f64,
+    /// 99.99th percentile (mm).
+    pub p9999_mm: f64,
+    /// Median (mm).
+    pub median_mm: f64,
+    /// Vertices beyond the limit.
+    pub n_far: usize,
+    /// Vertices beyond the limit set aside because they are on a bar.
+    pub n_bar: usize,
+    /// The limit: the wall and [`REACH_FAR_MM`] (mm).
+    pub limit_mm: f64,
+    /// The vertices beyond the limit by fin, worst first (at most 5).
+    pub fins: Vec<Fin>,
+}
+
+/// Linear percentile `q` (0..=100) of sorted values (`np.percentile`).
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let pos = q / 100.0 * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    sorted[lo] + (pos - lo as f64) * (sorted[hi] - sorted[lo])
+}
+
+/// Shell material far from every tooth (`printcheck.shell_reach`): the
+/// distance of every vertex of `shell` from the surface of `teeth` (the
+/// closed teeth of the stage and its contact bridges, in the coordinates of
+/// the shell; `face_fdi` the tooth of every face of it, `0` on a bridge,
+/// empty when not known). The shell is the wall between the clearance and
+/// `outer` (clearance + thickness) from the model, so a vertex farther than
+/// `outer` + [`REACH_FAR_MM`] stands off the teeth ([`check`] passes it: one
+/// piece, genus 0). A vertex beyond that within the limit of `bar_boxes`
+/// (the closed solids the bars over gaps are the offset of; empty: no bar)
+/// is on a bar and set aside.
+///
+/// # Errors
+/// A mesh with a triangle index out of range.
+pub fn shell_reach(
+    shell: &[Vec3],
+    teeth: &TriMesh,
+    face_fdi: &[u8],
+    outer: f64,
+    bar_boxes: &[TriMesh],
+) -> Result<Reach, dc_geom::GeomError> {
+    let limit = outer + REACH_FAR_MM;
+    let hits = Bvh::build(teeth)?.closest_points(shell, REACH_QUERY_MM as f32);
+    let dist: Vec<f64> = hits
+        .iter()
+        .map(|h| h.map_or(REACH_QUERY_MM, |h| f64::from(h.distance)))
+        .collect();
+    let boxes = if bar_boxes.iter().any(|b| !b.tris.is_empty()) {
+        let mut all = TriMesh::new(Vec::new(), Vec::new());
+        for b in bar_boxes {
+            let off = all.positions.len() as u32;
+            all.positions.extend_from_slice(&b.positions);
+            all.tris.extend(b.tris.iter().map(|t| t.map(|i| i + off)));
+        }
+        Some(Bvh::build(&all)?)
+    } else {
+        None
+    };
+    let on_bar: Vec<bool> = (0..shell.len())
+        .into_par_iter()
+        .map(|i| {
+            dist[i] > limit
+                && boxes.as_ref().is_some_and(|b| {
+                    b.closest_point(shell[i], REACH_QUERY_MM as f32)
+                        .is_some_and(|h| f64::from(h.distance) <= limit)
+                })
+        })
+        .collect();
+    let kept: Vec<usize> = (0..shell.len()).filter(|&i| !on_bar[i]).collect();
+    let mut sorted: Vec<f64> = kept.iter().map(|&i| dist[i]).collect();
+    sorted.sort_unstable_by(f64::total_cmp);
+    let median = percentile(&sorted, 50.0);
+    let far: Vec<usize> = kept.iter().copied().filter(|&i| dist[i] > limit).collect();
+    let mut fins = Vec::new();
+    let mut left = vec![true; far.len()];
+    let r2 = REACH_CLUSTER_MM * REACH_CLUSTER_MM;
+    while fins.len() < REACH_FINS {
+        // the farthest vertex left (the first of equals, as argmax)
+        let Some(w) = (0..far.len())
+            .filter(|&k| left[k])
+            .reduce(|a, b| if dist[far[b]] > dist[far[a]] { b } else { a })
+        else {
+            break;
+        };
+        let i = far[w];
+        let p = shell[i].as_dvec3();
+        let mut vertices = 0;
+        for (k, &j) in far.iter().enumerate() {
+            if left[k] && shell[j].as_dvec3().distance_squared(p) < r2 {
+                left[k] = false;
+                vertices += 1;
+            }
+        }
+        let fdi = hits[i].and_then(|h| face_fdi.get(h.face as usize).copied());
+        fins.push(Fin {
+            at: p.to_array().map(|x| (x * 10.0).round_ties_even() / 10.0),
+            max_mm: (dist[i] * 100.0).round_ties_even() / 100.0,
+            vertices,
+            fdi,
+        });
+    }
+    Ok(Reach {
+        max_mm: sorted.last().copied().unwrap_or(0.0),
+        p9999_mm: percentile(&sorted, 99.99),
+        median_mm: median,
+        n_far: far.len(),
+        n_bar: on_bar.iter().filter(|b| **b).count(),
+        limit_mm: limit,
+        fins,
+    })
+}
+
+/// `check` of a shell with its reach (`_check` of the export): more than
+/// [`REACH_FAR_VERTS`] vertices far from the teeth is a problem (a fin, a
+/// flap over the gingiva).
+pub fn add_reach(check: &mut PrintCheck, reach: Reach) {
+    if reach.n_far > REACH_FAR_VERTS {
+        check.problems.push(Problem::Flap { count: reach.n_far });
+        check.ok = false;
+    }
+    check.reach = Some(reach);
+}
+
 // ---- self-intersections ---------------------------------------------------------------------------------------
 
 /// Number of pairs of triangles that cross each other and share no vertex,
@@ -474,9 +655,7 @@ pub fn check_file(
 /// interval test read them as crossing along the ill-conditioned line of
 /// their planes). Degenerate triangles are counted apart.
 fn self_intersections(pos: &[Vec3], tris: &[[u32; 3]]) -> (usize, Vec<[u32; 2]>) {
-    let bad = |t: [u32; 3]| {
-        t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || area2(&corners(pos, t)) < DEGENERATE_AREA2
-    };
+    let bad = |t: [u32; 3]| degenerate(pos, t);
     let welded = TriMesh::new(pos.to_vec(), tris.to_vec());
     let pairs: Vec<[u32; 2]> = crate::shell::crossing_pairs(&welded)
         .into_iter()

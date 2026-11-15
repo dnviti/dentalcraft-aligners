@@ -26,10 +26,12 @@
 //! its solids and teeth corrected by hand (the plugin rebuilds `only` the
 //! teeth of `oa_label_dirty`; the solids then follow every label change),
 //! otherwise in the first. An empty `teeth`, or teeth of an arch with no
-//! labels, are refused before anything runs. Then the
-//! diagnosis runs on the new teeth (`case_plan.analyze`). The output lists
-//! every step and what was done: the teeth and the gingiva of each arch,
-//! what was cleared and whether the diagnosis ran.
+//! labels, are refused before anything runs. Without an arch asked, every
+//! arch with a scan and labels is built; an arch with a scan and no labels
+//! is named in `arches` (`built: false` and the reason), never skipped in
+//! silence. Then the diagnosis runs on the new teeth (`case_plan.analyze`).
+//! The output lists every step and what was done: the teeth and the gingiva
+//! of each arch, what was cleared and whether the diagnosis ran.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,8 +39,9 @@ use dc_case::{CaseState, Fdi, ModuleState, Pose};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::CommandOutput;
 use dca_algo::anatomy::Arch;
-use dca_algo::teeth::Which;
-use dca_model::{AlignersState, MODULE_ID};
+use dca_algo::rotation;
+use dca_algo::teeth::{self, Which};
+use dca_model::{AlignersState, MODULE_ID, ToothFrame};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -155,7 +158,8 @@ fn clear_plan(data: &mut AlignersState, arch: Arch, setup: bool) -> (bool, bool)
         s.lines.remove(&arch.role());
         setup_cleared = before != (s.poses.len(), s.locked.len(), s.ipr.len(), s.lines.len());
     }
-    let mut stages_cleared = false;
+    // the result of the last staging of the arch goes with its aligners
+    let mut stages_cleared = data.staging_results.remove(&arch.role()).is_some();
     for st in &mut data.stages {
         let before = (st.poses.len(), st.ipr.len());
         st.poses.retain(|f, _| !mine(f));
@@ -184,12 +188,15 @@ fn remove_tooth(data: &mut AlignersState, f: Fdi) -> bool {
     had
 }
 
-/// The setup pose `local` (relative to the rest frame `old`) of a tooth whose
-/// rest frame becomes `new`, with the same move in the world:
-/// `new^-1 * (old * local * old^-1) * new` (the plugin's `T0 * R0^-1 * F`).
-fn carried_pose(old: &Pose, new: &Pose, local: &Pose) -> Pose {
+/// The setup pose `local` of a tooth whose frame goes from `old` to `new`,
+/// with the same move in the world. The pose is relative to the rest pose of
+/// the frame ([`teeth::rest_pose`], centre of resistance origin), so with
+/// `R0` and `F` the old and new rest poses: `F^-1 * (R0 * local * R0^-1) * F`
+/// (the plugin's target `T0 * R0^-1 * F`).
+fn carried_pose(old: &ToothFrame, new: &ToothFrame, local: &Pose) -> Pose {
+    let (old, new) = (teeth::rest_pose(old), teeth::rest_pose(new));
     let world = old.compose(local).compose(&old.inverse());
-    new.inverse().compose(&world).compose(new)
+    rotation::canonical_pose(&new.inverse().compose(&world).compose(&new))
 }
 
 /// The steps run so far and how many are planned (for the progress bar).
@@ -236,8 +243,10 @@ pub(super) fn run_teeth(
         .map(|t| asked_teeth(t, params.arch))
         .transpose()?;
 
-    // how each arch is built
+    // how each arch is built; an arch with a scan that cannot be built is
+    // named in the output with the reason, never skipped in silence
     let mut modes: BTreeMap<Arch, Mode> = BTreeMap::new();
+    let mut not_built: BTreeMap<Arch, String> = BTreeMap::new();
     for arch in params.arch.arches() {
         let Some(labelled) = labelled_teeth(state, &data, arch)? else {
             let named = asked
@@ -245,6 +254,11 @@ pub(super) fn run_teeth(
                 .is_some_and(|a| a.iter().any(|f| Arch::of(*f) == arch));
             if params.arch != Which::All || named {
                 return Err(messages::not_segmented(arch));
+            }
+            if state.case.scan(arch.role()).is_some() {
+                let word = messages::arch_word(arch);
+                let reason = messages::tr("aligners-err-arch-not-segmented", &[("arch", &word)]);
+                not_built.insert(arch, reason);
             }
             continue;
         };
@@ -331,7 +345,7 @@ pub(super) fn run_teeth(
         }
         let mut gone = Vec::new();
         for &f in todo {
-            let Some(new) = d.tooth_frames.get(&f).map(|fr| fr.pose) else {
+            let Some(new) = d.tooth_frames.get(&f).copied() else {
                 // no labels left: a missing tooth
                 if remove_tooth(&mut d, f) {
                     gone.push(f.get());
@@ -344,7 +358,7 @@ pub(super) fn run_teeth(
             } else if let (Some(old), Some(p)) =
                 (before.tooth_frames.get(&f), d.setup.poses.get(&f).copied())
             {
-                d.setup.poses.insert(f, carried_pose(&old.pose, &new, &p));
+                d.setup.poses.insert(f, carried_pose(old, &new, &p));
             }
         }
         current.set_module(MODULE_ID, ModuleState::new(d));
@@ -399,11 +413,18 @@ pub(super) fn run_teeth(
         report.insert(
             arch_name(arch).to_owned(),
             json!({
+                "built": true,
                 "mode": if matches!(mode, Mode::All) { "all" } else { "some" },
                 "teeth": teeth.len(),
                 "rebuilt": rebuilt,
                 "gingiva": d.gingiva.contains_key(&arch.role()),
             }),
+        );
+    }
+    for (arch, reason) in not_built {
+        report.insert(
+            arch_name(arch).to_owned(),
+            json!({ "built": false, "reason": reason }),
         );
     }
     let any_tooth = !d.tooth_frames.is_empty();
@@ -485,9 +506,47 @@ mod tests {
         assert_eq!(aligners_data(&s).unwrap(), before);
     }
 
-    /// `p` moved by the frame `frame` into the world.
-    fn world(frame: &Pose, p: &Pose) -> Pose {
-        frame.compose(p).compose(&frame.inverse())
+    #[test]
+    fn every_arch_is_built_and_an_arch_that_cannot_be_is_named() {
+        let both = super::super::occlusion::tests::two_demo_arches();
+        let (next, out) = exec(BUILD, &both, Value::Null).unwrap();
+        let d = aligners_data(&next).unwrap();
+        for (arch, role) in [("upper", ScanRole::Upper), ("lower", ScanRole::Lower)] {
+            assert_eq!(out["arches"][arch]["built"], true, "{arch}");
+            assert!(
+                d.crowns
+                    .keys()
+                    .any(|f| f.is_upper() == (role == ScanRole::Upper))
+            );
+            assert!(d.gingiva.contains_key(&role), "{arch}");
+            assert!(!d.teeth_out_of_date(role), "{arch}");
+        }
+        // the upper arch without its colours: the lower one is built, the
+        // upper one is named with the reason
+        let mut s = both.clone();
+        let mut d = aligners_data(&s).unwrap();
+        d.labels.remove(&ScanRole::Upper);
+        s.set_module(MODULE_ID, ModuleState::new(d));
+        let (next, out) = exec(BUILD, &s, Value::Null).unwrap();
+        assert_eq!(out["arches"]["lower"]["built"], true);
+        assert_eq!(out["arches"]["upper"]["built"], false);
+        let reason = out["arches"]["upper"]["reason"].as_str().unwrap();
+        assert!(reason.contains("upper"), "{reason}");
+        let d = aligners_data(&next).unwrap();
+        assert!(d.crowns.keys().all(|f| !f.is_upper()));
+        // an arch with no scan is not an arch to build
+        let lower = exec("aligners.demo", &CaseState::default(), Value::Null)
+            .unwrap()
+            .0;
+        let (_, out) = exec(BUILD, &lower, Value::Null).unwrap();
+        assert!(out["arches"].get("upper").is_none(), "{out}");
+    }
+
+    /// `p` moved by the rest pose of `frame` into the world (the plan's
+    /// convention: centre of resistance origin).
+    fn world(frame: &ToothFrame, p: &Pose) -> Pose {
+        let rest = teeth::rest_pose(frame);
+        rest.compose(p).compose(&rest.inverse())
     }
 
     #[test]
@@ -507,7 +566,7 @@ mod tests {
             let fr = d.tooth_frames.get_mut(&fdi(f)).unwrap();
             fr.pose = nudge.compose(&fr.pose);
         }
-        let old_36 = d.tooth_frames[&fdi(36)].pose;
+        let old_36 = d.tooth_frames[&fdi(36)];
         let moved = Pose::new(
             DVec3::new(0.5, 0.1, 0.0),
             glam::DQuat::from_rotation_x(0.05),
@@ -534,8 +593,8 @@ mod tests {
             }
         }
         // the rebuilt tooth is measured again and keeps its move in the world
-        let new_36 = d.tooth_frames[&fdi(36)].pose;
-        assert!(!new_36.approx_eq(&old_36, 1e-3, 1e-3));
+        let new_36 = d.tooth_frames[&fdi(36)];
+        assert!(!new_36.pose.approx_eq(&old_36.pose, 1e-3, 1e-3));
         let p = d.setup.poses[&fdi(36)];
         assert!(
             !p.approx_eq(&moved, 1e-3, 1e-3),
@@ -556,10 +615,20 @@ mod tests {
 
     #[test]
     fn carrying_a_pose_keeps_the_move_in_the_world() {
-        let old = Pose::new(DVec3::new(1.0, 2.0, 3.0), glam::DQuat::from_rotation_y(0.4));
-        let new = Pose::new(
+        let frame = |t: DVec3, q: glam::DQuat, cres: DVec3| ToothFrame {
+            pose: Pose::new(t, q),
+            center_of_resistance: cres,
+        };
+        // the centre of resistance far from the frame origin: the pivot matters
+        let old = frame(
+            DVec3::new(1.0, 2.0, 3.0),
+            glam::DQuat::from_rotation_y(0.4),
+            DVec3::new(0.2, -0.1, -9.0),
+        );
+        let new = frame(
             DVec3::new(-1.0, 0.5, 2.0),
             glam::DQuat::from_rotation_z(-0.7),
+            DVec3::new(-0.3, 0.4, -8.5),
         );
         let p = Pose::new(
             DVec3::new(0.3, -0.2, 0.1),
@@ -568,6 +637,14 @@ mod tests {
         let q = carried_pose(&old, &new, &p);
         assert!(world(&new, &q).approx_eq(&world(&old, &p), 1e-12, 1e-12));
         assert!(carried_pose(&old, &old, &p).approx_eq(&p, 1e-12, 1e-12));
+        // turning about the frame origin instead would move the tooth elsewhere
+        let about_origin =
+            |fr: &ToothFrame, l: &Pose| fr.pose.compose(l).compose(&fr.pose.inverse());
+        assert!(about_origin(&old, &p).t.distance(world(&old, &p).t) > 1.0);
+        // a stored quaternion with w < 0 comes back with w >= 0
+        let flipped = Pose { t: p.t, q: -p.q };
+        let r = carried_pose(&old, &new, &flipped);
+        assert!(r.q.w >= 0.0 && r.approx_eq(&q, 1e-12, 1e-12));
     }
 
     #[test]

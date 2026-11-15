@@ -87,8 +87,8 @@ pub struct Params {
     pub start_date: Option<String>,
     /// Days of wear of each aligner (default: the evidence value, 14).
     pub interval_days: Option<u32>,
-    /// Interval policy of the calendar.
-    pub policy: Policy,
+    /// Interval policy of the calendar (default fixed).
+    pub policy: Option<Policy>,
     /// Language of the text of the calendar.
     pub lang: Lang,
     /// Name of the case in the calendar events.
@@ -102,7 +102,7 @@ impl Default for Params {
             dir: String::new(),
             start_date: None,
             interval_days: None,
-            policy: cal.policy,
+            policy: None,
             lang: cal.lang,
             title: "aligners".to_owned(),
         }
@@ -134,16 +134,21 @@ pub struct ArchSeries<'a> {
 /// The first vertices of a gingiva mesh are the scan vertices, in the same
 /// order (the membrane ones moved under the crowns); the vertices of the
 /// margin cut follow. A gingiva vertex of the scan moves by the displacement
-/// of its gingiva vertex.
+/// of its gingiva vertex. The gingiva is built on the scan as it was read: a
+/// scan closed with a base has the points of its base after those, and they
+/// stay where they are.
 #[derive(Debug, Clone)]
 pub struct GumDeform {
     rest: Vec<DVec3>,
     prep: gingiva::DeformPrep,
+    /// The points of the scan the gingiva was built on.
+    scan: usize,
 }
 
 impl GumDeform {
     /// The deformation of the gingiva mesh `gum` (`AlignersState::gingiva`,
-    /// case coordinates) of a scan with `scan_vertices` vertices.
+    /// case coordinates) of a scan with `scan_vertices` vertices as it was
+    /// read (without the base of a scan closed with one).
     pub fn new(
         gum: &TriMesh,
         scan_vertices: usize,
@@ -167,6 +172,7 @@ impl GumDeform {
         Ok(Self {
             prep: gingiva::deform_prep(&w),
             rest: g.vertices,
+            scan: scan_vertices,
         })
     }
 
@@ -293,8 +299,9 @@ pub fn stage_deltas(series: &ArchSeries<'_>, stages: &[Stage], k: u32) -> BTreeM
         .collect()
 }
 
-/// The gingiva follows the teeth: every vertex labelled `0` moves by the
-/// displacement of its vertex in `gum`; `positions` already carry the teeth.
+/// The gingiva follows the teeth: every vertex of the scan labelled `0`
+/// moves by the displacement of its vertex in `gum` (the base of a scan
+/// closed with one stays); `positions` already carry the teeth.
 fn deform_gingiva(
     positions: &mut [Vec3],
     labels: &[u16],
@@ -305,7 +312,8 @@ fn deform_gingiva(
         return;
     }
     let disp = gum.displacements(deltas);
-    for ((p, &l), d) in positions.iter_mut().zip(labels).zip(&disp) {
+    let scanned = positions.len().min(gum.scan);
+    for ((p, &l), d) in positions[..scanned].iter_mut().zip(labels).zip(&disp) {
         if l == 0 && *d != DVec3::ZERO {
             *p = (p.as_dvec3() + *d).as_vec3();
         }
@@ -419,6 +427,21 @@ pub fn stages_csv(input: &Input<'_>, calendars: &BTreeMap<Arch, Calendar>) -> St
     out
 }
 
+/// The first day of wear of every aligner (`(arch, aligner)`, passive ones
+/// included) in the calendars of `params`: the date of the stamp when it
+/// carries the start of the aligner (`case_stamp.day_of`). Empty when there
+/// is no calendar.
+pub fn start_dates(input: &Input<'_>, params: &Params) -> BTreeMap<(Arch, u32), schedule::Date> {
+    plan_calendars(input, params, &BTreeMap::new())
+        .map(|plan| {
+            plan.calendars
+                .iter()
+                .flat_map(|(a, c)| c.rows.iter().map(move |r| ((*a, r.aligner), r.start)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The series of each arch and their calendars.
 struct Plan {
     /// Active aligners of each arch with any.
@@ -460,7 +483,7 @@ fn plan_calendars(
         interval_days: params
             .interval_days
             .unwrap_or_else(|| schedule::Params::default().interval_days),
-        policy: params.policy,
+        policy: params.policy.unwrap_or_default(),
         lang: params.lang,
         ..schedule::Params::default()
     };
@@ -501,15 +524,20 @@ fn check_input(input: &Input<'_>, dir: &str) -> Result<(), ExportError> {
     Ok(())
 }
 
-/// Exports the stages: STL files, `stages.csv` and `visits.ics`.
-pub fn run(input: &Input<'_>, params: &Params) -> Result<Report, ExportError> {
+/// Exports the stages: STL files, `stages.csv` and `visits.ics`, the
+/// attachments of each arch (teeth) bonded before its first aligner.
+pub fn run(
+    input: &Input<'_>,
+    params: &Params,
+    attachments: &BTreeMap<Arch, Vec<String>>,
+) -> Result<Report, ExportError> {
     check_input(input, &params.dir)?;
     let dir = PathBuf::from(&params.dir);
     let Plan {
         active,
         total,
         calendars,
-    } = plan_calendars(input, params, &BTreeMap::new())?;
+    } = plan_calendars(input, params, attachments)?;
 
     std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
     // the models: (arch index, stage)
@@ -739,7 +767,7 @@ mod tests {
             interval_days: Some(10),
             ..Params::default()
         };
-        let report = run(&input, &params).unwrap();
+        let report = run(&input, &params, &BTreeMap::new()).unwrap();
         assert_eq!(report.total_aligners, 3);
         assert_eq!(report.start, "2026-02-02");
         assert_eq!(report.end, "2026-03-04");
@@ -800,7 +828,7 @@ mod tests {
             stages: &stages,
         };
         assert!(matches!(
-            run(&input, &Params::default()),
+            run(&input, &Params::default(), &BTreeMap::new()),
             Err(ExportError::NoDir)
         ));
         let dir = temp_dir("err");
@@ -813,16 +841,22 @@ mod tests {
             arches: input.arches.clone(),
             stages: &none,
         };
-        assert!(matches!(run(&empty, &params), Err(ExportError::NoStages)));
+        assert!(matches!(
+            run(&empty, &params, &BTreeMap::new()),
+            Err(ExportError::NoStages)
+        ));
         let bad = Params {
             start_date: Some("soon".into()),
             ..params.clone()
         };
-        assert!(matches!(run(&input, &bad), Err(ExportError::Schedule(_))));
+        assert!(matches!(
+            run(&input, &bad, &BTreeMap::new()),
+            Err(ExportError::Schedule(_))
+        ));
         let short = &labels[..labels.len() - 1];
         input.arches[0].labels = short;
         assert!(matches!(
-            run(&input, &params),
+            run(&input, &params, &BTreeMap::new()),
             Err(ExportError::Labels { .. })
         ));
         assert!(!dir.exists(), "nothing is created when the input is wrong");

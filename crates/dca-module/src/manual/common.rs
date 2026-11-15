@@ -92,13 +92,18 @@ pub(crate) fn pick_arch(
     }
 }
 
-/// The scan of an arch and its labels (all gingiva when the arch is not
-/// segmented yet).
+/// The scan of an arch as it was read (the open part of a scan closed with
+/// a base, `crate::open_scan`) and its labels (all gingiva when the arch is
+/// not segmented yet). A point picked on the closed solid of the case is
+/// the same point here (the scan comes first); the base is not here.
 pub(crate) struct ArchLabels {
     pub scan: Arc<TriMesh>,
     pub labels: Vec<u16>,
     /// `true` when the arch already had a labels blob.
     pub had_labels: bool,
+    /// The scan of the case (the closed solid of a scan closed with a base),
+    /// which a labels blob is stored with ([`store_labels`]).
+    pub closed: Arc<TriMesh>,
 }
 
 pub(crate) fn arch_labels(
@@ -111,33 +116,36 @@ pub(crate) fn arch_labels(
         .case
         .scan(role)
         .ok_or_else(|| invalid(format!("the case has no {} scan", arch_name(arch))))?;
-    let mesh = Arc::clone(state.blobs.require(&scan.mesh)?);
+    let closed = Arc::clone(state.blobs.require(&scan.mesh)?);
+    let open = crate::open_scan::open_part(data, &scan.mesh, &closed)?;
     match data.labels.get(&role) {
         Some(r) => {
             let labelled = state.blobs.require(r)?;
             let labels = labelled
                 .vertex_labels
-                .clone()
+                .as_ref()
                 .ok_or_else(|| messages::labels_missing(arch))?;
-            if labels.len() != mesh.vertex_count() {
+            if labels.len() != closed.vertex_count() {
                 return Err(messages::labels_mismatch(
                     arch,
                     labels.len(),
-                    mesh.vertex_count(),
+                    closed.vertex_count(),
                 ));
             }
             Ok(ArchLabels {
-                scan: mesh,
-                labels,
+                labels: crate::open_scan::open_labels(labels, &open).to_vec(),
+                scan: open,
                 had_labels: true,
+                closed,
             })
         }
         None => {
-            let n = mesh.vertex_count();
+            let n = open.vertex_count();
             Ok(ArchLabels {
-                scan: mesh,
+                scan: open,
                 labels: vec![0; n],
                 had_labels: false,
+                closed,
             })
         }
     }
@@ -149,19 +157,22 @@ impl ArchLabels {
     }
 }
 
-/// Stores `labels` as the labels blob of the arch in `next`; the replaced
-/// blob goes to `stale`. The doubts of the check of the separated teeth and
-/// the result of the last separation on the arch go: the colours were
-/// corrected by hand (the plugin's `segmentation_doubts` are none once the
-/// step was done by hand).
+/// Stores `labels` as the labels blob of the arch in `next`, with `scan`,
+/// the scan of the case; the replaced blob goes to `stale`. Labels of the
+/// scan as it was read get `0` (gingiva) on the base of a scan closed with
+/// one. The doubts of the check of the separated teeth and the result of
+/// the last separation on the arch go: the colours were corrected by hand
+/// (the plugin's `segmentation_doubts` are none once the step was done by
+/// hand).
 pub(crate) fn store_labels(
     next: &mut CaseState,
     data: &mut AlignersState,
     stale: &mut Vec<BlobRef>,
     arch: Arch,
     scan: &TriMesh,
-    labels: Vec<u16>,
+    mut labels: Vec<u16>,
 ) -> BlobRef {
+    labels.resize(scan.vertex_count(), 0);
     let mut labelled = scan.clone();
     labelled.vertex_labels = Some(labels);
     labelled.face_labels = None;
@@ -209,6 +220,7 @@ pub(crate) fn arch_to_case(
             arch,
             vertices: case_vertices,
             seeds: &data.seeds,
+            occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
         },
         &frame::Params::default(),
     )

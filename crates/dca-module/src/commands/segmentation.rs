@@ -236,18 +236,21 @@ fn run_automatic(
             .case
             .scan(arch.role())
             .ok_or_else(|| crate::commands::messages::scan_missing(arch))?;
-        let mesh = state.blobs.require(&scan.mesh)?;
+        // the scan as it was read: its open border is gingiva (the border
+        // constraint of the separation)
+        let mesh = crate::open_scan::open_scan(state, &data, &scan.mesh)?;
         let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let framed = frame::run_from_seeds(
             &frame::Input {
                 arch,
                 vertices: &case_vertices,
                 seeds: &data.seeds,
+                occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
             },
             &frame::Params::default(),
         )
         .map_err(|e| crate::commands::messages::frame_error(arch, &e))?;
-        prepared.push((arch, framed, case_vertices));
+        prepared.push((arch, framed, case_vertices, mesh));
     }
 
     let fraction = super::auto::step_fraction(ctx);
@@ -257,7 +260,7 @@ fn run_automatic(
     let mut invalidated: Vec<&'static str> = Vec::new();
     let mut teeth = 0;
     let mut report = Map::new();
-    for (k, (arch, framed, case_vertices)) in prepared.into_iter().enumerate() {
+    for (k, (arch, framed, case_vertices, mesh)) in prepared.into_iter().enumerate() {
         ctx.check_cancelled()?;
         let t_arch = Instant::now();
         let role = arch.role();
@@ -265,7 +268,7 @@ fn run_automatic(
             .case
             .scan(role)
             .ok_or_else(|| crate::commands::messages::scan_missing(arch))?;
-        let mesh = state.blobs.require(&scan.mesh)?;
+        let closed = state.blobs.require(&scan.mesh)?;
         // the arch frame its seeds define (case_teeth.segment_iter works in arch coordinates)
         let to_arch = frame::rigid_inverse(&framed.arch_frame.matrix());
         let vertices: Vec<_> = case_vertices
@@ -301,9 +304,12 @@ fn run_automatic(
 
         // what the old labels gave goes (3D teeth, measures, plan, doubts)
         invalidated.extend(data.clear_label_dependents(role));
-        // the labels blob: the scan mesh with one FDI per vertex
-        let mut labelled = (**mesh).clone();
-        labelled.vertex_labels = Some(out.labels.clone());
+        // the labels blob: the scan of the case with one FDI per vertex, the
+        // base of a scan closed with one gingiva
+        let mut labelled = (**closed).clone();
+        let mut labels = out.labels.clone();
+        labels.resize(closed.vertex_count(), 0);
+        labelled.vertex_labels = Some(labels);
         labelled.face_labels = None;
         let labels_ref = next.blobs.insert(labelled);
         data.labels.insert(role, labels_ref);

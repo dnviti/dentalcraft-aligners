@@ -100,9 +100,16 @@ pub(crate) struct ArchPrint {
     to_arch: glam::DMat4,
     crowns: BTreeMap<Fdi, TriMesh>,
     rest: BTreeMap<Fdi, Pose>,
+    /// The vertices of every closed tooth below its gingival margin
+    /// (`shell::below_margin`), for the teeth whose scanned part the case
+    /// keeps (`crown_scanned`).
+    below: BTreeMap<Fdi, Vec<u32>>,
     gum: gingiva::GumSurface,
     prep: gingiva::DeformPrep,
     cover: Vec<bool>,
+    /// The teeth the aligner covers (`aligner_teeth`): only their contacts
+    /// are bridged and filled, only they are trimmed and stamped.
+    pub covered: std::collections::BTreeSet<Fdi>,
 }
 
 impl ArchPrint {
@@ -119,22 +126,39 @@ impl ArchPrint {
         };
         let mut crowns = BTreeMap::new();
         let mut rest = BTreeMap::new();
+        let mut below = BTreeMap::new();
         for (&f, r) in data.crowns.iter().filter(|(f, _)| Arch::of(**f) == arch) {
-            crowns.insert(f, state.blobs.require(r)?.as_ref().clone());
+            let mesh = state.blobs.require(r)?.as_ref().clone();
             if let Some(fr) = data.tooth_frames.get(&f) {
-                rest.insert(f, teeth::rest_pose(fr));
+                let pose = teeth::rest_pose(fr);
+                if let Some(&n) = data.crown_scanned.get(r) {
+                    let to_local = pose.inverse().to_mat4();
+                    let local: Vec<glam::DVec3> = mesh
+                        .positions
+                        .iter()
+                        .map(|p| to_local.transform_point3(p.as_dvec3()))
+                        .collect();
+                    below.insert(f, shell::below_margin(&local, n as usize));
+                }
+                rest.insert(f, pose);
             }
+            crowns.insert(f, mesh);
         }
         if crowns.is_empty() {
             return Ok(None);
         }
+        // the frame of the teeth stage, on the scan as it was read
         let mesh = state.blobs.require(&scan.mesh)?;
-        let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+        let case_vertices: Vec<_> = crate::open_scan::open_points(data, &scan.mesh, mesh)
+            .iter()
+            .map(|p| p.as_dvec3())
+            .collect();
         let framed = frame::run(
             &frame::Input {
                 arch,
                 vertices: &case_vertices,
                 seeds: &data.seeds,
+                occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
             },
             &frame::Params::default(),
         )
@@ -162,9 +186,11 @@ impl ArchPrint {
             to_arch,
             crowns,
             rest,
+            below,
             gum,
             prep,
             cover,
+            covered: data.aligner_teeth(role),
         }))
     }
 
@@ -194,11 +220,23 @@ impl ArchPrint {
             moved.iter().map(|p| p.as_vec3()).collect(),
             self.gum.tris.clone(),
         );
+        let stumps = self
+            .crowns
+            .keys()
+            .map(|f| match (self.rest.get(f), self.below.get(f)) {
+                (Some(rest), Some(below)) => shell::Stump {
+                    frame: deltas.get(f).copied().unwrap_or(glam::DMat4::IDENTITY) * rest.to_mat4(),
+                    below: below.clone(),
+                },
+                _ => shell::Stump::default(),
+            })
+            .collect();
         StageGeometry {
             fdis: self.crowns.keys().copied().collect(),
             teeth,
             gum,
             deltas,
+            stumps,
         }
     }
 
@@ -210,6 +248,8 @@ impl ArchPrint {
             gingiva: &g.gum,
             cover: &self.cover,
             fdis: &g.fdis,
+            covered: Some(&self.covered),
+            stumps: &g.stumps,
         }
     }
 
@@ -238,6 +278,9 @@ pub(crate) struct StageGeometry {
     pub gum: TriMesh,
     /// The rigid transform of every moved tooth (case coordinates).
     pub deltas: BTreeMap<Fdi, glam::DMat4>,
+    /// The part of every tooth under its gingival margin (`shell::Stump`),
+    /// in the order of `fdis`.
+    pub stumps: Vec<shell::Stump>,
 }
 
 /// A shell error as a command error.

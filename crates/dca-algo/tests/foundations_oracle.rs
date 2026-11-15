@@ -12,7 +12,7 @@ use dc_case::{Fdi, Pose};
 use dca_algo::anatomy::{self, Arch, Surface};
 use dca_algo::archform::{self, ArchCurve, ArchModel};
 use dca_algo::demo::{self, Draws, Severity};
-use dca_algo::{evidence, frame};
+use dca_algo::{evidence, frame, rotation};
 use dca_model::Seed;
 use glam::{DMat3, DMat4, DVec2, DVec3};
 use serde_json::Value;
@@ -481,13 +481,14 @@ fn frame_helpers_match_the_plugin() {
     assert!(m.abs_diff_eq(mat3(&r["matrix"]), 1e-12));
     let rv = &f["rotvec"];
     close_all(
-        &frame::matrix_to_rotvec(&mat3(&rv["matrix"])).to_array(),
+        &rotation::matrix_to_rotvec(&mat3(&rv["matrix"])).to_array(),
         &nums(&rv["vec"]),
         1e-9,
         "rotvec",
     );
     close_all(
-        &frame::matrix_to_rotvec(&frame::rot_axis_angle(DVec3::Z, std::f64::consts::PI)).to_array(),
+        &rotation::matrix_to_rotvec(&frame::rot_axis_angle(DVec3::Z, std::f64::consts::PI))
+            .to_array(),
         &nums(&rv["vec_pi"]),
         1e-9,
         "rotvec pi",

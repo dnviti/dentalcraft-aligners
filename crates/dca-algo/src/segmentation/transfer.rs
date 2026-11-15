@@ -21,7 +21,7 @@ const MARGIN_MM: f64 = 0.01;
 
 /// Closest point of the triangle `(a, b, c)` to `p` (Ericson 5.1.5), with
 /// the operations and the order of `gpu_query._closest_tri`.
-fn closest_tri(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> DVec3 {
+pub(crate) fn closest_tri(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> DVec3 {
     let (abx, aby, abz) = (b.x - a.x, b.y - a.y, b.z - a.z);
     let (acx, acy, acz) = (c.x - a.x, c.y - a.y, c.z - a.z);
     let (apx, apy, apz) = (p.x - a.x, p.y - a.y, p.z - a.z);
@@ -99,7 +99,7 @@ fn seg_closest(p: DVec3, a: DVec3, b: DVec3) -> (DVec3, f64) {
 }
 
 /// Squared distance in the order of `gpu_query._d2`.
-fn d2(a: DVec3, b: DVec3) -> f64 {
+pub(crate) fn d2(a: DVec3, b: DVec3) -> f64 {
     let e = a - b;
     e.x * e.x + e.y * e.y + e.z * e.z
 }

@@ -38,7 +38,7 @@ pub(crate) use graph::face_graph;
 mod mesh;
 mod refine;
 mod solve;
-mod transfer;
+pub(crate) mod transfer;
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;

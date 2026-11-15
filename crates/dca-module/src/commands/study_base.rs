@@ -5,16 +5,19 @@
 //!   a scan and tooth labels (in occlusion: after a bite registration or
 //!   the virtual bite). Its parameters start from the case settings
 //!   (`Settings::study_base`); any [`study_base::Params`] field given
-//!   overrides them. With `dir` it writes `study-model-upper.stl` and
+//!   overrides them. The models built are kept in the case
+//!   (`AlignersState::study_models`, in place of the earlier ones of their
+//!   arch, one undoable change), so the 3D view shows them and the project
+//!   saves them. With `dir` it also writes `study-model-upper.stl` and
 //!   `study-model-lower.stl` there. It returns the report (frame, planes,
-//!   outline, design and measured angles, heights, warnings) and does not
-//!   change the case.
+//!   outline, design and measured angles, heights, warnings) and the arches
+//!   kept.
 //! * `aligners.settings.study-models` (not a menu leaf) changes the study
 //!   base settings of the case: the fields given replace the current ones.
 
 use std::path::PathBuf;
 
-use dc_case::{CaseState, ModuleState};
+use dc_case::{BlobRef, CaseState, ModuleState};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::io::{MeshFormat, write};
 use dc_module_api::{CommandOutput, CommandSpec};
@@ -175,19 +178,22 @@ fn run_study_models(
             }
             continue;
         };
-        let mesh = state.blobs.require(&scan.mesh)?.clone();
-        let labels = state
+        // the scan as it was read (a study model gets a base of its own)
+        let mesh = crate::open_scan::open_scan(state, data, &scan.mesh)?;
+        let mut labels = state
             .blobs
             .require(lab)?
             .vertex_labels
             .clone()
             .ok_or_else(super::messages::tooth_labels_missing)?;
+        labels.truncate(mesh.vertex_count());
         let v: Vec<_> = mesh.positions.iter().map(|q| q.as_dvec3()).collect();
         let framed = frame::run(
             &frame::Input {
                 arch,
                 vertices: &v,
                 seeds: &data.seeds,
+                occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
             },
             &frame::Params::default(),
         )
@@ -232,12 +238,28 @@ fn run_study_models(
         }
     }
     let report = serde_json::to_value(&out.report).map_err(failed)?;
+    // the models go in the case, in place of the earlier ones of their arch
+    let mut next = state.clone();
+    let mut data = data.clone();
+    let mut stale: Vec<BlobRef> = Vec::new();
+    let mut kept = Vec::new();
+    for (arch, mesh) in [(Arch::Upper, out.upper_base), (Arch::Lower, out.lower_base)] {
+        let Some(m) = mesh else { continue };
+        let r = next.blobs.insert(m);
+        if let Some(old) = data.study_models.insert(arch.role(), r) {
+            stale.push(old);
+        }
+        kept.push(if arch.is_upper() { "upper" } else { "lower" });
+    }
+    next.set_module(MODULE_ID, ModuleState::new(data));
+    crate::manual::common::finish_blobs(&mut next, &stale);
     Ok((
-        state.clone(),
+        next,
         json!({
             "params": serde_json::to_value(&p).map_err(failed)?,
             "report": report,
             "files": files,
+            "kept": kept,
         }),
     ))
 }
@@ -373,6 +395,53 @@ mod tests {
         ));
     }
 
+    /// The study models built are kept in the case (a coarse voxel keeps
+    /// the test short): the scene lists them on their arch, built again they
+    /// replace the earlier ones, and undo (the state before) has none.
+    #[test]
+    fn the_models_built_are_kept_in_the_case_and_in_the_scene() {
+        use dc_case::ScanRole;
+        use dc_module_api::Module;
+        let state = demo_pair();
+        let state = run("aligners.occlusion.virtual-bite", &state, Value::Null)
+            .unwrap()
+            .0;
+        let coarse = json!({ "voxel_mm": 1.0, "tolerance_mm": 0.1 });
+        let (next, out) = run(STUDY_MODELS_ID, &state, coarse).unwrap();
+        assert_eq!(out["kept"], json!(["upper", "lower"]));
+        let data = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert_eq!(data.study_models.len(), 2);
+        for b in data.study_models.values() {
+            assert!(next.blobs.get(b).is_some_and(|m| m.face_count() > 100));
+        }
+        let scene = crate::AlignersModule::new().scene_at(&next, None);
+        let mut arches: Vec<_> = scene
+            .iter()
+            .filter(|e| crate::is_study_model(data, e))
+            .filter_map(|e| e.arch)
+            .collect();
+        arches.sort();
+        assert_eq!(arches, [ScanRole::Upper, ScanRole::Lower]);
+        // the state before has none
+        let before = state.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert!(before.study_models.is_empty());
+        // the upper arch alone again: its model is replaced, the lower stays
+        let one = json!({
+            "arch": "upper", "style": "abo", "voxel_mm": 1.0, "tolerance_mm": 0.1
+        });
+        let (again, _) = run(STUDY_MODELS_ID, &next, one).unwrap();
+        let a = again.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert_ne!(
+            a.study_models[&ScanRole::Upper],
+            data.study_models[&ScanRole::Upper]
+        );
+        assert_eq!(
+            a.study_models[&ScanRole::Lower],
+            data.study_models[&ScanRole::Lower]
+        );
+        assert!(!again.blobs.contains(&data.study_models[&ScanRole::Upper]));
+    }
+
     /// Writes occlusal and frontal renders of the bases to `$DC_STUDY_PNG_DIR`
     /// when it is set (to look at them).
     fn render(tag: &str, state: &CaseState, report: &Value) {
@@ -438,7 +507,13 @@ mod tests {
             });
         let params = json!({ "style": style, "dir": dir.display().to_string() });
         let (next, out) = run(STUDY_MODELS_ID, state, params.clone()).unwrap();
-        assert_eq!(next.referenced_blobs(), state.referenced_blobs());
+        // the models built are kept in the case, one per arch built
+        let kept = &next
+            .module_data::<AlignersState>(MODULE_ID)
+            .unwrap()
+            .study_models;
+        assert_eq!(kept.len(), out["kept"].as_array().unwrap().len());
+        assert!(kept.values().all(|b| next.blobs.contains(b)));
         let r = &out["report"];
         eprintln!("{tag}: {}", serde_json::to_string_pretty(r).unwrap());
         render(tag, state, r);

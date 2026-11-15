@@ -14,6 +14,7 @@ fn demo_arch(arch: Arch) -> (TriMesh, Vec<u16>, ArchFrame) {
             arch,
             vertices: &v,
             seeds: &d.seeds,
+            occlusal_flipped: false,
         },
         &frame::Params::default(),
     )

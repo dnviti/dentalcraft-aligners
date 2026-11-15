@@ -26,7 +26,7 @@ from . import frame as fr
 from . import mesh, plugin, settings
 
 ORDER = ["archform", "worldframe", "autoseed", "segmentation", "teeth", "diagnosis", "setup", "staging",
-         "schedule"]
+         "schedule", "classify"]
 START_DATE = "2026-01-05"       # fixed: schedule.build would use today's date otherwise
 
 
@@ -381,9 +381,50 @@ def _data_dict(ctx):
     return {"teeth": t["teeth"], "seq": t["seq"], "V": ctx.V_arch, "T": ctx.T, "lab": t["labels"]}
 
 
+# Hand values the oracle writes with `manual.diagnosis_override` (oa.diagnosis_edit): each scenario is
+# a sequence of calls on the same case.  A value of a step may be the automatic one (a "reset" in
+# the port: the plugin has no other way back to the automatic value).
+EDIT_SCENARIOS = {
+    "crowding": [{"discrepancy": -8.5}],
+    "three_values": [{"little": 12.3, "midline_offset": 3.1, "largest_space": 4.0}],
+    "spacing": [{"discrepancy": 2.0}],
+    "sequence": [{"discrepancy": -9.0, "midline_offset": 4.0}, {"little": 7.5}, "auto:discrepancy",
+                 "auto:little,midline_offset"],
+}
+
+
+def _diagnosis_edits(ctx, res):
+    """The plugin's `diagnosis_override` itself (extracted from manual.py) on the analysis `res`, for
+    each scenario of EDIT_SCENARIOS: per step the values given, those equal to the automatic ones
+    (`reset`), and the diagnosis it leaves."""
+    ns = {"json": json, "case": SimpleNamespace(CaseError=ValueError), "plan_outdated": lambda obj: None,
+          "mark_manual": lambda obj, step: None}
+    plugin.extract("manual", ["DIAG_KEYS", "diagnosis_values", "diagnosis_override"], ns)
+    out = {}
+    for name, steps in EDIT_SCENARIOS.items():
+        obj = SimpleNamespace(oa=SimpleNamespace(analysis_json=json.dumps(res)))
+        auto = ns["diagnosis_values"](obj)
+        rec = []
+        for step in steps:
+            if isinstance(step, str):          # "auto:key,key": those values written as the automatic ones
+                step = {k: auto[k] for k in step.split(":")[1].split(",")}
+            a = ns["diagnosis_override"](obj, **step)
+            rec.append({
+                "values": step,
+                "reset": sorted(k for k, v in step.items() if abs(v - auto[k]) <= 1e-9),
+                "result": {"discrepancy": a["space"]["discrepancy"], "little": a["little"],
+                           "little_category": a["little_category"], "midline_offset": a["midline_offset"],
+                           "largest_space": a["largest_space"], "catcat_items": a["catcat_items"],
+                           "catcat_score": a["catcat_score"], "level": a["level"], "manuale": a["manuale"]},
+            })
+        out[name] = rec
+    return out
+
+
 def stage_diagnosis(ctx, out):
     """Space analysis, Little index, largest space, CAT-CAT items and level: `case_plan.analyze`
-    itself (extracted), on the oracle's teeth."""
+    itself (extracted), on the oracle's teeth.  `edits`: the same analysis with values written by hand,
+    `manual.diagnosis_override` itself (extracted), see EDIT_SCENARIOS."""
     d = _data_dict(ctx)
     ns = _plan_ns(ctx)
     ns["_data"] = lambda obj, s=None: d
@@ -393,7 +434,8 @@ def stage_diagnosis(ctx, out):
     state = {"analysis": res, "obj": obj}
     if out:
         dump(out, "diagnosis.json", {"case": ctx.name, "arch": ctx.arch,
-                                     "inputs": {"teeth": "../teeth/teeth.json"}, "analysis": res})
+                                     "inputs": {"teeth": "../teeth/teeth.json"}, "analysis": res,
+                                     "edits": _diagnosis_edits(ctx, res)})
     return state
 
 
@@ -401,24 +443,37 @@ def stage_diagnosis(ctx, out):
 # setup
 # ---------------------------------------------------------------------------
 
-def stage_setup(ctx, out):
-    """Conservative set-up (setup_conservativo.conservative_setup) with the default scene
-    settings: nothing locked, no tooth out of the aligner, no drawn arch line, no opposing arch.
-    The numerical core of case_plan.run_setup (mirrored; the helper functions are extracted)."""
+# Scene settings of the second set-up of each case (`setup/setup_params.json`): every setup parameter of
+# the page "Posizione finale" (`ui_phases.page_finale`) away from its default, inside its slider range.
+# The midline is BALANCE: with CENTER the plugin (42e6d87) fails on every demo case
+# (`setup_conservativo._targets`: `r["k"]` is a 0-d array, IndexError).
+SETUP_PARAMS = {
+    "cons_align_scope": "PREMOLARS", "cons_line_sigma": 7.0, "cons_normal_tol": 0.05, "cons_rot_tol": 2.0,
+    "cons_post_normal_tol": 0.2, "cons_post_rot_tol": 4.0, "cons_pos_tol": 0.15, "cons_contact_tol": 0.1,
+    "cons_incisor_weight": 6.0, "cons_align_fixed": False, "midline": "BALANCE", "priority": "EXP_IPR_PRO",
+    "expansion_upper": 1.5, "expansion_lower_posterior": 1.0, "expansion_lower_canine": 0.5,
+    "advance_max": 1.5, "retract_max": 1.0, "ipr_zone": "ANTERIOR", "ipr_surface_cap": 0.2,
+    "enamel_fraction": 0.4, "leveling": "FLAT", "vertical_max": 0.8, "cons_level_tol": 0.3,
+    "cons_level_canines": True,
+}
+
+
+def _conservative(ctx, s):
+    """The numerical core of case_plan.run_setup with the scene settings `s` (mirrored; the helper
+    functions are extracted): the plugin's result, its `setup_json`, the config and the rest frames."""
     sc = plugin.load("setup_conservativo")
     d = _data_dict(ctx)
     ns = _plan_ns(ctx)
     plugin.extract("case_plan", ["PRIORITY", "conservative_config", "rest_cusps", "rest_crowns", "_resample"], ns)
     obj = _fake_obj(ctx)
-    cfg = ns["conservative_config"](ctx.s, obj)
+    cfg = ns["conservative_config"](s, obj)
     cusps, crowns = ns["rest_cusps"](d), ns["rest_crowns"](d)
-    t0 = time.time()
     r = sc.conservative_setup(d["teeth"], d["seq"], cusps, cfg, line=None, fixed=[], crowns=crowns, poses={})
     pl = plugin.load("planning")
     residual = {}
     if r["residual"] > 1e-6:
         residual["affollamento"] = round(float(r["residual"]), 2)
-    if r["spacing"] > sc.SPACE_TOL and ctx.s.close_spaces:
+    if r["spacing"] > sc.SPACE_TOL and s.close_spaces:
         residual["spazio"] = round(float(r["spacing"]), 2)
     ipr = [{"a": a, "b": b, "mm": mm, "a_surface": pl.facing_surface(a, b), "b_surface": pl.facing_surface(b, a)}
            for (a, b), mm in sorted(r["ipr"].items())]
@@ -427,19 +482,38 @@ def stage_setup(ctx, out):
                 "gaps_initial": {}, "dz": {}, "log": list(r["log"]), "mode": "ALLINEAMENTO"}
     if len(r["line"]) >= 4:
         out_json["line"] = [[round(float(c), 4) for c in p] for p in ns["_resample"](np.asarray(r["line"]), 96)]
-    targets = r["targets"]
     rest = {f: d["teeth"][f].frame() for f in d["seq"]}
-    state = {"result": r, "setup_json": out_json, "targets": targets, "obj": obj, "config": cfg}
+    return r, out_json, cfg, obj, rest
+
+
+def _setup_dump(ctx, r, out_json, cfg, rest, inputs, seconds):
+    targets = r["targets"]
+    return {
+        "case": ctx.name, "arch": ctx.arch,
+        "inputs": {"teeth": "../teeth/teeth.json", "config": asdict(cfg) if is_dataclass(cfg) else vars(cfg),
+                   "line": None, "fixed": [], "poses": {}, **inputs},
+        "setup": out_json,
+        "targets_delta": {str(f): D for f, D in sorted(targets.items())},
+        "targets_pose": {str(f): targets[f] @ rest[f] for f in sorted(targets)},
+        "rest_frames": {str(f): rest[f] for f in sorted(rest)},
+        "seconds": seconds}
+
+
+def stage_setup(ctx, out):
+    """Conservative set-up (setup_conservativo.conservative_setup) with the default scene
+    settings: nothing locked, no tooth out of the aligner, no drawn arch line, no opposing arch.
+    The numerical core of case_plan.run_setup (mirrored; the helper functions are extracted).
+    With `out`, also `setup_params.json`: the same with the scene settings `SETUP_PARAMS`."""
+    t0 = time.time()
+    r, out_json, cfg, obj, rest = _conservative(ctx, ctx.s)
+    state = {"result": r, "setup_json": out_json, "targets": r["targets"], "obj": obj, "config": cfg}
     if out:
-        dump(out, "setup.json", {
-            "case": ctx.name, "arch": ctx.arch,
-            "inputs": {"teeth": "../teeth/teeth.json", "config": asdict(cfg) if is_dataclass(cfg) else vars(cfg),
-                       "line": None, "fixed": [], "poses": {}},
-            "setup": out_json,
-            "targets_delta": {str(f): D for f, D in sorted(targets.items())},
-            "targets_pose": {str(f): targets[f] @ rest[f] for f in sorted(targets)},
-            "rest_frames": {str(f): rest[f] for f in sorted(rest)},
-            "seconds": round(time.time() - t0, 1)})
+        dump(out, "setup.json", _setup_dump(ctx, r, out_json, cfg, rest, {}, round(time.time() - t0, 1)))
+        t0 = time.time()
+        s = settings.defaults(start_date=START_DATE, **SETUP_PARAMS)
+        r, out_json, cfg, _, rest = _conservative(ctx, s)
+        dump(out, "setup_params.json", _setup_dump(ctx, r, out_json, cfg, rest, {"settings": SETUP_PARAMS},
+                                                   round(time.time() - t0, 1)))
     return state
 
 
@@ -447,10 +521,52 @@ def stage_setup(ctx, out):
 # staging
 # ---------------------------------------------------------------------------
 
+# Scene settings of the second staging of each case (`staging/staging_params.json`): every number and switch of
+# the page "Allineatori" (`ui_phases.page_allineatori`) away from its default, inside its slider range, and a
+# calendar of 10 days per aligner from START_DATE.  The tooth that needs the most aligners in the default plan
+# (the lowest number on a tie) is slowed to SLOW_SPEED (`oa.tooth_speed`: `manual.set_tooth_speed` stores it in
+# `speed_json`, `case_plan._moves` gives it to its ToothMove).  Each explicit pattern is planned, with the FIXED and
+# the ADAPTIVE calendar of its plan.
+STAGING_PARAMS = {
+    "perio": "STAGE1", "step_linear": 0.15, "step_vertical": 0.12, "step_rotation": 1.5, "step_rotation_round": 1.0,
+    "step_angular": 0.8, "max_crown_step": 0.25, "collision": True, "collision_tol": 0.05, "overcorrection": True,
+    "interval_days": 10,
+}
+STAGING_PATTERNS = ("PROPORTIONAL", "MAX_VELOCITY", "SEQUENTIAL_DISTAL", "STRUCTURED")
+SLOW_SPEED = 0.5
+
+
+def _plan_json(plan, moves, cx, p, s, d):
+    """The plan as case_plan.run_staging stores it in plan_json (mirrored)."""
+    return {
+        "pattern": plan["pattern"], "n_stages": plan["n_stages"], "complexity": cx,
+        "q": {str(f): np.round(q, 6).tolist() for f, q in plan["q"].items()},
+        "need": {str(f): int(n) for f, n in plan["need"].items()},
+        "phases": {str(f): [[[int(x) for x in np.flatnonzero(m)], int(sa), int(n)] for m, sa, n in ph]
+                   for f, ph in plan["schedule"].phases.items()},
+        "ipr_stage": [[a, b, int(k)] for (a, b), k in plan["ipr_stage"].items()],
+        "unresolved": [[int(k), a, b, float(pn)] for k, a, b, pn in plan["unresolved"]],
+        "final_overlap": [[a, b, float(v)] for (a, b), v in plan["final_overlap"].items()],
+        "stats": {str(f): {"max_step": np.asarray(v["max_step"]).tolist(), "limits": np.asarray(v["limits"]).tolist(),
+                           "cap": v["cap"], "max_crown_step": v["max_crown_step"],
+                           "moving_stages": v["moving_stages"]} for f, v in plan["stats"].items()},
+        "q_final": {str(f): moves[f].q.tolist() for f in moves},
+        "speed": {str(f): moves[f].speed for f in moves if moves[f].speed != 1.0},
+        "md_sign": {str(f): int(d["teeth"][f].md_sign) for f in moves},
+        "overcorrection": bool(p.overcorrection), "interval_days": int(s.interval_days),
+        "log": plan["log"],
+        "params": {"step_linear": p.step_linear, "step_vertical": p.step_vertical, "step_rotation": p.step_rotation,
+                   "step_rotation_round": p.step_rotation_round, "step_angular": p.step_angular,
+                   "max_crown_step": p.max_crown_step, "perio": p.perio, "collision": p.collision,
+                   "collision_tol": p.collision_tol}}
+
+
 def stage_staging(ctx, out):
     """Staging (staging.plan) of the set-up of the oracle: closed teeth (reconstruct.closed_tooth) in
     their rest frames, default staging parameters and pattern AUTO.  Mirrors case_plan._moves and
-    run_staging (the plan numbers are the same JSON the plugin stores in plan_json)."""
+    run_staging (the plan numbers are the same JSON the plugin stores in plan_json).  With `out`, also
+    `staging_params.json`: the plans with the scene settings STAGING_PARAMS, each pattern of
+    STAGING_PATTERNS and one slowed tooth, with their FIXED and ADAPTIVE calendars."""
     st, rc, pl = plugin.load("staging"), plugin.load("reconstruct"), plugin.load("planning")
     mu = ctx.mu
     d = _data_dict(ctx)
@@ -459,7 +575,7 @@ def stage_staging(ctx, out):
     plugin.extract("case_plan", ["staging_params"], ns)
     E = mu.unique_edges(ctx.T)
     t0 = time.time()
-    moves, closed = {}, {}
+    moves, closed, parts = {}, {}, {}
     for f in d["seq"]:
         t = d["teeth"][f]
         F = t.frame()
@@ -468,7 +584,8 @@ def stage_staging(ctx, out):
         nbr = mu.face_adjacency(Tt, len(loc))
         bfaces = np.nonzero((nbr < 0).any(axis=1))[0]
         q = st.q_from_delta(F, su["targets"].get(f, np.eye(4)))     # run_setup: no target = stays at rest
-        moves[f] = st.ToothMove(f, F, q, loc, Tt, bfaces, int(t.md_sign), q0=None, speed=1.0)
+        parts[f] = (F, q, loc, Tt, bfaces, int(t.md_sign))
+        moves[f] = st.ToothMove(f, F, q.copy(), loc, Tt, bfaces, int(t.md_sign), q0=None, speed=1.0)
         closed[f] = (loc, Tt, info)
     t1 = time.time()
     pairs = pl.adjacent_pairs(d["seq"])
@@ -491,26 +608,8 @@ def stage_staging(ctx, out):
             sys.modules[stub.__name__] = prev
     p = ns["staging_params"](ctx.s)
     plan = st.plan(moves, pairs, ipr, p, cx, None)
-    plan_json = {
-        "pattern": plan["pattern"], "n_stages": plan["n_stages"], "complexity": cx,
-        "q": {str(f): np.round(q, 6).tolist() for f, q in plan["q"].items()},
-        "need": {str(f): int(n) for f, n in plan["need"].items()},
-        "phases": {str(f): [[[int(x) for x in np.flatnonzero(m)], int(sa), int(n)] for m, sa, n in ph]
-                   for f, ph in plan["schedule"].phases.items()},
-        "ipr_stage": [[a, b, int(k)] for (a, b), k in plan["ipr_stage"].items()],
-        "unresolved": [[int(k), a, b, float(pn)] for k, a, b, pn in plan["unresolved"]],
-        "final_overlap": [[a, b, float(v)] for (a, b), v in plan["final_overlap"].items()],
-        "stats": {str(f): {"max_step": np.asarray(v["max_step"]).tolist(), "limits": np.asarray(v["limits"]).tolist(),
-                           "cap": v["cap"], "max_crown_step": v["max_crown_step"],
-                           "moving_stages": v["moving_stages"]} for f, v in plan["stats"].items()},
-        "q_final": {str(f): moves[f].q.tolist() for f in moves},
-        "md_sign": {str(f): int(d["teeth"][f].md_sign) for f in moves},
-        "overcorrection": bool(p.overcorrection), "interval_days": int(ctx.s.interval_days),
-        "log": plan["log"],
-        "params": {"step_linear": p.step_linear, "step_vertical": p.step_vertical, "step_rotation": p.step_rotation,
-                   "step_rotation_round": p.step_rotation_round, "step_angular": p.step_angular,
-                   "max_crown_step": p.max_crown_step, "perio": p.perio, "collision": p.collision,
-                   "collision_tol": p.collision_tol}}
+    plan_json = _plan_json(plan, moves, cx, p, ctx.s, d)
+    plan_json.pop("speed")          # the first fixtures were written without it (no tooth is slowed)
     state = {"plan": plan, "plan_json": plan_json, "moves": moves, "closed": closed, "obj": obj}
     if out:
         os.makedirs(out, exist_ok=True)
@@ -525,6 +624,29 @@ def stage_staging(ctx, out):
         if getattr(ctx.args, "closed_teeth", True):
             for f, (loc, Tt, _) in closed.items():
                 mesh.write_dcm(os.path.join(out, f"closed_{f}.dcm"), loc, Tt)
+        slow = min(plan["need"], key=lambda f: (-int(plan["need"][f]), f))
+        sch = plugin.load("schedule")
+        plans = {}
+        for pattern in STAGING_PATTERNS:
+            s = settings.defaults(start_date=START_DATE, pattern=pattern, **STAGING_PARAMS)
+            ms = {f: st.ToothMove(f, F, q.copy(), loc, Tt, bf, md, q0=None, speed=SLOW_SPEED if f == slow else 1.0)
+                  for f, (F, q, loc, Tt, bf, md) in parts.items()}
+            ps = ns["staging_params"](s)
+            pj = _plan_json(st.plan(ms, pairs, ipr, ps, cx, None), ms, cx, ps, s, d)
+            obj.oa.plan_json = json.dumps(J(pj))
+            cals = {}
+            for policy in ("FIXED", "ADAPTIVE"):
+                sp = types.SimpleNamespace(**{**vars(s), "interval_policy": policy})
+                cals[policy] = {"intervals": sch.stage_intervals(pj, policy, pj["interval_days"]),
+                                "calendar": sch.build(obj, sp)}
+            plans[pattern] = {"plan": pj, "calendar": cals}
+        dump(out, "staging_params.json", {
+            "case": ctx.name, "arch": ctx.arch,
+            "inputs": {"setup": "../setup/setup.json (targets_delta, ipr)",
+                       "closed_teeth": "closed_<fdi>.dcm", "settings": STAGING_PARAMS,
+                       "patterns": list(STAGING_PATTERNS), "speed": {str(slow): SLOW_SPEED},
+                       "start_date": START_DATE},
+            "plans": plans})
     return state
 
 
@@ -563,6 +685,108 @@ def stage_schedule(ctx, out):
             if v:
                 with open(os.path.join(out, f"schedule_{k.lower()}.ics"), "w", newline="") as f:
                     f.write(v)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# classify (clinical review)
+# ---------------------------------------------------------------------------
+
+def _record(it):
+    """A record of `review.build_records` as the plugin stores it in `obj.oa.classes` (review.store): the
+    proposal preset as the decision, to review."""
+    return SimpleNamespace(kind=it["tipo"], subject=it["oggetto"], fdi=it["fdi"], math_value=str(it["calcolo"]),
+                           proposed=str(it["proposta"]), decided_value=str(it["proposta"]), status="PENDING",
+                           decided_at="", note=it["nota"], ai_value="", agreement="NONE")
+
+
+def stage_classify(ctx, out):
+    """Classifications of the clinical review (`oa.classify` without the AI classifier: `review.build_records`
+    on `case_plan.jev_case_data`, mirrored: the oracle's analysis, set-up and plan, the teeth's widths, the
+    movement of every tooth `staging.describe_q(q_from_delta(F, target))` and its aligners `plan["need"]`, the
+    complexity `case_plan.complexity(obj)` without moves, extracted).  Then the calendar `schedule.build` (FIXED)
+    with the records as stored (proposals preset, to review), and with decisions: the first tooth with an
+    attachment set to "nessuno" and the first without one set to "rotazione" (`review.decide` VALUE); and
+    `review.decide_all` (the bulk confirmation of the records without a note to check)."""
+    st, sch, rv = plugin.load("staging"), plugin.load("schedule"), plugin.load("review")
+    d = _data_dict(ctx)
+    analysis = ctx.state("diagnosis")["analysis"]
+    su = ctx.state("setup")
+    stg = ctx.state("staging")
+    plan_json = stg["plan_json"]
+    obj = stg["obj"]
+    obj.oa.setup_json = json.dumps(su["setup_json"])
+    obj.oa.plan_json = json.dumps(plan_json)
+    obj.oa.classes = []
+    ns = _plan_ns(ctx)
+    ns["_data"] = lambda o, s=None: d
+    plugin.extract("case_plan", ["complexity"], ns)
+    stub = types.ModuleType(f"{plugin.PKG}.review")           # no decision of the clinician yet
+    stub.decided = lambda o, key: ""
+    prev = sys.modules.get(stub.__name__)
+    sys.modules[stub.__name__] = stub
+    try:
+        cx = ns["complexity"](obj)
+    finally:
+        sys.modules[stub.__name__] = prev if prev is not None else rv
+    teeth = {}
+    for f in d["seq"]:
+        t = d["teeth"][f]
+        q = st.q_from_delta(t.frame(), su["targets"].get(f, np.eye(4)))
+        desc = st.describe_q(q, t.md_sign)
+        teeth[f] = {"width_md": t.width_md, "width_bl": t.width_bl, "height": t.height, "desc": desc,
+                    "need": int(plan_json["need"].get(str(f), 0))}
+    data = {"arch": ctx.arch, "analysis": analysis, "setup": su["setup_json"], "plan": plan_json, "teeth": teeth,
+            "complexity": cx}
+    recs = rv.build_records(data)
+
+    def calendar(classes):
+        obj.oa.classes = classes
+        sch._BUILT.clear()
+        s = types.SimpleNamespace(**{**vars(ctx.s), "interval_policy": "FIXED"})
+        return sch.build(obj, s)
+
+    stored = [_record(r) for r in recs]
+    cal = calendar(stored)
+    decided = [_record(r) for r in recs]
+    att = [it for it in decided if it.kind == "attachment"]
+    changed = {}
+    first_with = next((it for it in att if it.proposed != "nessuno"), None)
+    first_without = next((it for it in att if it.proposed == "nessuno"), None)
+    for it, value in ((first_with, "nessuno"), (first_without, "rotazione")):
+        if it is not None:
+            rv.decide(it, "VALUE", value)
+            changed[it.subject] = value
+    cal_decided = calendar(decided)
+    bulk = types.SimpleNamespace(oa=types.SimpleNamespace(classes=[_record(r) for r in recs]))
+    confirmed = rv.decide_all(bulk, skip_flagged=True)
+    state = {"records": recs}
+    if out:
+        keys = ("width_md", "width_bl", "height", "need")
+        dump(out, "classify.json", {
+            "case": ctx.name, "arch": ctx.arch,
+            "inputs": {
+                "analysis": {"catcat_score": analysis.get("catcat_score", 0),
+                             "catcat_items": analysis.get("catcat_items", {}),
+                             "discrepancy": analysis["space"]["discrepancy"]},
+                "complexity": cx, "distal": 0.0,
+                "teeth": {str(f): {**{k: v[k] for k in keys},
+                                   # describe_q order: mesial, buccal, extrusion, torque, tip, rotation
+                                   "desc": [v["desc"][k] for k in (
+                                       "mesiale(+)/distale(-) mm", "vestibolare(+)/linguale(-) mm",
+                                       "estrusione(+)/intrusione(-) mm", "torque corona vestibolare(+) deg",
+                                       "tip corona mesiale(+) deg", "rotazione mesio-vestibolare(+) deg")]}
+                          for f, v in teeth.items()},
+                "plan": "../staging/staging.json plan", "setup": "../setup/setup.json"},
+            "records": [{"tipo": r["tipo"], "oggetto": r["oggetto"], "fdi": r["fdi"], "calcolo": r["calcolo"],
+                         "proposta": r["proposta"], "opzioni": r["opzioni"], "nota": r["nota"], "fonti": r["fonti"]}
+                        for r in recs],
+            "calendar": {"start_date": START_DATE, "policy": "FIXED",
+                         "todo": [row["todo"] for row in cal["rows"]]},
+            "decided": {"values": changed, "todo": [row["todo"] for row in cal_decided["rows"]]},
+            "bulk": {"confirmed": confirmed,
+                     "left": [it.subject + ":" + it.kind for it in bulk.oa.classes if it.status == "PENDING"]},
+        })
     return state
 
 

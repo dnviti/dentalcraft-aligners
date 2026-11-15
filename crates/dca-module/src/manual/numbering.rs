@@ -126,7 +126,7 @@ pub(crate) fn run_renumber(
             })
             .collect();
         relabelled = new.iter().zip(&l.labels).filter(|(a, b)| a != b).count();
-        store_labels(&mut next, &mut data, &mut stale, arch, &l.scan, new);
+        store_labels(&mut next, &mut data, &mut stale, arch, &l.closed, new);
     }
     // seeds: the two exchange their numbers
     for seed in &mut data.seeds {
@@ -225,7 +225,7 @@ pub(crate) fn run_missing(
                 .map(|&x| if x == want { 0 } else { x })
                 .collect();
             relabelled = l.labels.iter().filter(|&&x| x == want).count();
-            store_labels(&mut next, &mut data, &mut stale, arch, &l.scan, new);
+            store_labels(&mut next, &mut data, &mut stale, arch, &l.closed, new);
         }
     }
     let forgotten = forget_tooth(&mut data, &mut stale, f);

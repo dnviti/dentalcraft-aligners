@@ -14,8 +14,10 @@
 //! collision into an error (nothing changes).
 //!
 //! A move of the setup leaves the staging out of date (the report says so,
-//! the stages are not touched); `lock` keeps the tooth where it was put when
-//! the setup is computed again.
+//! the stages are not touched); `lock: true` keeps the tooth where it was put
+//! when the setup is computed again, `lock: false` frees it. With `exact` the
+//! clinical components are the whole movement from rest (the values the
+//! inspector shows), not an increment.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -26,6 +28,7 @@ use dc_module_api::CommandOutput;
 use dca_algo::anatomy::{self, Arch};
 use dca_algo::frame;
 use dca_algo::manual::{self, ClinicalDelta};
+use dca_algo::rotation;
 use dca_algo::staging;
 use dca_algo::teeth;
 use dca_model::AlignersState;
@@ -61,7 +64,7 @@ impl Default for PoseDelta {
 }
 
 impl PoseDelta {
-    fn pose(&self) -> Result<Pose, CommandError> {
+    pub(crate) fn pose(&self) -> Result<Pose, CommandError> {
         let t = DVec3::from_array(self.t);
         let q = DQuat::from_array(self.q);
         if !t.is_finite() || !q.is_finite() || q.length() < 1e-9 {
@@ -97,11 +100,17 @@ pub(crate) struct AdjustParams {
     pub delta: Option<PoseDelta>,
     /// `delta` is the new pose of the tooth, not an increment.
     pub absolute: bool,
+    /// The clinical components are the whole movement of the tooth from its
+    /// rest position, as the inspector and the reports give it (mm and
+    /// degrees, `staging::describe_q`), not an increment: the plugin's
+    /// "Write the exact values of the tooth". Not with `delta` or `reset`.
+    pub exact: bool,
     /// Bring the tooth back to its rest position first.
     pub reset: bool,
-    /// Lock the tooth in the setup: computing the setup again keeps it where
-    /// it is put (setup only).
-    pub lock: bool,
+    /// Lock (`true`) or unlock (`false`) the tooth in the setup: computing
+    /// the setup again keeps a locked tooth where it is put (setup only).
+    /// Absent: the lock stays as it is.
+    pub lock: Option<bool>,
     /// Refuse the move when the tooth ends up colliding with a neighbour.
     pub refuse_on_collision: bool,
 }
@@ -117,6 +126,27 @@ impl AdjustParams {
             rotation_deg: self.rotation_deg,
         }
     }
+
+    /// The pose whose clinical description is the components given (the
+    /// inverse of `staging::describe_q`).
+    fn exact_pose(&self, md_sign: i8) -> Result<Pose, CommandError> {
+        let s = f64::from(md_sign);
+        let q = [
+            self.mesial_mm * s,
+            self.buccal_mm,
+            self.extrusion_mm,
+            -self.torque_deg.to_radians(),
+            self.tip_deg.to_radians() * s,
+            self.rotation_deg.to_radians() * s,
+        ];
+        let turn = DVec3::new(q[3], q[4], q[5]).length();
+        if q.iter().any(|v| !v.is_finite()) || turn >= std::f64::consts::PI {
+            return Err(invalid(
+                "the exact values must be finite, the rotations below 180 degrees in all",
+            ));
+        }
+        Ok(staging::pose_from_q(&q))
+    }
 }
 
 fn pose_json(p: &Pose, md_sign: i8) -> Value {
@@ -124,7 +154,7 @@ fn pose_json(p: &Pose, md_sign: i8) -> Value {
     let c = staging::describe_q(&q, md_sign);
     json!({
         "translation_mm": p.t.to_array(),
-        "rotation_deg": p.q.normalize().to_axis_angle().1.to_degrees(),
+        "rotation_deg": rotation::degrees(p),
         "pose": p,
         "clinical": {
             "mesial_mm": c[0], "buccal_mm": c[1], "extrusion_mm": c[2],
@@ -280,8 +310,13 @@ pub(crate) fn run_adjust(
             &[("fdi", &f.to_string())],
         ));
     }
-    if p.lock && p.stage.is_some() {
+    if p.lock.is_some() && p.stage.is_some() {
         return Err(invalid("lock only applies to the setup"));
+    }
+    if p.exact && (p.delta.is_some() || p.reset) {
+        return Err(invalid(
+            "exact gives the whole movement: it does not go with delta or reset",
+        ));
     }
     if let Some(k) = p.stage
         && !data.stages.iter().any(|s| s.index == k)
@@ -290,18 +325,27 @@ pub(crate) fn run_adjust(
     }
     let clinical = p.clinical();
     let delta = p.delta.as_ref().map(PoseDelta::pose).transpose()?;
-    if clinical.is_zero() && delta.is_none() && !p.reset && !p.lock {
+    if clinical.is_zero() && delta.is_none() && !p.reset && !p.exact && p.lock.is_none() {
         return Err(invalid(
-            "no movement given: set a clinical component, a delta, or reset",
+            "no movement given: set a clinical component, a delta, exact values, reset or lock",
         ));
     }
     let md_sign = data.tooth_geometry.get(&f).map_or(1, |g| g.md_sign);
     let before = pose_in(&data, p.stage, f);
-    let mut pose = if p.reset { Pose::IDENTITY } else { before };
-    if let Some(d) = delta {
-        pose = if p.absolute { d } else { pose.compose(&d) };
-    }
-    pose = pose.compose(&clinical.pose(md_sign));
+    let moves = p.exact || p.reset || delta.is_some() || !clinical.is_zero();
+    let pose = if !moves {
+        // a lock alone: the pose stays exactly as it is
+        before
+    } else if p.exact {
+        rotation::canonical_pose(&p.exact_pose(md_sign)?)
+    } else {
+        let mut pose = if p.reset { Pose::IDENTITY } else { before };
+        if let Some(d) = delta {
+            pose = if p.absolute { d } else { pose.compose(&d) };
+        }
+        // stored as the staging stores it: the shortest rotation, w >= 0
+        rotation::canonical_pose(&pose.compose(&clinical.pose(md_sign)))
+    };
 
     let contacts_before = contacts(state, &data, p.stage, f, &before);
     let contacts_after = contacts(state, &data, p.stage, f, &pose);
@@ -322,8 +366,14 @@ pub(crate) fn run_adjust(
             } else {
                 data.setup.poses.insert(f, pose);
             }
-            if p.lock {
-                data.setup.locked.insert(f);
+            match p.lock {
+                Some(true) => {
+                    data.setup.locked.insert(f);
+                }
+                Some(false) => {
+                    data.setup.locked.remove(&f);
+                }
+                None => {}
             }
         }
         Some(k) => {
@@ -332,7 +382,9 @@ pub(crate) fn run_adjust(
             }
         }
     }
-    let staging_outdated = p.stage.is_none() && !data.stages.is_empty();
+    let moved = !pose.approx_eq(&before, 1e-12, 1e-12);
+    let staging_outdated = p.stage.is_none() && moved && !data.stages.is_empty();
+    let data_locked = data.setup.locked.contains(&f);
     let collides = contacts_after
         .as_ref()
         .is_ok_and(|l| l.iter().any(Contact::collides));
@@ -345,7 +397,7 @@ pub(crate) fn run_adjust(
             "stage": p.stage,
             "before": pose_json(&before, md_sign),
             "after": pose_json(&pose, md_sign),
-            "locked": p.lock,
+            "locked": p.stage.is_none() && data_locked,
             "collisions_before": contacts_json(&contacts_before),
             "collisions": contacts_json(&contacts_after),
             "collides": collides,

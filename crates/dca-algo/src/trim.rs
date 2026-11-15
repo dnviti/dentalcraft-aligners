@@ -43,28 +43,35 @@
 //! Rim: the shell is opened by the rim radius (the rounded rim of
 //! `_sdf_group`); when that opens a hole through a thin web of the wall the
 //! shell is built again with the fills of `shell_fills` (a closing of the
-//! rounded shell inside the sharp cut grown in the wall), kept when they
-//! leave fewer holes.
+//! rounded shell inside the sharp cut grown in the wall, then also beyond
+//! its outer side, then wider), kept when they leave fewer holes. A hole
+//! still left is plugged where it is when it is small, or opened to the
+//! border by a slot of the trim surface and the shell built again
+//! ([`holes`]: `_open_holes`, `_plug_holes`, `_window_cuts`).
+//!
+//! EQUATOR: the checks of the border built (labial cover, offsets reached,
+//! the rigid removal of the shell) are in [`Output::checks`] ([`checks`],
+//! [`removal`]).
 //!
 //! Not ported yet (documented deviations): the bars of the equator border
-//! over a space between two caps, the fill that also grows the outer side
-//! (`fill_out`), the plugs and slots of the holes still left
-//! (`_plug_holes`, `_window_cuts`: the genus of the result is reported
-//! instead), the ridge of the gingiva between the grid nodes and the
-//! distance from the visible crown in the equator field, and the checks of
-//! the panel (labial cover, removal). The crowns are thinned for the
-//! insertion paths on cells of the arch coordinates (the plugin: of the
-//! tooth frame). The rim radius is limited so that the opening leaves at
-//! least [`RIM_MIN_WALL_VOXELS`] voxels of wall (the plugin rebuilds a
-//! shell with a hole at its print voxel instead). The shell is the
-//! caller's: the plugin blocks out 0.8 mm for the smooth border
-//! (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the covered crowns; here
-//! the reach is measured from [`Input::crowns`].
+//! over a space between two caps (so no weak join is checked when a slot is
+//! kept: the bars need the model of the shell, here only its field is
+//! given) and the ceilings of the embrasure fills in the equator field. The
+//! crowns are thinned for the insertion paths on cells of the arch
+//! coordinates (the plugin: of the tooth frame). The rim radius is limited
+//! so that the opening leaves at least [`RIM_MIN_WALL_VOXELS`] voxels of
+//! wall (the plugin rebuilds a shell with a hole at its print voxel
+//! instead). The shell is the caller's: the plugin blocks out 0.8 mm for
+//! the smooth border (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the
+//! covered crowns; here the reach is measured from [`Input::crowns`].
 
+pub mod checks;
 pub mod cutter;
 pub mod grid;
+pub mod holes;
 pub mod line;
 pub mod model;
+pub mod removal;
 pub mod smooth;
 pub mod survey;
 pub mod warp;
@@ -75,7 +82,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
-use dc_geom::sdf::{SdfGrid, SdfParams};
+use dc_geom::sdf::{CsgOp, SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
 use glam::{DVec3, Vec3};
 use schemars::JsonSchema;
@@ -104,6 +111,8 @@ pub const SHELL_FILL_WIDE_MM: f64 = 0.75;
 pub const SHELL_FILL_MARGIN_MM: f64 = 0.4;
 /// The rounded rim never erodes the wall below this many voxels.
 pub const RIM_MIN_WALL_VOXELS: f64 = 1.5;
+/// [`cut_away`] blends its crease over this many voxels.
+pub const CUT_BLEND_VOXELS: f32 = 2.0;
 /// STRAIGHT, SCALLOPED: grid of the trim surface (mm, `trim_cutter`).
 pub const MARGIN_CELL_MM: f64 = 0.4;
 /// STRAIGHT, SCALLOPED: control points farther than this (plan) from a node
@@ -245,7 +254,7 @@ pub struct Input<'a> {
     /// Material taken away after the rim is rounded (the occlusal shaping of
     /// the bite, [`crate::aligner_bite::occlusal::shape_cutter`]): the
     /// opening of the rim, sized for the full wall, would cut through a
-    /// thinner occlusal wall. `None`: nothing.
+    /// thinner occlusal wall. Taken away by [`cut_away`]. `None`: nothing.
     pub cut: Option<&'a SdfGrid>,
 }
 
@@ -280,13 +289,21 @@ pub struct Output {
     /// Radius of the rounded rim used (mm; at most half the wall less
     /// [`RIM_MIN_WALL_VOXELS`] voxels).
     pub round_mm: f64,
-    /// The fill radius the shell was built again with to close the holes
-    /// the rounded rim opened (`None`: not needed or not better).
-    pub fill_mm: Option<f64>,
+    /// The fill the shell was built again with to close the holes the
+    /// rounded rim opened (`None`: not needed or not better).
+    pub fill: Option<Fill>,
+    /// Holes through the wall plugged where they were ([`holes::plug_holes`]).
+    pub plugs: usize,
+    /// Slots that raise [`Output::surface`] where they opened holes through
+    /// the wall to the border ([`holes::window_cuts`], [`holes::apply_slots`]).
+    pub slots: Vec<holes::Slot>,
     /// Pieces of the trimmed shell dropped (only the largest is kept).
     pub dropped_pieces: usize,
     /// Holes through the wall left (genus of the surface; 0 expected).
     pub genus: i64,
+    /// EQUATOR: the checks of the border built (labial cover, offsets
+    /// reached; [`checks::checks`]).
+    pub checks: Option<checks::Checks>,
 }
 
 impl Output {
@@ -308,21 +325,82 @@ impl Output {
     }
 }
 
-/// The fill radii tried in turn on a trimmed shell whose rounded rim
-/// opened a hole through its wall (`aligner.shell_fills`): none when the
-/// wall keeps [`SHELL_FILL_MARGIN_MM`] beyond the parts the rounding takes.
-pub fn shell_fills(wall: f64, r: f64) -> Vec<f64> {
+/// A fill tried on a trimmed shell whose rounded rim opened a hole through
+/// its wall (`shell['fill']`, `shell['fill_out']`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Fill {
+    /// Radius of the closing of the rounded shell (mm).
+    pub rho: f64,
+    /// The sharp cut, grown by [`SHELL_FILL_GROW_MM`], also kept this far
+    /// beyond the outer side of the wall (mm; 0: inside the wall only).
+    pub out: f64,
+}
+
+/// The fills tried in turn on a trimmed shell whose rounded rim opened a
+/// hole through its wall (`aligner.shell_fills`): [`SHELL_FILL_MM`], then
+/// also beyond the outer side of the wall (a tunnel of a voxel where the
+/// outer surfaces of two crowns barely join over a contact), then
+/// [`SHELL_FILL_WIDE_MM`]; none when the wall keeps [`SHELL_FILL_MARGIN_MM`]
+/// beyond the parts the rounding takes.
+pub fn shell_fills(wall: f64, r: f64) -> Vec<Fill> {
     if r <= 0.0 || ((wall - 2.0 * r) * 1e6).round() / 1e6 >= SHELL_FILL_MARGIN_MM {
         return Vec::new();
     }
-    vec![SHELL_FILL_MM, SHELL_FILL_WIDE_MM]
+    let first = Fill {
+        rho: SHELL_FILL_MM,
+        out: 0.0,
+    };
+    let out = Fill {
+        out: SHELL_FILL_GROW_MM,
+        ..first
+    };
+    vec![
+        first,
+        out,
+        Fill {
+            rho: SHELL_FILL_WIDE_MM,
+            ..out
+        },
+    ]
+}
+
+/// The untrimmed shell `wall` with its outer side grown by `by`
+/// (`shell['fill_out']`: `max(S − outer − by, inner − S)`), the fitting
+/// surface where it was: the solid inside the outer side (the shell with
+/// its cavity filled) grown by `by`, less the cavity.
+fn outer_grown(wall: &SdfGrid, by: f64) -> Result<SdfGrid, TrimError> {
+    let mut solid = wall.clone();
+    solid.fill_interior().map_err(geom)?;
+    let mut cavity = solid.clone();
+    cavity.subtract(wall).map_err(geom)?;
+    solid.offset(by as f32).map_err(geom)?;
+    solid.subtract(&cavity).map_err(geom)?;
+    Ok(solid)
+}
+
+/// `g` without the solid `c`, the crease blended over [`CUT_BLEND_VOXELS`].
+///
+/// On the steep sides of a crown the occlusal cut fades out at a grazing
+/// angle (the ellipsoids of the allowed top are as wide as the wall) and ends
+/// on the steps of its grid of cells, so what it leaves beyond them is a skin
+/// thinner than a voxel. A plain difference samples that skin as lone voxels
+/// and strands one voxel wide on the outer surface: loose specks, handles of
+/// the surface (about a millimetre around, the wall whole under them) and
+/// sheets a ten-thousandth of a millimetre apart, which rounding makes cross.
+/// The plugin lowers the vertices of a mesh, which cannot change its topology
+/// (`case_occlusal.shape_shell`). The blend moves the level by at most a
+/// quarter of its width (half a voxel) and only on the crease: the skin goes
+/// and the wall keeps its thickness.
+fn cut_away(g: &mut SdfGrid, c: &SdfGrid) -> Result<(), TrimError> {
+    let k = CUT_BLEND_VOXELS * g.voxel_size;
+    g.csg(c, CsgOp::SmoothDifference(k)).map_err(geom)
 }
 
 /// The rounded shell `rounded` with its holes and necks closed again
 /// (`_sdf_group`, `shell['fill']`): a closing of it by `rho` intersected
-/// with the sharp cut grown by [`SHELL_FILL_GROW_MM`] inside the wall of the
-/// untrimmed shell, never into the fitting surface. The mesh and the pieces
-/// dropped.
+/// with the sharp cut grown by [`SHELL_FILL_GROW_MM`] inside `wall` (the
+/// untrimmed shell, or the one of [`outer_grown`]), never into the fitting
+/// surface. The mesh and the pieces dropped.
 fn filled(
     rounded: &SdfGrid,
     sharp: &SdfGrid,
@@ -337,7 +415,7 @@ fn filled(
     grown.intersect(wall).map_err(geom)?;
     grown.intersect(&g).map_err(geom)?;
     if let Some(c) = cut {
-        grown.subtract(c).map_err(geom)?;
+        cut_away(&mut grown, c)?;
     }
     grown.redistance().map_err(geom)?;
     let mesh = grown.to_mesh().map_err(geom)?;
@@ -517,7 +595,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     };
 
     let mut warp: Option<warp::PathWarp> = None;
-    let (grid, mut z, lines, near_r) = match mode {
+    let (grid, mut z, lines, near_r, eq_loops) = match mode {
         Mode::Equator => {
             // the insertion paths: the work is done in the warped space where they are vertical
             let crowns: BTreeMap<Fdi, Vec<DVec3>> = input
@@ -576,13 +654,21 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                 clearance: cl,
                 offset: params.equator_offset_mm,
             };
-            let z = cutter::equator_field(
-                &grid,
-                &loops.values().collect::<Vec<_>>(),
-                &cut.values().collect::<Vec<_>>(),
-                &model,
-                design,
+            let (lv, cv) = (
+                loops.values().collect::<Vec<_>>(),
+                cut.values().collect::<Vec<_>>(),
             );
+            let field = |g: &PlanGrid| cutter::equator_field(g, &lv, &cv, &model, design);
+            let mut z = field(&grid);
+            if cutter::equator_cell(wall) < cutter::EQUATOR_CELL_MM {
+                // the cap over the crown as on the grid of EQUATOR_CELL_MM deep inside the outlines
+                let outlines: Vec<&[DVec3]> = loops
+                    .values()
+                    .filter(|l| l.points.len() >= 3)
+                    .map(|l| l.points.as_slice())
+                    .collect();
+                cutter::coarse_inside(&grid, &mut z, &outlines, field);
+            }
             let lines = loops
                 .iter()
                 .map(|(f, l)| ToothLine {
@@ -593,7 +679,13 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                     ),
                 })
                 .collect();
-            (grid, z, lines, outer + NEAR_TEETH_EXTRA)
+            (
+                grid,
+                z,
+                lines,
+                outer + NEAR_TEETH_EXTRA,
+                Some((loops, order)),
+            )
         }
         Mode::Smooth => {
             let (ctrl, line) = smooth.unwrap_or_default();
@@ -604,7 +696,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                 points: line,
             }];
             let reach = outer + (-params.margin_gap_mm).max(0.0) + smooth::SMOOTH_NEAR_MM;
-            (grid, z, lines, reach)
+            (grid, z, lines, reach, None)
         }
         _ => {
             let (mm, k) = if mode == Mode::Straight {
@@ -632,7 +724,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                     points,
                 })
                 .collect();
-            (grid, z, lines, ext + NEAR_TEETH_EXTRA)
+            (grid, z, lines, ext + NEAR_TEETH_EXTRA, None)
         }
     };
     for v in &mut z {
@@ -643,50 +735,125 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         };
     }
 
-    let mut f = input.shell.clone();
-    f.intersect(&cutter_grid(&grid, &z, z_top, warp.as_ref(), input.shell)?)
-        .map_err(geom)?;
-    f.intersect(&near_grid(input.crowns, near_r, input.shell)?)
-        .map_err(geom)?;
     // the opening never erodes the wall below 1.5 voxels: at a voxel coarse
     // for the wall it would cut holes through it (the plugin builds such a
     // shell again at its print voxel)
-    let r = rim_round(wall, params.round_mm)
-        .min(((wall - RIM_MIN_WALL_VOXELS * f64::from(input.shell.voxel_size)) / 2.0).max(0.0));
-    let mut sharp = (r > 0.0).then(|| f.clone());
-    if r > 0.0 {
-        f.open(r as f32).map_err(geom)?;
-    } else {
-        f.redistance().map_err(geom)?;
-    }
-    if let Some(c) = input.cut {
-        f.subtract(c).map_err(geom)?;
-        if let Some(s) = &mut sharp {
-            s.subtract(c).map_err(geom)?;
-        }
-    }
-    let mesh = f.to_mesh().map_err(geom)?;
+    let voxel = f64::from(input.shell.voxel_size);
+    let r =
+        rim_round(wall, params.round_mm).min(((wall - RIM_MIN_WALL_VOXELS * voxel) / 2.0).max(0.0));
+    let b = Build {
+        input,
+        grid: &grid,
+        z_top,
+        warp: warp.as_ref(),
+        near: near_grid(input.crowns, near_r, input.shell)?,
+        r,
+    };
+    let cut = b.cut(&z)?;
+    let mut grown_out = None;
+    let (mut mesh, mut dropped_pieces) = b.mesh(&cut, None, &mut grown_out)?;
     if mesh.is_empty() {
         return Err(TrimError::Invalid(
             "nothing of the shell is left above the trim line".into(),
         ));
     }
-    let (mut mesh, mut dropped_pieces) = largest_piece(mesh);
     let mut genus = genus(&mesh);
     let mut fill = None;
-    if let Some(sharp) = sharp.filter(|_| genus > 0) {
+    if genus > 0 {
         // holes the rounded rim opened through a thin web: built again with the fills
-        for rho in shell_fills(wall, r) {
-            let (m2, d2) = filled(&f, &sharp, input.shell, input.cut, rho)?;
+        for fl in shell_fills(wall, r) {
+            let (m2, d2) = b.mesh(&cut, Some(fl), &mut grown_out)?;
             let g2 = self::genus(&m2);
             if g2 < genus || (fill.is_some() && g2 == genus) {
-                (mesh, dropped_pieces, genus, fill) = (m2, d2, g2, Some(rho));
+                (mesh, dropped_pieces, genus, fill) = (m2, d2, g2, Some(fl));
             }
             if genus == 0 {
                 break;
             }
         }
     }
+    drop(cut);
+
+    // the holes left (`_open_holes`): plugged where they are, or opened to the
+    // border by a slot, wider at every round, the shell built again; a round
+    // is kept when the holes are fewer, no tooth loses its cap and at most
+    // VOLUME_SHARE of the volume goes
+    let (mut plugs, mut slots) = (0, Vec::new());
+    if genus > 0 {
+        let model = holes::Model::new(&[input.teeth_mesh, input.gingiva]).map_err(geom)?;
+        let design = holes::Design {
+            outer,
+            clearance: cl,
+            rim: r,
+            voxel,
+        };
+        (mesh, genus, plugs) = holes::plug_holes(mesh, &model, design, Some(genus));
+        let reach = outer + 2.0 * voxel + 0.3;
+        let mut uncovered = None;
+        for k in 0..holes::ROUNDS {
+            if genus <= 0 {
+                break;
+            }
+            let half = (k + 1) as f64 * holes::SLOT_MM.max(1.5 * voxel);
+            let new = holes::window_cuts(&mesh, &model, design, warp.as_ref(), half);
+            if new.is_empty() {
+                break;
+            }
+            let mut all = slots.clone();
+            all.extend(new);
+            let mut z2 = z.clone();
+            holes::apply_slots(&grid, &mut z2, &all, z_top);
+            let cut = b.cut(&z2)?;
+            let (m2, d2) = b.mesh(&cut, fill, &mut grown_out)?;
+            drop(cut);
+            let (m2, g2, p2) = holes::plug_holes(m2, &model, design, None);
+            let before = uncovered
+                .get_or_insert_with(|| holes::uncovered_teeth(&mesh, input.teeth, reach))
+                .clone();
+            let u2 = holes::uncovered_teeth(&m2, input.teeth, reach);
+            if g2 >= genus
+                || u2.iter().any(|f| !before.contains(f))
+                || holes::volume(&m2) < (1.0 - holes::VOLUME_SHARE) * holes::volume(&mesh)
+            {
+                break;
+            }
+            (slots, mesh, dropped_pieces, genus, plugs) = (all, m2, d2, g2, p2);
+            uncovered = Some(u2);
+        }
+    }
+    drop(b);
+    // EQUATOR: the checks of the border built, for the panel and the report;
+    // the shell taken off in one piece (PER_TOOTH: the least locked rigid path
+    // around the mean path of the teeth, else the one path of the arch)
+    let checks = match eq_loops {
+        None => None,
+        Some((loops, order)) => {
+            let list: Vec<(Fdi, &line::ToothLoop)> = loops.iter().map(|(f, l)| (*f, l)).collect();
+            let axis = params.insertion_axis;
+            let mut c = checks::checks(
+                &list,
+                &mesh,
+                warp.as_ref(),
+                &order,
+                params.equator_offset_mm,
+                outer,
+                axis == warp::InsertionAxis::Common,
+            );
+            let shell = dc_geom::bvh::Bvh::build(&mesh).map_err(geom)?;
+            let teeth = (!input.teeth_mesh.tris.is_empty())
+                .then(|| dc_geom::bvh::Bvh::build(input.teeth_mesh))
+                .transpose()
+                .map_err(geom)?;
+            let shears = warp.as_ref().map_or_else(Vec::new, |w| w.shears.clone());
+            c.removal = Some(if axis == warp::InsertionAxis::PerTooth {
+                removal::rigid_lock(&mesh, &shell, teeth.as_ref(), &shears)
+            } else {
+                let sh = shears.first().copied().unwrap_or(glam::DVec2::ZERO);
+                removal::path_lock(&mesh, &shell, teeth.as_ref(), sh)
+            });
+            Some(c)
+        }
+    };
     Ok(Output {
         mode,
         fallback,
@@ -695,8 +862,82 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         surface: (grid, z),
         warp,
         round_mm: r,
-        fill_mm: fill,
+        fill,
+        plugs,
+        slots,
         dropped_pieces,
         genus,
+        checks,
     })
+}
+
+/// What builds the trimmed shell from a trim surface: the shell field of
+/// the input, the plan grid, the warp of the insertion paths, the reach of
+/// the aligner and the rim radius.
+struct Build<'a> {
+    input: &'a Input<'a>,
+    grid: &'a PlanGrid,
+    z_top: f64,
+    warp: Option<&'a warp::PathWarp>,
+    near: SdfGrid,
+    r: f64,
+}
+
+/// The shell cut by a trim surface, its rim rounded, and the sharp cut (for
+/// the fills; `None` without rounding).
+struct Cut {
+    rounded: SdfGrid,
+    sharp: Option<SdfGrid>,
+}
+
+impl Build<'_> {
+    /// The shell field intersected with the solid above the trim surface `z`
+    /// and with the reach of the aligner, then opened by the rim radius;
+    /// the occlusal cut taken away from both.
+    fn cut(&self, z: &[f64]) -> Result<Cut, TrimError> {
+        let shell = self.input.shell;
+        let mut f = shell.clone();
+        f.intersect(&cutter_grid(self.grid, z, self.z_top, self.warp, shell)?)
+            .map_err(geom)?;
+        f.intersect(&self.near).map_err(geom)?;
+        let mut sharp = (self.r > 0.0).then(|| f.clone());
+        if self.r > 0.0 {
+            f.open(self.r as f32).map_err(geom)?;
+        } else {
+            f.redistance().map_err(geom)?;
+        }
+        if let Some(c) = self.input.cut {
+            cut_away(&mut f, c)?;
+            if let Some(s) = &mut sharp {
+                cut_away(s, c)?;
+            }
+        }
+        Ok(Cut { rounded: f, sharp })
+    }
+
+    /// The mesh of `cut` (its largest piece and the pieces dropped), built
+    /// again with `fill` when there is one; `grown_out` keeps the shell of
+    /// [`outer_grown`] for the fills that need it.
+    fn mesh(
+        &self,
+        cut: &Cut,
+        fill: Option<Fill>,
+        grown_out: &mut Option<(f64, SdfGrid)>,
+    ) -> Result<(TriMesh, usize), TrimError> {
+        let shell = self.input.shell;
+        match (fill, &cut.sharp) {
+            (Some(fl), Some(sharp)) => {
+                let w = if fl.out > 0.0 {
+                    if grown_out.as_ref().is_none_or(|(by, _)| *by != fl.out) {
+                        *grown_out = Some((fl.out, outer_grown(shell, fl.out)?));
+                    }
+                    grown_out.as_ref().map_or(shell, |(_, g)| g)
+                } else {
+                    shell
+                };
+                filled(&cut.rounded, sharp, w, self.input.cut, fl.rho)
+            }
+            _ => Ok(largest_piece(cut.rounded.to_mesh().map_err(geom)?)),
+        }
+    }
 }

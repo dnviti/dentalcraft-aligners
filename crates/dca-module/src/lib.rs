@@ -6,12 +6,14 @@
 //! registry ([`commands`]) is reachable from the CLI and the MCP server. The
 //! algorithms behind the entries live in `dca-algo`, the data in `dca-model`.
 
+mod aligner_scene;
 mod codec;
 pub mod commands;
 mod done;
 mod find_teeth;
 mod inspector;
 mod manual;
+mod open_scan;
 mod scene;
 pub mod tree;
 mod tree_data;
@@ -24,8 +26,9 @@ use dc_module_api::{
 use dc_scene::{SceneEntry, SceneItem};
 use dca_model::AlignersState;
 
+pub use aligner_scene::ALIGNER_COLOR;
 pub use dca_model::MODULE_ID;
-pub use scene::GINGIVA_COLOR;
+pub use scene::{GINGIVA_COLOR, STUDY_MODEL_COLOR, is_study_model, study_models_drawn};
 
 dc_i18n::bundle!(pub fn loader);
 
@@ -43,6 +46,9 @@ pub struct AlignersModule {
     /// Blend weights of the built gingiva, computed when a stage first
     /// needs them.
     gums: scene::GumCache,
+    /// The aligners of the 3D view bound to the model, computed when a
+    /// stage first shows one away from the stage it was built at.
+    binds: aligner_scene::BindCache,
 }
 
 impl Default for AlignersModule {
@@ -60,6 +66,7 @@ impl AlignersModule {
             study_ui: None,
             find_ui: find_teeth::FindEdit::default(),
             gums: scene::GumCache::default(),
+            binds: aligner_scene::BindCache::default(),
         }
     }
 
@@ -171,12 +178,19 @@ impl Module for AlignersModule {
         Vec::new()
     }
 
+    /// The built teeth and gingiva, the study models, and the aligner of
+    /// the 3D view while the case shows it (`aligner_scene`).
     fn scene_at(&self, state: &CaseState, stage: Option<u32>) -> Vec<SceneEntry> {
-        scene::built_scene(state, stage, &self.gums, true).0
+        let mut out = scene::built_scene(state, stage, &self.gums, true).0;
+        out.extend(aligner_scene::entries(state, stage, &self.gums, &self.binds, true).0);
+        out
     }
 
     fn scene_at_nowait(&self, state: &CaseState, stage: Option<u32>) -> (Vec<SceneEntry>, bool) {
-        scene::built_scene(state, stage, &self.gums, false)
+        let (mut out, done) = scene::built_scene(state, stage, &self.gums, false);
+        let (aligner, ready) = aligner_scene::entries(state, stage, &self.gums, &self.binds, false);
+        out.extend(aligner);
+        (out, done && ready)
     }
 
     fn data_codec(&self) -> ModuleCodec {

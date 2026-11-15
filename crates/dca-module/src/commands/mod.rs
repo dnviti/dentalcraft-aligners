@@ -80,24 +80,31 @@ macro_rules! stage_command {
     };
 }
 
+pub(crate) mod aligner_view;
 mod auto;
 pub(crate) mod autoseed;
 mod bite;
+mod components;
 mod demo;
 mod diagnosis;
 mod export;
 mod frame;
 mod gingiva;
 pub mod import;
+pub mod make_base;
 mod manual;
 pub(crate) mod messages;
 mod occlusion;
+mod production;
 mod ramps;
 mod reconstruct;
+pub(crate) mod review;
 mod schedule;
 mod seed_check;
 mod segmentation;
+pub mod set_arch;
 mod setup;
+pub(crate) mod setup_line;
 mod shell;
 mod staging;
 mod stamp;
@@ -112,6 +119,7 @@ pub(crate) mod wrappers;
 pub fn all() -> Vec<CommandSpec> {
     [
         import::specs,
+        set_arch::specs,
         frame::specs,
         demo::specs,
         autoseed::specs,
@@ -122,15 +130,20 @@ pub fn all() -> Vec<CommandSpec> {
         gingiva::specs,
         diagnosis::specs,
         setup::specs,
+        setup_line::specs,
         staging::specs,
+        review::specs,
         schedule::specs,
         occlusion::specs,
         bite::specs,
+        components::specs,
         ramps::specs,
+        production::specs,
         shell::specs,
         trim::specs,
         stamp::specs,
         export::specs,
+        aligner_view::specs,
         study_base::specs,
         visits::specs,
         manual::specs,

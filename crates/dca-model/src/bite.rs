@@ -6,11 +6,12 @@
 //! of `evidence.py` / `props.py` (`dca_algo::evidence` checks them).
 
 use dc_case::{Fdi, Pose};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// How the occlusal thickness of the aligners is chosen
 /// (`occlusal_mode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OcclusalMode {
     /// Computed from the bite with the aligners worn: the thickness that
@@ -24,7 +25,7 @@ pub enum OcclusalMode {
 }
 
 /// How the mouth closes on the aligners (`bite_closing`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BiteClosing {
     /// Rotation about the hinge axis of the condyles: the incisors open more

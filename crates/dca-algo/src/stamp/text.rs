@@ -6,6 +6,14 @@
 //! font for measured values), subset to the characters a label can hold.
 //! Its size is set like the plugin does: the height of the digit `0` is the
 //! requested character height.
+//!
+//! The advances of a monospaced font are made for a screen: at these sizes
+//! they left a label 23 % wider than the plugin's, and the one-line layout,
+//! the one that fits between the contacts of a molar, did not fit any more.
+//! So the glyphs are set by their ink, with the gap and the word space of the
+//! plugin's text ([`GAP`], [`WORD_SPACE`]), and drawn [`CONDENSE`] as wide (the
+//! digits of the bold are wider than the plugin's): a label is as wide as the
+//! plugin's whatever its digits.
 
 use glam::DVec2;
 use lyon_tessellation::geom::point;
@@ -23,6 +31,16 @@ static FONT: &[u8] = include_bytes!("../../assets/B612Mono-Bold-subset.ttf");
 /// Distance between the baselines of two lines, in character heights (the
 /// plugin's `LINE_PITCH`: a gap of 0.45 between the lines).
 pub(super) const LINE_PITCH: f64 = 1.45;
+
+/// Space between the ink of two neighbouring characters, in character
+/// heights (the digits of the plugin's font: 0.06 mm at 0.7 mm).
+const GAP: f64 = 0.085;
+/// Width of a space, in character heights (added to the gaps on its two
+/// sides; the plugin's font: 0.28 mm at 0.7 mm).
+const WORD_SPACE: f64 = 0.4;
+
+/// Width of the glyphs against their height.
+const CONDENSE: f64 = 0.94;
 
 /// Largest deviation of the flattened curves from the outline (mm).
 const TOLERANCE_MM: f32 = 0.002;
@@ -53,11 +71,13 @@ struct Outline<'a> {
     x: f32,
     y: f32,
     scale: f32,
+    /// Horizontal scale.
+    scale_x: f32,
 }
 
 impl Outline<'_> {
     fn at(&self, x: f32, y: f32) -> lyon_tessellation::geom::Point<f32> {
-        point(self.x + x * self.scale, self.y + y * self.scale)
+        point(self.x + x * self.scale_x, self.y + y * self.scale)
     }
 }
 
@@ -96,12 +116,14 @@ pub fn layout(lines: &[String], height: f64) -> Result<TextShape, StampError> {
         .and_then(|g| face.glyph_bounding_box(g))
         .ok_or_else(|| StampError::Font("the font has no digit 0".to_owned()))?;
     let scale = height / f64::from(zero.y_max - zero.y_min);
+    let scale_x = scale * CONDENSE;
     let pitch = LINE_PITCH * height;
 
     let mut builder = Path::builder();
     for (row, line) in lines.iter().enumerate() {
         let mut glyphs = Vec::new();
-        let mut advance = 0.0f64;
+        // the pen stands where the ink of the next character starts
+        let mut pen = 0.0f64;
         for c in line.chars() {
             let gid = face
                 .glyph_index(c)
@@ -109,10 +131,15 @@ pub fn layout(lines: &[String], height: f64) -> Result<TextShape, StampError> {
                 .ok_or_else(|| {
                     StampError::Invalid(format!("the character {c:?} cannot be stamped"))
                 })?;
-            glyphs.push((gid, advance));
-            advance += f64::from(face.glyph_hor_advance(gid).unwrap_or(0)) * scale;
+            match face.glyph_bounding_box(gid) {
+                Some(ink) => {
+                    glyphs.push((gid, pen - f64::from(ink.x_min) * scale_x));
+                    pen += f64::from(ink.x_max - ink.x_min) * scale_x + GAP * height;
+                }
+                None => pen += WORD_SPACE * height,
+            }
         }
-        let x0 = -0.5 * advance;
+        let x0 = -0.5 * pen;
         let y0 = -(row as f64) * pitch;
         for (gid, dx) in glyphs {
             let mut outline = Outline {
@@ -120,6 +147,7 @@ pub fn layout(lines: &[String], height: f64) -> Result<TextShape, StampError> {
                 x: (x0 + dx) as f32,
                 y: y0 as f32,
                 scale: scale as f32,
+                scale_x: scale_x as f32,
             };
             face.outline_glyph(gid, &mut outline);
         }

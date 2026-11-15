@@ -2,7 +2,9 @@
 //! `api.auto`).
 //!
 //! `aligners.auto` runs the automatic stages in pipeline order on the scans
-//! of the case, with their default parameters:
+//! of the case, with their default parameters, in the order of the plugin's
+//! `case_auto.auto_steps` (arch, seeds, segmentation, teeth, diagnosis, the
+//! bite when the arches are not related, setup, staging, classifications):
 //!
 //! 0. the arch (`aligners.case.detect-arch`): it may move scans and clear
 //!    their results, so the rest of the list is built from its result;
@@ -20,16 +22,28 @@
 //!    measures the teeth first: `aligners.teeth.frames`);
 //! 5. gingiva (`aligners.preparation.gingiva`);
 //! 6. diagnosis (`aligners.diagnosis.space-analysis`: the whole analysis);
-//! 7. setup (`aligners.planning.setup.automatic`);
-//! 8. staging (`aligners.planning.staging.automatic`);
-//! 9. schedule (`aligners.planning.schedule`);
-//! 10. with both arches, the bite as the menu leaf "Bite" does it: the
-//!     registration on the bite scan when the case has one
-//!     (`aligners.occlusion.bite-registration.icp`, a refusal stops the run,
-//!     the estimate does not take its place), otherwise the virtual bite
-//!     (`aligners.occlusion.virtual-bite`); then the contact map
-//!     (`aligners.occlusion.contact-map`); parameter `occlusion`;
-//! 11. with `export_dir`, the export (`aligners.output.export-stl`, or the
+//! 7. with both arches, when they are not related at that point
+//!    ([`dca_algo::occlusion::bite_needed`]; `case_auto.auto_steps` before the
+//!    setup: "with both arches the bite comes first"), the bite as the menu
+//!    leaf "Bite" takes it: the registration on the bite scan when the case
+//!    has one (`aligners.occlusion.bite-registration.icp`, a refusal stops
+//!    the run, the estimate does not take its place), otherwise the virtual
+//!    bite (`aligners.occlusion.virtual-bite`), which adds the plugin's
+//!    warning to `warnings`. Arches already related (registered, or
+//!    exported in occlusion) are not moved and the step is left out;
+//! 8. setup (`aligners.planning.setup.automatic`);
+//! 9. staging (`aligners.planning.staging.automatic`);
+//! 10. the clinical review (`aligners.review.classify`): the
+//!     classifications, proposals preset and to review; the decisions
+//!     already taken stay where the computed value did not change, and a
+//!     staging pattern decided in the review makes the aligners again;
+//! 11. schedule (`aligners.planning.schedule`), with the attachments of the
+//!     review;
+//! 12. with both arches, the contact map (`aligners.occlusion.contact-map`,
+//!     the summary `occlusion.auto_pair` refreshes after the analysis);
+//!     steps 7 and 12 follow parameter `occlusion`: without them two arches
+//!     not related stop the run at the setup, which refuses them;
+//! 13. with `export_dir`, the export (`aligners.output.export-stl`, or the
 //!     full package `aligners.output.report` with `full_report`). With
 //!     `shells` the full package has the print files of the shell stage
 //!     (printable models, trimmed aligners, at `quality`, draft by default);
@@ -71,7 +85,7 @@ use super::import::DETECT_ARCH;
 use super::messages;
 use super::seed_check::CHECK;
 use super::teeth_build::RECONSTRUCT;
-use super::wrappers::bite_steps;
+use super::wrappers::{VIRTUAL_BITE, bite_steps};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -107,7 +121,9 @@ pub struct Params {
     pub third_molars: bool,
     /// FDI numbers of the teeth known to be missing (numbering).
     pub missing: Vec<u8>,
-    /// With both arches, put them in occlusion and measure the contacts.
+    /// With both arches, put them in occlusion before the final position
+    /// when they are not related, and measure the contacts at the end.
+    /// Without it, two arches not related stop the run at the setup.
     pub occlusion: bool,
     /// Delivery date of the first aligner, `YYYY-MM-DD` (default today).
     pub start_date: Option<String>,
@@ -146,11 +162,27 @@ impl Default for Params {
 pub(super) struct Step {
     pub(super) id: &'static str,
     params: Value,
+    /// The step runs only when the two arches are not related when it comes
+    /// ([`dca_algo::occlusion::bite_needed`]); otherwise it is left out.
+    unless_related: bool,
 }
 
 impl Step {
     pub(super) fn new(id: &'static str, params: Value) -> Self {
-        Self { id, params }
+        Self {
+            id,
+            params,
+            unless_related: false,
+        }
+    }
+
+    /// This step, run only when the two arches are not related when it
+    /// comes.
+    fn unless_related(self) -> Self {
+        Self {
+            unless_related: true,
+            ..self
+        }
     }
 }
 
@@ -246,17 +278,28 @@ fn later_steps(state: &CaseState, params: &Params, numbered: &[Arch]) -> Vec<Ste
         Step::new("aligners.preparation.reconstruction.automatic", Value::Null),
         Step::new("aligners.preparation.gingiva", Value::Null),
         Step::new("aligners.diagnosis.space-analysis", Value::Null),
+    ]);
+    let both =
+        state.case.scan(ScanRole::Upper).is_some() && state.case.scan(ScanRole::Lower).is_some();
+    let [bite, contacts] = bite_steps(state).1;
+    let occlusion = params.occlusion && both;
+    // `case_auto.auto_steps`: with both arches the bite comes before the
+    // final position, when they are not related yet
+    if occlusion {
+        steps.push(bite.unless_related());
+    }
+    steps.extend([
         Step::new("aligners.planning.setup.automatic", Value::Null),
         Step::new("aligners.planning.staging.automatic", Value::Null),
+        // `case_auto.auto_steps`: the classifications after the staging
+        Step::new(super::review::CLASSIFY, Value::Null),
         Step::new(
             "aligners.planning.schedule",
             Value::Object(calendar(params)),
         ),
     ]);
-    let both =
-        state.case.scan(ScanRole::Upper).is_some() && state.case.scan(ScanRole::Lower).is_some();
-    if params.occlusion && both {
-        steps.extend(bite_steps(state).1);
+    if occlusion {
+        steps.push(contacts);
     }
     if let Some(dir) = params.export_dir.as_ref().filter(|d| !d.trim().is_empty()) {
         let mut p = calendar(params);
@@ -432,6 +475,11 @@ fn run_auto(
     let mut records = vec![record];
     let mut i = 0;
     while i < steps.len() {
+        // the bite before the final position: only for arches not related yet
+        if steps[i].unless_related && !dca_algo::occlusion::bite_needed(&current) {
+            i += 1;
+            continue;
+        }
         let n = (steps.len() + 1) as f32;
         let (from, to) = ((i + 1) as f32 / n, (i + 2) as f32 / n);
         ctx.set_fraction(from);
@@ -439,6 +487,10 @@ fn run_auto(
         let (next, record) = with_span(from, to, || run_step(&current, &steps[i], k, ctx))?;
         current = next;
         records.push(record);
+        if steps[i].unless_related && steps[i].id == VIRTUAL_BITE {
+            // `case_auto.auto_steps`: the relation is estimated, not the patient's
+            warnings.push(messages::tr("aligners-auto-warn-virtual-bite", &[]));
+        }
         let mut restart = false;
         if steps[i].id == RECONSTRUCT {
             for arch in arches(&current) {
@@ -712,10 +764,11 @@ mod tests {
                 "aligners.preparation.reconstruction.automatic",
                 "aligners.preparation.gingiva",
                 "aligners.diagnosis.space-analysis",
+                "aligners.occlusion.virtual-bite",
                 "aligners.planning.setup.automatic",
                 "aligners.planning.staging.automatic",
+                super::super::review::CLASSIFY,
                 "aligners.planning.schedule",
-                "aligners.occlusion.virtual-bite",
                 "aligners.occlusion.contact-map",
                 "aligners.output.export-stl",
             ]
@@ -724,14 +777,89 @@ mod tests {
             assert!(crate::commands::is_registered(id), "{id}");
         }
         let steps = later_steps(&s, &p, &[]);
-        assert_eq!(steps[8].params["start_date"], "2026-01-05");
-        assert_eq!(steps[11].params["dir"], "x");
+        // only the bite before the setup depends on the relation of the arches
+        let when: Vec<bool> = steps.iter().map(|s| s.unless_related).collect();
+        assert_eq!(when.iter().filter(|w| **w).count(), 1);
+        assert!(when[6]);
+        assert_eq!(steps[10].params["start_date"], "2026-01-05");
+        assert_eq!(steps[12].params["dir"], "x");
         // the seeds of the demo were placed before the run: only checked
         assert_eq!(steps[1].params["correct"], false);
         let numbered = later_steps(&s, &p, &[Arch::Lower]);
         assert_eq!(numbered[1].params["arch"], "lower");
         assert_eq!(numbered[1].params["correct"], true);
         assert_eq!(numbered[2].params["correct"], false);
+    }
+
+    /// The plugin's `steps.ORDER`, with the bite `case_auto.auto_steps` runs
+    /// in the setup step before the final position (`morso`).
+    const PLUGIN_ORDER: [&str; 9] = [
+        "arcata",
+        "semi",
+        "segmentazione",
+        "denti",
+        "diagnosi",
+        "morso",
+        "setup",
+        "staging",
+        "classificazioni",
+    ];
+
+    /// The step of the plugin a step of the run belongs to; `None` for the
+    /// steps the plugin runs after the analysis (the contact map of
+    /// `occlusion.auto_pair`) or not at all (the export).
+    fn plugin_step(id: &str) -> Option<&'static str> {
+        Some(match id {
+            DETECT_ARCH => "arcata",
+            "aligners.preparation.numbering.automatic"
+            | "aligners.preparation.orientation.automatic" => "semi",
+            "aligners.preparation.segmentation.automatic" | CHECK => "segmentazione",
+            RECONSTRUCT | "aligners.preparation.gingiva" => "denti",
+            "aligners.diagnosis.space-analysis" => "diagnosi",
+            super::super::wrappers::REGISTER | VIRTUAL_BITE => "morso",
+            "aligners.planning.setup.automatic" => "setup",
+            "aligners.planning.staging.automatic" => "staging",
+            // the plugin builds the calendar from the plan and the decisions
+            // of the review whenever it shows it: after the classifications
+            super::super::review::CLASSIFY | "aligners.planning.schedule" => "classificazioni",
+            _ => return None,
+        })
+    }
+
+    #[test]
+    fn the_steps_follow_the_order_of_the_plugin() {
+        use super::super::occlusion::tests::two_demo_arches;
+        let mut s = two_demo_arches();
+        let p = Params {
+            seeds: Seeds::All,
+            export_dir: Some("x".to_owned()),
+            ..Params::default()
+        };
+        for bite_scan in [false, true] {
+            if bite_scan {
+                let mut bite = s.case.scan(ScanRole::Lower).unwrap().clone();
+                bite.role = ScanRole::Bite;
+                s.case.scans.push(bite);
+            }
+            let ids: Vec<&str> = std::iter::once(DETECT_ARCH)
+                .chain(plan(&s, &p).unwrap().iter().map(|s| s.id))
+                .collect();
+            let mut order: Vec<&str> = ids.iter().filter_map(|id| plugin_step(id)).collect();
+            order.dedup();
+            assert_eq!(order, PLUGIN_ORDER, "{ids:?}");
+            // what the plugin does after the analysis comes after it
+            let last = ids
+                .iter()
+                .rposition(|id| plugin_step(id).is_some())
+                .unwrap();
+            assert_eq!(
+                ids[last + 1..],
+                [
+                    "aligners.occlusion.contact-map",
+                    "aligners.output.export-stl"
+                ]
+            );
+        }
     }
 
     #[test]
@@ -742,7 +870,7 @@ mod tests {
             later_steps(s, &Params::default(), &[])
                 .iter()
                 .map(|s| s.id)
-                .skip_while(|id| !id.starts_with("aligners.occlusion."))
+                .filter(|id| id.starts_with("aligners.occlusion."))
                 .collect()
         };
         assert_eq!(
@@ -773,6 +901,59 @@ mod tests {
                 .iter()
                 .all(|s| !s.id.starts_with("aligners.occlusion."))
         );
+    }
+
+    #[test]
+    fn arches_not_related_get_the_virtual_bite_before_the_setup() {
+        use super::super::occlusion::tests::two_demo_arches;
+        let s = two_demo_arches();
+        let run = |s: &CaseState, params: Value| {
+            let (next, out) = exec("aligners.auto", s, params).unwrap();
+            let ids: Vec<String> = out["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .collect();
+            (next, out, ids)
+        };
+        let at = |ids: &[String], id: &str| ids.iter().position(|i| i == id);
+        let warning = messages::tr("aligners-auto-warn-virtual-bite", &[]);
+        let setup = "aligners.planning.setup.automatic";
+
+        let (next, out, ids) = run(&s, Value::Null);
+        let bite = at(&ids, VIRTUAL_BITE).expect("the virtual bite ran");
+        assert_eq!(at(&ids, setup), Some(bite + 1), "{ids:?}");
+        assert_eq!(ids.iter().filter(|i| *i == VIRTUAL_BITE).count(), 1);
+        assert_eq!(ids.last().unwrap(), "aligners.occlusion.contact-map");
+        assert_eq!(out["steps"][ids.len() - 1]["output"]["in_occlusion"], true);
+        let warnings = out["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|w| *w == warning), "{warnings:?}");
+        let d = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert!(d.bite_registered && !d.setup.poses.is_empty() && !d.stages.is_empty());
+
+        // arches already related are not moved again: no bite, no warning
+        let (again, out, ids) = run(&next, Value::Null);
+        assert_eq!(at(&ids, VIRTUAL_BITE), None, "{ids:?}");
+        assert!(at(&ids, setup).is_some());
+        assert!(
+            out["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| *w != warning)
+        );
+        let upper = |s: &CaseState| s.case.scan(ScanRole::Upper).unwrap().mesh;
+        assert_eq!(upper(&again), upper(&next));
+
+        // without the occlusion the setup refuses the arches not related
+        let err = exec("aligners.auto", &s, json!({ "occlusion": false })).unwrap_err();
+        let CommandError::Invalid(m) = err else {
+            panic!("not a refusal: {err:?}");
+        };
+        let step = messages::tr("aligners-menu-planning-setup-automatic", &[]);
+        assert!(m.starts_with(&format!("Stopped at {step}")), "{m}");
+        assert!(m.contains("the bite comes first"), "{m}");
     }
 
     #[test]

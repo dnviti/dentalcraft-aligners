@@ -43,7 +43,7 @@ use dca_algo::frame;
 use dca_algo::gingiva;
 use dca_algo::schedule;
 use dca_algo::segmentation;
-use dca_algo::staging::{self, Complexity, IprPlan, Level, Pattern, ToothMove};
+use dca_algo::staging::{self, IprPlan, Pattern, ToothMove};
 use dca_algo::teeth;
 use dca_algo::visits::{self, MeshRef, ToothInput, VisitError};
 use dca_model::{AlignersState, IprStep, MODULE_ID, Seed, Stage, ToothTracking, Visit};
@@ -53,7 +53,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::messages;
-use super::staging::{aligners_data, arch_name, labelled_scan, md_sign};
+use super::staging::{aligners_data, arch_name, complexity_of, md_sign, open_labelled_scan};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -250,6 +250,7 @@ fn segment_visit(
             arch,
             vertices: moved,
             seeds: &seeds,
+            occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
         },
         &frame::Params::default(),
     )
@@ -377,7 +378,8 @@ fn run_visit(
             &[("arch", &messages::arch_word(arch))],
         ));
     }
-    let Some(case_scan) = labelled_scan(state, &data, role)? else {
+    // the scan as it was read: an open progress scan is registered on it
+    let Some(case_scan) = open_labelled_scan(state, &data, role)? else {
         return Err(messages::not_segmented(arch));
     };
     let last = data.stages.iter().map(|s| s.index).max().unwrap_or(0);
@@ -575,27 +577,6 @@ pub(crate) struct ReplanParams {
     pattern: Option<Pattern>,
 }
 
-/// What the automatic pattern needs: the diagnosis of the arch and the
-/// distal movement of the first molars (as the staging command computes it).
-fn complexity_of(data: &AlignersState, role: ScanRole, moves: &[ToothMove]) -> Complexity {
-    let space = data.diagnosis.arches.get(&role);
-    let distal = moves
-        .iter()
-        .filter(|m| anatomy::index(m.fdi) == 6)
-        .map(|m| -(m.delta()[0] * f64::from(m.md_sign)))
-        .fold(0.0_f64, f64::max);
-    Complexity {
-        level: data
-            .diagnosis
-            .complexity_score
-            .map_or(Level::Easy, Level::from_score),
-        crowding_mm: space.map_or(0.0, |s| s.crowding_mm().max(0.0)),
-        little_mm: space.map_or(0.0, |s| s.little_index_mm),
-        distalization_mm: distal,
-        pattern_override: None,
-    }
-}
-
 /// Puts the series of one arch (`new`, aligners 1..) into the stages of the
 /// case, replacing what the arch had; the arch that finishes first repeats
 /// its last pose (the staging command's `merge_arch`).
@@ -706,7 +687,7 @@ fn run_replan(
             "aligner {from} is not in the plan ({last} aligners)"
         )));
     }
-    let Some(scan) = labelled_scan(state, &data, arch.role())? else {
+    let Some(scan) = open_labelled_scan(state, &data, arch.role())? else {
         return Err(messages::not_segmented(arch));
     };
 
@@ -717,6 +698,7 @@ fn run_replan(
             arch,
             vertices: &case_v,
             seeds: &data.seeds,
+            occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
         },
         &frame::Params::default(),
     )
@@ -839,6 +821,8 @@ fn run_replan(
         series.push(st);
     }
     merge_arch(&mut data.stages, arch, &series, &seq);
+    // the result line of the automatic staging described the plan replaced here
+    data.staging_results.remove(&arch.role());
     let total = data.stages.len();
 
     let teeth_out: Map<String, Value> = plan
@@ -930,7 +914,9 @@ mod tests {
     ) -> std::path::PathBuf {
         let data = aligners_data(state).unwrap();
         let arch = pick_arch(&Params::default(), &data).unwrap();
-        let scan = labelled_scan(state, &data, arch.role()).unwrap().unwrap();
+        let scan = open_labelled_scan(state, &data, arch.role())
+            .unwrap()
+            .unwrap();
         let v: Vec<DVec3> = scan.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let blend = gingiva::scan_blend(&v, &scan.mesh.tris, &scan.labels).unwrap();
         let deltas: BTreeMap<Fdi, DMat4> = data

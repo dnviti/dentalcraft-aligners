@@ -249,3 +249,121 @@ fn the_diagnosis_matches_the_plugin_on_the_demo_cases() {
     }
     println!("worst relative error over the six cases: {worst_all:.2e}");
 }
+
+/// The diagnosis of a demo case, as computed from the oracle's own inputs.
+fn diagnose(case: &str) -> (Arch, diagnosis::ArchDiagnosis) {
+    let arch = if case.contains("upper") {
+        Arch::Upper
+    } else {
+        Arch::Lower
+    };
+    let teeth: BTreeMap<Fdi, ToothMeasures> = json(case, "teeth/teeth.json")["teeth"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, t)| (fdi(k), measures(t)))
+        .collect();
+    let crowns = crowns(case);
+    let mut out = diagnosis::run(
+        &Input {
+            arches: vec![ArchInput {
+                arch,
+                teeth: &teeth,
+                crowns: Some(&crowns),
+            }],
+        },
+        &Params::default(),
+    )
+    .unwrap();
+    (arch, out.arches.remove(&arch).unwrap())
+}
+
+/// `manual.diagnosis_override` of the plugin (`oa.diagnosis_edit`), run for
+/// real by `golden/oracle.py` (`edits` of `diagnosis.json`): the values the
+/// clinician writes, one call after the other on the same case, give the
+/// plugin's discrepancy, Little category, CAT-CAT items, score, level and
+/// list of values by hand. A value equal to the automatic one is a reset
+/// here (the plugin has no other way back).
+#[test]
+fn hand_values_give_the_plugins_complexity_on_the_demo_cases() {
+    use dca_algo::diagnosis::edit::{self, EditField, Values};
+    use dca_model::ArchEdits;
+
+    let mut steps_checked = 0;
+    for case in CASES {
+        let (_, got) = diagnose(case);
+        let computed = Values {
+            discrepancy: got.space.discrepancy,
+            little: got.little,
+            midline_offset: got.midline_offset,
+            largest_space: got.largest_space,
+        };
+        let want = json(case, "diagnosis/diagnosis.json");
+        let scenarios = want["edits"].as_object().unwrap();
+        assert!(scenarios.len() >= 4, "{case}");
+        for (name, steps) in scenarios {
+            let mut edits = ArchEdits::default();
+            for (k, step) in steps.as_array().unwrap().iter().enumerate() {
+                let what = format!("{case}/{name}/{k}");
+                let reset: Vec<&str> = step["reset"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                for (key, v) in step["values"].as_object().unwrap() {
+                    let field = EditField::from_key(key).unwrap();
+                    assert!(field.accepts(num(v)), "{what}: {key}");
+                    let value = (!reset.contains(&key.as_str())).then(|| num(v));
+                    edit::set_value(&mut edits, &computed, field, value);
+                }
+                let e = edit::with_edits(&computed, &got.rotations, &edits);
+                let r = &step["result"];
+                let mut c = Check {
+                    case: what.clone(),
+                    worst: 0.0,
+                };
+                // the values in force: the ones written, the rest computed
+                c.value("little", e.values.little, num(&r["little"]));
+                c.value(
+                    "midline",
+                    e.values.midline_offset,
+                    num(&r["midline_offset"]),
+                );
+                c.value(
+                    "largest space",
+                    e.values.largest_space,
+                    num(&r["largest_space"]),
+                );
+                c.value("discrepancy", e.values.discrepancy, num(&r["discrepancy"]));
+                // what follows from them: equal to the unit
+                assert_eq!(
+                    e.little_category.label(),
+                    r["little_category"].as_str().unwrap(),
+                    "{what}"
+                );
+                assert_eq!(e.level.label(), r["level"].as_str().unwrap(), "{what}");
+                assert_eq!(f64::from(e.score), num(&r["catcat_score"]), "{what}");
+                let items = serde_json::to_value(e.items).unwrap();
+                assert_eq!(items, r["catcat_items"], "{what}");
+                // the values by hand, sorted as the plugin lists them
+                let mut by_hand: Vec<&str> = EditField::ALL
+                    .into_iter()
+                    .filter(|f| f.get(&edits).is_some())
+                    .map(EditField::key)
+                    .collect();
+                by_hand.sort_unstable();
+                let want_hand: Vec<&str> = r["manuale"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                assert_eq!(by_hand, want_hand, "{what}");
+                steps_checked += 1;
+            }
+        }
+    }
+    // 6 cases, 4 scenarios, 1 + 1 + 1 + 4 steps
+    assert_eq!(steps_checked, 6 * 7);
+}

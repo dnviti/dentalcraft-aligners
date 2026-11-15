@@ -1445,6 +1445,62 @@ pub fn register(
     })
 }
 
+/// Smallest interpenetration the correction of the bite removes (mm,
+/// `bite.correct_penetration`).
+pub const CORRECT_MIN_MM: f64 = 0.021;
+
+/// Opening of a bite to the first contact (`bite.correct_penetration`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Correction {
+    /// Rigid move of the upper arch in case coordinates: a translation along
+    /// the occlusal axis of the lower arch.
+    #[serde(skip)]
+    pub upper_delta: DMat4,
+    /// How far the bite opens (mm).
+    pub opening_mm: f64,
+    /// Deepest interpenetration left after the opening (mm).
+    pub penetration_mm: f64,
+    /// Upper crown points in contact after the opening.
+    pub contact_points: usize,
+    /// Upper and lower tooth that touch first (`0` when unknown).
+    pub first_contact: [u16; 2],
+}
+
+/// The correction of the interpenetration of a bite, as the bite adjustment
+/// of intraoral scanner software (`bite.correct_penetration`): the upper arch
+/// moves away along the occlusal axis of the lower arch until the first
+/// contact, as with the teeth unloaded. `None` when the arches do not
+/// interpenetrate (at most [`CORRECT_MIN_MM`] to the first contact). The
+/// interpenetration and the contacts after the move are measured as the
+/// registration measures them.
+///
+/// # Errors
+/// [`BiteError::Invalid`] when the lower arch has no crown.
+pub fn correct_penetration(
+    lower: &ArchModel,
+    upper: &ArchModel,
+) -> Result<Option<Correction>, BiteError> {
+    let no_crown = || BiteError::Invalid("the lower arch has no crown".to_owned());
+    let first = occlusion::first_contact(lower, upper).ok_or_else(no_crown)?;
+    let dz = first.dz;
+    if dz <= CORRECT_MIN_MM {
+        return Ok(None);
+    }
+    let upper_delta = DMat4::from_translation(lower.to_case.z_axis.truncate() * dz);
+    let relation = frame::rigid_inverse(&lower.to_case) * upper_delta * upper.to_case;
+    let surface = lower.crown_surface().ok_or_else(no_crown)?;
+    let (pu, _) = upper.crown_points(None);
+    let q: Vec<DVec3> = pu.iter().map(|&p| relation.transform_point3(p)).collect();
+    let (depth, contacts) = occlusion::penetration(&surface, &occlusion::subsample(&q, 15000));
+    Ok(Some(Correction {
+        upper_delta,
+        opening_mm: dz,
+        penetration_mm: round_to(depth, 3),
+        contact_points: contacts,
+        first_contact: [first.upper_fdi, first.lower_fdi],
+    }))
+}
+
 fn subsample_idx(v: &[u32], n: usize) -> Vec<u32> {
     occlusion::subsample(v, n)
 }
@@ -1517,7 +1573,7 @@ mod tests {
         });
         let v: Vec<DVec3> = d.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let labels = d.mesh.vertex_labels.clone().unwrap();
-        ArchModel::new(arch, &v, &d.mesh.tris, &labels, &d.seeds).unwrap()
+        ArchModel::new(arch, &v, &d.mesh.tris, &labels, &d.seeds, false).unwrap()
     }
 
     #[test]

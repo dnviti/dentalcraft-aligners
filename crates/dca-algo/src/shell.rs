@@ -41,16 +41,24 @@
 //! done in arch coordinates (`+Z` occlusal, [`Input::to_arch`]) so that the
 //! base of the cast is flat on the voxel grid.
 //!
-//! The embrasure under the contact of every two touching neighbouring teeth
-//! is filled ([`embrasure::fills`], `embrasure_fills` of `stage_parts`):
-//! without it the closing joins the crowns at the contact over an open
-//! embrasure, a tunnel through the model.
+//! The interproximal space around the contact of every two neighbouring
+//! teeth the aligner covers is blocked out (`stage_parts`): the narrow slots
+//! and the gingival embrasure under a contact are bridged
+//! ([`bridge::contact_bridges`], `contact_bridges`), and the embrasure under
+//! the contact is filled up to the tangents of the two crowns
+//! ([`embrasure::fills`], `embrasure_fills`): without them the closing joins
+//! the crowns at the contact over an open embrasure, a tunnel through the
+//! model. The printed model also bridges the contacts its own voxel joins
+//! ([`bridge::model_touch_mm`], `model_solid`).
 //!
-//! Deviations from the plugin (documented, not yet ported): the contact
-//! bridges of `stage_parts` (`contact_bridges`, the narrow slots between
-//! teeth that do not touch) and `_tuck_below_margin` (the closed tooth drawn
-//! under the gingiva below its margin); the closing still fills every
-//! contact closer than twice [`BLOCKOUT_MM`]. The occlusal shaping and the ramps of
+//! Below its gingival margin a closed tooth is drawn under the gingiva of
+//! the cast where it stood out of it ([`tuck_below_margin`],
+//! `_tuck_below_margin`): the vertices added to close it under its lowest
+//! scanned point ([`Input::stumps`]). A case whose closed teeth do not tell
+//! their scanned part (built before `crown_scanned` was kept) is not tucked
+//! until its teeth are closed again.
+//!
+//! Deviation from the plugin: the occlusal shaping and the ramps of
 //! `aligner_solid` belong to the bite stages, the trim to B5.
 //!
 //! Outputs are generated on demand by [`run`] (nothing is cached in the
@@ -58,10 +66,11 @@
 //! hundreds); the export calls [`run`] per stage and arch with the stage
 //! inputs that [`stage_teeth`] places.
 
+pub mod bridge;
 pub mod cast;
 pub mod embrasure;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
 
 use dc_case::Fdi;
@@ -74,6 +83,7 @@ use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::export::printcheck;
 use crate::frame;
 use crate::teeth::Which;
 
@@ -116,6 +126,13 @@ pub const REDUCE_MAX_VALENCE: usize = 16;
 /// The sweep of the blockout is grown across the axis by the mesh tolerance
 /// plus this many voxels ([`blockout_grid`]).
 pub const SWEEP_GROW_VOXELS: f64 = 0.1;
+
+/// The closed tooth below its gingival margin stays at least this far under
+/// the gingiva of the model (mm, `GUM_TUCK_MM`).
+pub const GUM_TUCK_MM: f64 = 0.1;
+/// ... drawn towards its axis by these factors until it does
+/// (`GUM_TUCK_SCALES`).
+pub const GUM_TUCK_SCALES: [f64; 7] = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
 
 /// Errors of the shell stage.
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -267,10 +284,30 @@ pub struct Input<'a> {
     /// Per face of `gingiva`: under the crowns (the membrane, no prism);
     /// empty when none.
     pub cover: &'a [bool],
-    /// Tooth number of every tooth of `teeth` (same order): the embrasures
-    /// under the contacts of neighbouring teeth are filled
-    /// ([`embrasure::fills`]); empty: no fill.
+    /// Tooth number of every tooth of `teeth` (same order): the contacts of
+    /// neighbouring teeth are bridged and the embrasures under them filled
+    /// ([`bridge::contact_bridges`], [`embrasure::fills`]); empty: neither.
     pub fdis: &'a [Fdi],
+    /// The teeth the aligner covers (`aligner_teeth`): only their contacts
+    /// are bridged and filled; `None`: every tooth.
+    pub covered: Option<&'a BTreeSet<Fdi>>,
+    /// The part of every tooth of `teeth` under its gingival margin (same
+    /// order): on the model it is drawn under the gingiva of the cast
+    /// ([`tuck_below_margin`]). Empty, or no vertex for a tooth: not drawn
+    /// in (a closed tooth whose scanned part the case does not tell,
+    /// `AlignersState::crown_scanned`).
+    pub stumps: &'a [Stump],
+}
+
+/// The part of a closed tooth under its gingival margin at a stage
+/// ([`Input::stumps`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Stump {
+    /// Tooth → case coordinates at the stage (the frame the tooth was
+    /// closed in: `+Z` occlusal along its axis).
+    pub frame: DMat4,
+    /// Its vertices below the gingival margin ([`below_margin`]).
+    pub below: Vec<u32>,
 }
 
 /// What [`run`] measured.
@@ -342,9 +379,204 @@ fn crown_xy(teeth: &[Vec<DVec3>]) -> Vec<[f64; 2]> {
     out
 }
 
+/// The closed teeth of `input` in arch coordinates.
+fn arch_teeth(input: &Input<'_>) -> Vec<Vec<DVec3>> {
+    let a = input.to_arch;
+    input
+        .teeth
+        .iter()
+        .map(|t| {
+            t.positions
+                .iter()
+                .map(|p| a.transform_point3(p.as_dvec3()))
+                .collect()
+        })
+        .collect()
+}
+
+/// The placed teeth of `input` (arch coordinates `teeth`) with their
+/// numbers, those of `only` when given; empty without the numbers.
+fn placed<'a>(
+    input: &'a Input<'_>,
+    teeth: &'a [Vec<DVec3>],
+    only: Option<&BTreeSet<Fdi>>,
+) -> Vec<embrasure::Tooth<'a>> {
+    if input.fdis.len() != input.teeth.len() {
+        return Vec::new();
+    }
+    input
+        .fdis
+        .iter()
+        .zip(teeth)
+        .zip(input.teeth)
+        .filter(|((f, _), _)| only.is_none_or(|o| o.contains(f)))
+        .map(|((&fdi, points), mesh)| embrasure::Tooth {
+            fdi,
+            points,
+            tris: &mesh.tris,
+        })
+        .collect()
+}
+
+/// The contact bridges of the teeth the aligner covers (`teeth`, as they
+/// are: `contact_bridges` works on the closed teeth) and the embrasure
+/// fills between them (`filled`: the teeth of the model, their stumps drawn
+/// in), arch coordinates (`stage_parts`), `vg` the gingiva there.
+fn contact_solids(
+    input: &Input<'_>,
+    teeth: &[Vec<DVec3>],
+    filled: &[Vec<DVec3>],
+    vg: &[DVec3],
+) -> Vec<embrasure::Solid> {
+    let mut out = bridge::contact_bridges(
+        &placed(input, teeth, input.covered),
+        &bridge::BridgeParams::default(),
+    );
+    out.extend(embrasure::fills(&placed(input, filled, input.covered), vg));
+    out
+}
+
+/// The vertices of a closed tooth added to close it more than
+/// [`GUM_TUCK_MM`] below its lowest scanned point (`_below_margin`: the
+/// neck and the stump under the gingiva): `local` its vertices in its own
+/// frame (`+Z` occlusal), the first `scanned` of them scanned. None when no
+/// vertex is scanned.
+pub fn below_margin(local: &[DVec3], scanned: usize) -> Vec<u32> {
+    let scanned = scanned.min(local.len());
+    if scanned == 0 {
+        return Vec::new();
+    }
+    let low = local[..scanned]
+        .iter()
+        .map(|p| p.z)
+        .fold(f64::INFINITY, f64::min)
+        - GUM_TUCK_MM;
+    (scanned..local.len())
+        .filter(|&i| local[i].z < low)
+        .map(|i| i as u32)
+        .collect()
+}
+
+/// The vertices `local` of a closed tooth (its own frame) placed by `m`
+/// (arch coordinates), those of `below` ([`below_margin`]) that stand out of
+/// the gingiva of the model (`gum`, [`cast::CastInfo::under_gum`]) drawn
+/// towards the axis of the tooth (its local XY scaled by
+/// [`GUM_TUCK_SCALES`]) until they are [`GUM_TUCK_MM`] under it
+/// (`_tuck_below_margin`; a vertex still out at the last factor is left: no
+/// gingiva around it). The stump of a closed tooth is a guess: where the
+/// scanned gingiva over the root is thinner than it, it came out through
+/// the wall of the printed cast. Only vertices move: the tooth stays closed,
+/// and the rings of the stump, about star-shaped around the axis, are drawn
+/// in along their rays.
+pub fn tuck_below_margin(
+    local: &[DVec3],
+    m: &DMat4,
+    below: &[u32],
+    gum: &cast::CastInfo,
+) -> Vec<DVec3> {
+    let mut placed: Vec<DVec3> = local.iter().map(|p| m.transform_point3(*p)).collect();
+    let mut out: Vec<u32> = below
+        .iter()
+        .copied()
+        .filter(|&i| !gum.under_gum(placed[i as usize], GUM_TUCK_MM))
+        .collect();
+    for f in GUM_TUCK_SCALES {
+        if out.is_empty() {
+            break;
+        }
+        out.retain(|&i| {
+            let p = local[i as usize];
+            let q = m.transform_point3(DVec3::new(p.x * f, p.y * f, p.z));
+            let under = gum.under_gum(q, GUM_TUCK_MM);
+            if under {
+                placed[i as usize] = q;
+            }
+            !under
+        });
+    }
+    placed
+}
+
+/// The closed teeth of `input` (arch coordinates `teeth`) as the model has
+/// them: their stumps drawn under the gingiva of the cast `gum`
+/// ([`tuck_below_margin`], `stage_parts`); a tooth without its stump as it
+/// is.
+fn tucked_teeth(input: &Input<'_>, teeth: &[Vec<DVec3>], gum: &cast::CastInfo) -> Vec<Vec<DVec3>> {
+    if input.stumps.len() != teeth.len() {
+        return teeth.to_vec();
+    }
+    teeth
+        .par_iter()
+        .zip(input.stumps)
+        .map(|(pts, s)| {
+            if s.below.is_empty() {
+                return pts.clone();
+            }
+            let m = input.to_arch * s.frame;
+            let to_local = frame::rigid_inverse(&m);
+            let local: Vec<DVec3> = pts.iter().map(|p| to_local.transform_point3(*p)).collect();
+            tuck_below_margin(&local, &m, &s.below, gum)
+        })
+        .collect()
+}
+
+/// The bridges the printed model adds at its voxel (`model_solid`): the
+/// pairs of teeth (every tooth) farther apart than [`embrasure::TOUCH_MM`]
+/// that its blockout can still join ([`bridge::model_touch_mm`]); empty
+/// when the voxel joins no wider gap or without the tooth numbers.
+pub fn model_bridges(input: &Input<'_>, voxel: f64) -> Vec<embrasure::Solid> {
+    let touch = bridge::model_touch_mm(voxel);
+    if touch <= embrasure::TOUCH_MM {
+        return Vec::new();
+    }
+    let teeth = arch_teeth(input);
+    let params = bridge::BridgeParams {
+        gingival: bridge::EMBRASURE_MM.max(touch),
+        touch,
+        above: Some(embrasure::TOUCH_MM),
+        ..bridge::BridgeParams::default()
+    };
+    bridge::contact_bridges(&placed(input, &teeth, None), &params)
+}
+
+/// What the wall of a shell rests on (`case_export._reach_teeth`): every
+/// closed tooth and the contact bridges and embrasure fills of the covered
+/// teeth, in arch coordinates, with the tooth of every face (`0` on a
+/// bridge or a fill) for [`crate::export::printcheck::shell_reach`]. The
+/// fills are those of the teeth as they are (the plugin takes them from the
+/// model, between the teeth with their stumps drawn in: they differ under
+/// the gingiva only, where no wall rests).
+pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
+    let teeth = arch_teeth(input);
+    let vg: Vec<DVec3> = input
+        .gingiva
+        .positions
+        .iter()
+        .map(|p| input.to_arch.transform_point3(p.as_dvec3()))
+        .collect();
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut tris = Vec::new();
+    let mut fdi = Vec::new();
+    let mut append = |v: &[DVec3], t: &[[u32; 3]], f: u8| {
+        let off = positions.len() as u32;
+        positions.extend(v.iter().map(|p| p.as_vec3()));
+        tris.extend(t.iter().map(|x| x.map(|i| i + off)));
+        fdi.extend(std::iter::repeat_n(f, t.len()));
+    };
+    for (k, (pts, mesh)) in teeth.iter().zip(input.teeth).enumerate() {
+        append(pts, &mesh.tris, input.fdis.get(k).map_or(0, |f| f.get()));
+    }
+    for (v, t) in contact_solids(input, &teeth, &teeth, &vg) {
+        append(&v, &t, 0);
+    }
+    (TriMesh::new(positions, tris), fdi)
+}
+
 /// The parts of the model as one triangle soup in arch coordinates
-/// (`stage_parts`): the gingiva cast, the prisms of the exact gingiva and
-/// the closed teeth. Their union is the model (overlapping closed parts).
+/// (`stage_parts`): the gingiva cast, the prisms of the exact gingiva, the
+/// closed teeth, their stumps drawn under the gingiva of the cast
+/// ([`Input::stumps`]), and the contact bridges and embrasure fills of the
+/// covered teeth. Their union is the model (overlapping closed parts).
 pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, ShellError> {
     if input.gingiva.tris.is_empty() {
         return Err(ShellError::Invalid("the gingiva is empty".into()));
@@ -366,16 +598,7 @@ pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, Shell
         .iter()
         .map(|p| a.transform_point3(p.as_dvec3()))
         .collect();
-    let teeth: Vec<Vec<DVec3>> = input
-        .teeth
-        .iter()
-        .map(|t| {
-            t.positions
-                .iter()
-                .map(|p| a.transform_point3(p.as_dvec3()))
-                .collect()
-        })
-        .collect();
+    let teeth = arch_teeth(input);
     let (mut prisms, mut cover) = (Vec::new(), Vec::new());
     for (f, t) in input.gingiva.tris.iter().enumerate() {
         if input.cover.get(f).copied().unwrap_or(false) {
@@ -397,6 +620,8 @@ pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, Shell
         &cover,
     );
     let (pv, pt) = cast::gum_prisms(&vg, &c.info);
+    // below the gingival margin the closed teeth stay inside the gingiva
+    let tucked = tucked_teeth(input, &teeth, &c.info);
     let mut positions: Vec<Vec3> = c.positions.iter().map(|p| p.as_vec3()).collect();
     let mut tris = c.tris.clone();
     let mut append = |v: &mut dyn Iterator<Item = Vec3>, t: &[[u32; 3]]| {
@@ -405,26 +630,24 @@ pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, Shell
         tris.extend(t.iter().map(|f| f.map(|i| i + off)));
     };
     append(&mut pv.iter().map(|p| p.as_vec3()), &pt);
-    for (pts, mesh) in teeth.iter().zip(input.teeth) {
+    for (pts, mesh) in tucked.iter().zip(input.teeth) {
         append(&mut pts.iter().map(|p| p.as_vec3()), &mesh.tris);
     }
-    if input.fdis.len() == input.teeth.len() {
-        let placed: Vec<embrasure::Tooth<'_>> = input
-            .fdis
-            .iter()
-            .zip(&teeth)
-            .zip(input.teeth)
-            .map(|((&fdi, points), mesh)| embrasure::Tooth {
-                fdi,
-                points,
-                tris: &mesh.tris,
-            })
-            .collect();
-        for (v, t) in embrasure::fills(&placed, &vg) {
-            append(&mut v.iter().map(|p| p.as_vec3()), &t);
-        }
+    for (v, t) in contact_solids(input, &teeth, &tucked, &vg) {
+        append(&mut v.iter().map(|p| p.as_vec3()), &t);
     }
     Ok(TriMesh::new(positions, tris))
+}
+
+/// `parts` with the closed `solids` (arch coordinates) added to the soup.
+fn with_solids(parts: &TriMesh, solids: &[embrasure::Solid]) -> TriMesh {
+    let mut out = parts.clone();
+    for (v, t) in solids {
+        let off = out.positions.len() as u32;
+        out.positions.extend(v.iter().map(|p| p.as_vec3()));
+        out.tris.extend(t.iter().map(|x| x.map(|i| i + off)));
+    }
+    out
 }
 
 fn band_for(voxel: f64, reach: f64) -> f32 {
@@ -609,9 +832,10 @@ pub fn blockout_grid(
 }
 
 /// The fewest triangles within `tol` of `mesh` (both ways), still
-/// watertight and crossing itself nowhere (the full resolution is held
-/// around any crossing the reduction makes, [`REDUCE_FIX_ROUNDS`]); the full
-/// mesh when the reduction is not (or `tol` is 0).
+/// watertight, crossing itself nowhere and with no degenerate triangle (the
+/// full resolution is held around any crossing or triangle of no area the
+/// reduction makes, [`REDUCE_FIX_ROUNDS`]); the full mesh when the
+/// reduction is not (or `tol` is 0).
 ///
 /// The exact reduction ([`dc_geom::qem::decimate`] with a tolerance) costs
 /// more than linearly in the triangles, so a large mesh is reduced in slabs
@@ -623,8 +847,9 @@ pub fn reduce(mesh: &TriMesh, tol: f64) -> Result<TriMesh, ShellError> {
 }
 
 /// [`reduce`] of a mesh that is then moved by `to_out` (a rigid transform):
-/// the crossings are looked for where the vertices land, since rounding
-/// them may make two triangles that nearly touch cross.
+/// the crossings and the triangles of no area are looked for where the
+/// vertices land, since rounding them may make two triangles that nearly
+/// touch cross, or three corners nearly in line fall in line.
 pub fn reduce_to(mesh: &TriMesh, tol: f64, to_out: Option<&DMat4>) -> Result<TriMesh, ShellError> {
     if tol <= 0.0 || mesh.tris.len() < REDUCE_MIN_TRIS {
         return Ok(mesh.clone());
@@ -635,9 +860,9 @@ pub fn reduce_to(mesh: &TriMesh, tol: f64, to_out: Option<&DMat4>) -> Result<Tri
         .div_ceil(REDUCE_SLAB_TRIS)
         .clamp(1, REDUCE_MAX_SLABS);
     // the reduction may fold a triangle through another one at a sharp crease
-    // (the full resolution never crosses itself): the faces of the full
-    // resolution around every crossing are held and the slabs that hold them
-    // are reduced again
+    // or leave three corners in line on a flat wall (the full resolution does
+    // neither): the faces of the full resolution around every such triangle
+    // are held and the slabs that hold them are reduced again
     let slabs = Slabs::new(mesh, n);
     let mut held = vec![false; mesh.tris.len()];
     let mut parts: Vec<Option<TriMesh>> = vec![None; slabs.count()];
@@ -647,11 +872,17 @@ pub fn reduce_to(mesh: &TriMesh, tol: f64, to_out: Option<&DMat4>) -> Result<Tri
         if !out.validate().is_watertight() {
             break;
         }
-        let pairs = match to_out {
-            Some(m) => crossing_pairs(&transformed(&out, m)),
-            None => crossing_pairs(&out),
-        };
-        if pairs.is_empty() {
+        let moved = to_out.map(|m| transformed(&out, m));
+        let landed = moved.as_ref().unwrap_or(&out);
+        let mut bad: Vec<u32> = crossing_pairs(landed)
+            .into_iter()
+            .flat_map(|(a, b)| [a, b])
+            .collect();
+        bad.extend(
+            (0..landed.tris.len() as u32)
+                .filter(|&f| printcheck::degenerate(&landed.positions, landed.tris[f as usize])),
+        );
+        if bad.is_empty() {
             return Ok(out);
         }
         let bvh = match &bvh {
@@ -659,7 +890,7 @@ pub fn reduce_to(mesh: &TriMesh, tol: f64, to_out: Option<&DMat4>) -> Result<Tri
             None => bvh.insert(dc_geom::bvh::Bvh::build(mesh).map_err(geom)?),
         };
         let r = Vec3::splat(REDUCE_HOLD_MM as f32);
-        for f in pairs.iter().flat_map(|&(a, b)| [a, b]) {
+        for f in bad {
             let t = out.tris[f as usize].map(|i| out.positions[i as usize]);
             let lo = t[0].min(t[1]).min(t[2]) - r;
             let hi = t[0].max(t[1]).max(t[2]) + r;
@@ -1068,15 +1299,24 @@ pub fn run(
     let same_voxel = (params.model_voxel_mm - params.shell_voxel_mm).abs() < 1e-12;
     let reach = design.clearance_mm + design.thickness_mm;
     let t = Instant::now();
-    let model_grid = if need_model_grid || (outputs.shell && same_voxel) {
+    // the printed model also bridges the contacts its voxel joins; the shell
+    // keeps the bridges of the parts
+    let extra = if need_model_grid {
+        model_bridges(input, params.model_voxel_mm)
+    } else {
+        Vec::new()
+    };
+    let model_soup = (!extra.is_empty()).then(|| with_solids(&parts, &extra));
+    let shared = outputs.shell && same_voxel && model_soup.is_none();
+    report
+        .seconds
+        .insert("bridges".into(), t.elapsed().as_secs_f64());
+    let t = Instant::now();
+    let model_grid = if need_model_grid || shared {
         // one field for the three solids: its band reaches the outer level of the shell
-        let reach = if outputs.shell && same_voxel {
-            reach
-        } else {
-            0.0
-        };
+        let reach = if shared { reach } else { 0.0 };
         Some(closed_grid_for(
-            &parts,
+            model_soup.as_ref().unwrap_or(&parts),
             params.model_voxel_mm,
             params.blockout_mm,
             reach,
@@ -1084,6 +1324,7 @@ pub fn run(
     } else {
         None
     };
+    drop(model_soup);
     report
         .seconds
         .insert("closing".into(), t.elapsed().as_secs_f64());
@@ -1109,7 +1350,7 @@ pub fn run(
         }
         let t = Instant::now();
         let own;
-        let closed = match (&model_grid, same_voxel) {
+        let closed = match (&model_grid, shared) {
             (Some(g), true) => g,
             _ => {
                 own = closed_grid_for(&parts, params.shell_voxel_mm, params.blockout_mm, reach)?;
@@ -1233,6 +1474,91 @@ pub fn wall_distances(shell: &TriMesh, model: &TriMesh) -> Result<Vec<f64>, Shel
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cast seen from above at height 0 within `r` of the origin and
+    /// `-3` beyond (nodes every 0.25 mm over `±6` mm), `NaN` (no cast)
+    /// for `x > 5`.
+    fn gum_disc(r: f64) -> cast::CastInfo {
+        let (cell, n) = (0.25, 49);
+        let lo = DVec3::new(-6.0, -6.0, -10.0);
+        let h = (0..n * n)
+            .map(|k| {
+                let (x, y) = (lo.x + cell * (k / n) as f64, lo.y + cell * (k % n) as f64);
+                if x > 5.0 {
+                    f64::NAN
+                } else if x.hypot(y) <= r {
+                    0.0
+                } else {
+                    -3.0
+                }
+            })
+            .collect();
+        cast::CastInfo {
+            grid: cast::CastGrid {
+                lo,
+                cell,
+                nx: n,
+                ny: n,
+            },
+            hmax: Vec::new(),
+            dist: Vec::new(),
+            z_base: -13.0,
+            hmin: Vec::new(),
+            faces: Vec::new(),
+            h,
+        }
+    }
+
+    #[test]
+    fn the_gum_is_read_between_its_nodes_and_not_where_there_is_none() {
+        let gum = gum_disc(2.0);
+        assert!(gum.under_gum(DVec3::new(0.0, 0.0, -0.1), 0.1));
+        assert!(!gum.under_gum(DVec3::new(0.0, 0.0, -0.05), 0.1));
+        // halfway between a node at 0 and one at -3 (x 2.0 and 2.25): -1.5
+        assert!(gum.under_gum(DVec3::new(2.125, 0.0, -1.65), 0.1));
+        assert!(!gum.under_gum(DVec3::new(2.125, 0.0, -1.55), 0.1));
+        // no cast, and outside the grid: not under it
+        assert!(!gum.under_gum(DVec3::new(5.5, 0.0, -9.0), 0.1));
+        assert!(!gum.under_gum(DVec3::new(0.0, 7.0, -9.0), 0.1));
+    }
+
+    /// The vertices added to close a tooth under its lowest scanned point
+    /// are drawn towards its axis until they are under the gingiva; the
+    /// scanned ones, those already under it and those no factor brings
+    /// under it stay.
+    #[test]
+    fn a_stump_standing_out_of_the_gum_is_drawn_in() {
+        let local = [
+            DVec3::new(1.0, 0.0, 1.0),  // scanned, lowest at 0.5
+            DVec3::new(0.0, 1.0, 0.5),  // scanned
+            DVec3::new(3.0, 0.0, 0.45), // added, not below the margin
+            DVec3::new(3.0, 0.0, -1.0), // added, out of the gum: drawn in
+            DVec3::new(0.5, 0.0, -1.0), // added, under the gum already
+            DVec3::new(0.0, 4.0, 2.0),  // added, but above the margin
+        ];
+        let below = below_margin(&local, 2);
+        assert_eq!(below, [3, 4]);
+        assert!(below_margin(&local, 0).is_empty());
+        // placed one mm along +x and turned a quarter about z
+        let m = DMat4::from_translation(DVec3::new(1.0, 0.0, 0.0))
+            * DMat4::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        let gum = gum_disc(2.5);
+        let out = tuck_below_margin(&local, &m, &below, &gum);
+        for k in [0, 1, 2, 4, 5] {
+            assert!(
+                (out[k] - m.transform_point3(local[k])).length() < 1e-12,
+                "{k}"
+            );
+        }
+        // the first factor that brings it under the gum: 0.7 (placed at
+        // (1, 2.1), between nodes of the cast at 0; 0.8 leaves it at
+        // (1, 2.4), where the cast is at -1.8)
+        let want = m.transform_point3(DVec3::new(3.0 * 0.7, 0.0, -1.0));
+        assert!((out[3] - want).length() < 1e-12, "{} {want}", out[3]);
+        // no factor brings it under a gum this narrow: left
+        let out = tuck_below_margin(&local, &m, &below, &gum_disc(0.4));
+        assert!((out[3] - m.transform_point3(local[3])).length() < 1e-12);
+    }
 
     /// A closed axis-aligned box.
     fn cuboid(lo: [f32; 3], hi: [f32; 3]) -> TriMesh {

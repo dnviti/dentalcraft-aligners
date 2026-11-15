@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 dc-case.workspace = true
 glam.workspace = true
+schemars.workspace = true  # JSON Schema of the settings enums the commands take
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

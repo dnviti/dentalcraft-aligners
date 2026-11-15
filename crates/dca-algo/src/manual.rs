@@ -1,6 +1,7 @@
 //! Manual tools: the geometry behind the label brush, the crown fill, the
-//! clean-up of the labels, the region check before a tooth is rebuilt and
-//! the clinical adjustment of a tooth with collision feedback.
+//! clean-up of the labels, the region check before a tooth is rebuilt, the
+//! margin line of a tooth region and the clinical adjustment of a tooth with
+//! collision feedback.
 //!
 //! Reference: `ortho_aligner/manual.py` (`PaintSession.brush`, `stroke`,
 //! `fill_region`, `check_region`, `clean_labels`) and
@@ -13,6 +14,7 @@
 
 mod clean;
 mod fill;
+mod margin;
 mod region;
 
 use dc_case::Pose;
@@ -23,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 pub use clean::{CleanReport, clean_labels};
 pub use fill::{FillParams, fill_region};
+pub use margin::{MarginLine, Polyline, margin_line};
 pub use region::{RegionReport, check_region};
 
 /// A vertex is painted when `cos(normal, view)` is below this: the surface

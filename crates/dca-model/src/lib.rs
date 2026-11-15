@@ -10,23 +10,41 @@
 //! Units are millimetres and degrees unless a field name says otherwise;
 //! poses are [`dc_case::Pose`] (millimetres, radians in the quaternion).
 
+mod aligner_view;
 mod bite;
+mod bite_report;
+mod components;
 mod migrate;
+mod production;
+mod review;
+mod scan_base;
 mod settings;
 mod state;
 mod visit;
 
+pub use aligner_view::{AlignerBase, AlignerView, view_key};
 pub use bite::{
     AlignerBite, BiteClosing, OcclusalMode, OcclusalSettings, Ramp, RampKind, RampSettings,
 };
+pub use bite_report::{
+    BiteFit, BiteMethod, BiteRegistration, BiteReport, BiteScanFit, BiteVerdict,
+};
+pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale, tooth_centre};
 pub use migrate::{ModelError, migrate};
+pub use production::{AlignerEnd, AlignerEndSuggestion, Side};
+pub use review::{ReviewKind, ReviewRecord, ReviewStatus};
+pub use scan_base::{ClosedBy, ScanBase};
 pub use settings::{
-    FindTeethSettings, PerioStage, SegmentationSettings, Settings, StagingPattern, StagingSettings,
-    StudyBaseSettings, StudyBaseStyle, TrimMode, TrimParams,
+    FindTeethSettings, INTERVAL_DAYS, InsertionAxis, IntervalPolicy, PRODUCTION_GROUPS,
+    PRODUCTION_NUMBERS, PerioStage, Quality, SegmentationSettings, Settings, SetupIprZone,
+    SetupLeveling, SetupMidline, SetupScope, SetupSettings, SpacePriority, StagingPattern,
+    StagingSettings, StampDate, StampDateFormat, StampFace, StampRead, StampSettings, StampTooth,
+    StudyBaseSettings, StudyBaseStyle, TOOTH_SPEED, TrimMode, TrimParams, production_out_of_range,
 };
 pub use state::{
-    AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed, SegmentationRun,
-    Setup, Stage, TeethBasis, ToothFrame, ToothMeasures,
+    AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed,
+    SegmentationRun, Setup, SetupSummary, Stage, StagingSummary, TeethBasis, TeethChange,
+    ToothFrame, ToothMeasures, other_arch_fdi, other_arch_label,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 

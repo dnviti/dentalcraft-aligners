@@ -6,15 +6,17 @@
 //! stages follow the processing order of the old `steps.py`:
 //! arch, seeds, segmentation, teeth, diagnosis, bite, setup, staging, then
 //! production (shell, trim, stamp), follow-up (visits) and export. Shared
-//! building blocks: world frame (`frame`), arch forms (`archform`), tooth
-//! anatomy (`anatomy`), reference values (`evidence`) and the synthetic
-//! demo arch (`demo`).
+//! building blocks: world frame (`frame`), rotations (`rotation`: the one
+//! conversion between quaternions, rotation vectors and angles, always the
+//! shortest rotation), arch forms (`archform`), tooth anatomy (`anatomy`),
+//! reference values (`evidence`) and the synthetic demo arch (`demo`).
 //!
 //! Port convention: each stage exposes `run(&Input, &Params)` with
 //! `Params: Deserialize + JsonSchema + Default`, and `dca-module` registers
 //! it as a command with `stage_command!`.
 
 pub mod aligner_bite;
+pub mod aligner_view;
 pub mod anatomy;
 pub mod arch_check;
 pub mod archform;
@@ -30,6 +32,9 @@ pub mod manual;
 pub mod occlusion;
 pub mod ramps;
 pub mod reconstruct;
+pub mod review;
+pub mod rotation;
+pub mod scan_base;
 pub mod schedule;
 pub mod seed_check;
 pub mod segmentation;

@@ -18,6 +18,13 @@ The expected values are computed with the plugin's own functions, glued as
 `tooth_equators` (vertical insertion axis: no warp), `equator_trim`, `_bridge_contacts`,
 `trim_points` (STRAIGHT and SCALLOPED, no scan border), `aligner.trim_cutter` and
 `aligner.smooth_border` (SMOOTH: every tooth covered, and 36 left out) do it.
+
+"refine": the refinements of the EQUATOR field on a trim grid over the teeth: the ridge of
+a gingiva between the nodes (`_gum_cell_max`, a corrugated sheet in single precision), the
+distance from the crown columns the scan shows (`_grid_distance`, with mathutils' k-d tree
+replaced by an exact search in single precision as it measures) and the fine grid of a thin
+wall blended into the coarse one inside the outlines (`_coarse_inside`, with an analytic
+field).
 """
 import importlib
 import json
@@ -36,7 +43,30 @@ sys.modules["bpy"] = types.ModuleType("bpy")
 mathutils = types.ModuleType("mathutils")
 mathutils.Matrix = mathutils.Vector = object
 sys.modules["mathutils"] = mathutils
+
+
+class KDTree3:
+    """Stand-in for mathutils.kdtree.KDTree: single-precision coordinates, the distance of
+    the nearest in single precision (squares summed in order, sqrtf)."""
+
+    def __init__(self, n):
+        self.P = np.zeros((n, 3), np.float32)
+
+    def insert(self, co, index):
+        self.P[index] = np.asarray(co, np.float32)
+
+    def balance(self):
+        pass
+
+    def find(self, co):
+        D = self.P - np.asarray(co, np.float32)
+        d2 = D[:, 0] * D[:, 0] + D[:, 1] * D[:, 1] + D[:, 2] * D[:, 2]
+        i = int(np.argmin(d2))
+        return None, i, float(np.sqrt(d2[i]))
+
+
 sys.modules["mathutils.kdtree"] = types.ModuleType("mathutils.kdtree")
+sys.modules["mathutils.kdtree"].KDTree = KDTree3
 pkg = types.ModuleType("oa_trim")
 pkg.__path__ = [PKG]
 sys.modules["oa_trim"] = pkg
@@ -208,6 +238,120 @@ def r(a, nd=9):
     return np.round(np.asarray(a, np.float64), nd).tolist()
 
 
+def node_grid(lo, hi, cell):
+    """The nodes (X, Y) of aligner.trim_cutter's grid over the bounds lo, hi grown by 2 mm."""
+    lo2, hi2 = np.asarray(lo, np.float64)[:2] - 2.0, np.asarray(hi, np.float64)[:2] + 2.0
+    nx = int(np.ceil((hi2[0] - lo2[0]) / cell)) + 1
+    ny = int(np.ceil((hi2[1] - lo2[1]) / cell)) + 1
+    return np.meshgrid(np.linspace(lo2[0], hi2[0], nx), np.linspace(lo2[1], hi2[1], ny), indexing="ij")
+
+
+class GumMesh:
+    """What _gum_cell_max reads of a gpu_query.Mesh: its vertices and faces."""
+
+    def __init__(self, V, T):
+        self.V, self.T = V, T
+
+
+def analytic(X, Y):
+    return 0.3 * np.sin(X) + 0.2 * np.cos(1.3 * Y) - 0.01 * X * Y
+
+
+def refine_inputs(teeth_out, lo, hi):
+    """The inputs of the refinements, made again by the Rust test from these formulas: the
+    trim grid (0.6 mm), a corrugated gingiva over the teeth (single precision), the gingiva
+    the rays hit a little under it (none in a corner), crown tops over disks around the
+    teeth, the top of the model at every node."""
+    X, Y = node_grid(lo, hi, 0.6)
+    gx = np.arange(lo[0] - 1.0, hi[0] + 1.0, 0.57)
+    gy = np.arange(lo[1] - 1.0, hi[1] + 1.0, 0.61)
+    GX, GY = np.meshgrid(gx, gy, indexing="ij")
+    Vg = np.column_stack([GX.ravel(), GY.ravel(), (0.6 * np.sin(1.7 * GX) * np.cos(1.1 * GY) - 2.0).ravel()])
+    Vg = Vg.astype(np.float32).astype(np.float64)
+    m, n = len(gx), len(gy)
+    T = [(i * n + j, (i + 1) * n + j, (i + 1) * n + j + 1) for i in range(m - 1) for j in range(n - 1)]
+    T += [(i * n + j, (i + 1) * n + j + 1, i * n + j + 1) for i in range(m - 1) for j in range(n - 1)]
+    g_top = 0.6 * np.sin(1.7 * X) * np.cos(1.1 * Y) - 2.05
+    g_top[(X < lo[0]) & (Y < lo[1] + 3.0)] = -np.inf
+    top_z = np.full(X.shape, -np.inf)
+    for t in teeth_out:
+        c = np.asarray(t["origin"], np.float64)
+        disk = (X - c[0]) ** 2 + (Y - c[1]) ** 2 < 2.5 ** 2
+        top_z[disk] = 1.0 + 0.1 * X[disk]
+    return X, Y, Vg, np.asarray(T, np.int64), g_top, top_z
+
+
+def refine(teeth_out, lo, hi):
+    """The refinements of the EQUATOR field (_gum_cell_max, _grid_distance, _coarse_inside):
+    the values that differ from their input, [node, value]."""
+    lo, hi = np.round(lo, 9), np.round(hi, 9)
+    X, Y, Vg, T, g_top, top_z = refine_inputs(teeth_out, lo, hi)
+    lifted = cp._gum_cell_max(GumMesh(Vg, T), X, Y, g_top.ravel(), np.fmax(g_top, top_z).ravel())
+    out = {"gum": [[int(k), lifted[k]] for k in np.flatnonzero(lifted != g_top.ravel())]}
+    # the distance from the crown columns (the disks) of every third node
+    P = np.column_stack([X.ravel(), Y.ravel()])
+    want = np.arange(0, len(P), 3)
+    out["distance"] = cp._grid_distance(P, np.isfinite(top_z).ravel(), want, X.shape).tolist()
+    # the fine grid of a thin wall (0.2 mm cells) blended into the coarse one inside the outlines
+    Xf, Yf = node_grid(lo, hi, 0.2)
+    ctx = {"loops": {t["fdi"]: np.asarray(t["trim"]["0.0"], np.float64) for t in teeth_out}}
+    Z, Z0 = cp._coarse_inside(ctx, analytic)(Xf, Yf).ravel(), analytic(Xf, Yf).ravel()
+    out["coarse"] = {"cell": 0.2, "changed": [[int(k), Z[k]] for k in np.flatnonzero(Z != Z0)]}
+    return out
+
+
+LOWER = [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38]
+
+
+def border_checks(teeth_out):
+    """The checks of an EQUATOR border, glued as case_print._aligner_solid does: the trim
+    lines 0.5 mm beyond the equators and a shell border made around them (single precision):
+    at every azimuth points 0.1 and 0.4 mm outside the line, 0.05 mm above it (0.45 mm on the
+    labial side of the incisors and canines), one more 1 mm higher, one 0.5 mm inside the loop
+    and one beyond the band."""
+    off, outer = 0.5, WALL
+    loops = {t["fdi"]: np.asarray(t["trim"]["0.5"], np.float64) for t in teeth_out}
+    tinfo = {t["fdi"]: {"margin": np.asarray(t["margin_z"], np.float64), "top": t["top"],
+                        "centre": np.asarray(t["centre"], np.float64),
+                        "equator": np.asarray(t["equator"], np.float64)[:, 2]} for t in teeth_out}
+    dirs = cp.labial_dirs(tinfo, LOWER)
+    P = []
+    for f, E in loops.items():
+        c = tinfo[f]["centre"][:2]
+        a = 2.0 * np.pi * np.arange(len(E)) / len(E)
+        lab = np.column_stack([np.cos(a), np.sin(a)]) @ dirs[f] > 0.6
+        for k in range(len(E)):
+            rad = (E[k, :2] - c) / np.linalg.norm(E[k, :2] - c)
+            rise = 0.45 if f % 10 <= 3 and lab[k] else 0.05
+            for d, dz in ((0.1, rise), (0.4, rise + 0.02 * (k % 3)), (0.3, rise + 1.0), (-0.5, rise + 0.3),
+                          (1.5, -1.0)):
+                q = E[k, :2] + d * rad
+                P.append([q[0], q[1], E[k, 2] + dz])
+    Vs = np.asarray(P, np.float32).astype(np.float64)
+    border = cp.border_heights({"loops": loops, "tinfo": tinfo, "warp": None, "outer": outer}, Vs)
+    labial = cp.labial_cover(loops, tinfo, border, LOWER) or cp.labial_cover(loops, tinfo, order=LOWER)
+    raised = []
+    for f in sorted(labial):
+        E, b = loops[f], border.get(f)
+        if b is None or f not in dirs:
+            continue
+        a = 2.0 * np.pi * np.arange(len(E)) / len(E)
+        lab = (np.column_stack([np.cos(a), np.sin(a)]) @ dirs[f] > 0.6) & np.isfinite(b)
+        rise = float(np.median(b[lab] - E[lab, 2])) if lab.any() else 0.0
+        if rise > cp.BORDER_RAISED_MM:
+            raised.append((int(f), round(rise, 2)))
+    offsets = cp.border_offsets(loops, tinfo, border, LOWER)
+    rank = {f: i for i, f in enumerate(LOWER)}
+    limited = [(f, mm) for f, mm in sorted(offsets.items(), key=lambda x: rank.get(x[0], 99))
+               if mm < cp.OFFSET_LIMIT_SHARE * off]
+    low = sorted((f, mm, sh) for f, (mm, sh) in labial.items()
+                 if mm < cp.LABIAL_WARN_MM or sh < cp.LABIAL_WARN_SHARE)
+    return {"offset": off, "outer": outer, "order": LOWER, "V": Vs.tolist(),
+            "border": {str(f): [x if np.isfinite(x) else None for x in b.tolist()] for f, b in border.items()},
+            "labial": {str(f): list(v) for f, v in labial.items()}, "raised": raised,
+            "offsets": {str(f): v for f, v in offsets.items()}, "limited": limited, "low": low}
+
+
 def main():
     teeth = [tooth(31, (2.9, 0.0, 0.0), 8.0, -14.0),
              tooth(32, (8.2, -1.6, 0.0), 30.0, -10.0),
@@ -258,6 +402,8 @@ def main():
                 E, info = equator(t, W)
                 rec["trim"][str(t["fdi"])] = r(W.from_warp(equator_trim(E, info, 0.0)))
         out["axes"][axis] = rec
+    out["refine"] = refine(out["teeth"], lo, hi)
+    out["checks"] = border_checks(out["teeth"])
     json.dump(out, sys.stdout, separators=(",", ":"))
 
 

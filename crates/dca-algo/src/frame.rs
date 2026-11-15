@@ -36,6 +36,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::anatomy::{self, Arch};
+use crate::rotation;
 
 /// Translation below which the patient is already on the axes (mm).
 pub const TOL_MM: f64 = 0.01;
@@ -133,16 +134,6 @@ pub fn rot_axis_angle(axis: DVec3, angle: f64) -> DMat3 {
     DMat3::from_axis_angle(a, angle)
 }
 
-/// Rotation matrix of the rotation vector `r` (axis times angle).
-pub fn rotvec_to_matrix(r: DVec3) -> DMat3 {
-    DMat3::from_quat(DQuat::from_scaled_axis(r))
-}
-
-/// Rotation vector (axis times angle, angle in `[0, π]`) of a rotation matrix.
-pub fn matrix_to_rotvec(m: &DMat3) -> DVec3 {
-    DQuat::from_mat3(m).normalize().to_scaled_axis()
-}
-
 /// Frame matrix with columns `x`, `y`, `z` and translation `origin`.
 pub fn make_frame(x: DVec3, y: DVec3, z: DVec3, origin: DVec3) -> DMat4 {
     DMat4::from_cols(
@@ -205,6 +196,17 @@ impl ArchFrame {
             1.0
         } else {
             -1.0
+        }
+    }
+
+    /// The frame with its occlusal side turned over (the plugin's
+    /// `case_teeth._occlusal_flip`): `x` and `n` reversed, `y` and the
+    /// origin kept, so it stays right-handed.
+    pub fn turned_over(self) -> Self {
+        Self {
+            x: -self.x,
+            n: -self.n,
+            ..self
         }
     }
 }
@@ -301,20 +303,13 @@ pub fn world_delta(frame: &ArchFrame, arch: Arch, centre: DVec3) -> Pose {
     let r = world * local.transpose();
     Pose {
         t: -(r * centre),
-        q: DQuat::from_mat3(&r).normalize(),
+        q: rotation::canonical(DQuat::from_mat3(&r)),
     }
-}
-
-/// Rotation angle of the pose in degrees.
-pub fn rotation_degrees(pose: &Pose) -> f64 {
-    let m = DMat3::from_quat(pose.q);
-    let tr = m.x_axis.x + m.y_axis.y + m.z_axis.z;
-    ((tr - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
 /// `true` when the pose is within [`TOL_MM`] / [`TOL_DEG`] of the identity.
 pub fn is_identity(pose: &Pose) -> bool {
-    rotation_degrees(pose) < TOL_DEG && pose.t.length() < TOL_MM
+    rotation::degrees(pose) < TOL_DEG && pose.t.length() < TOL_MM
 }
 
 /// Fraction of the occlusal height used for the occlusal plane of the
@@ -424,6 +419,11 @@ pub struct Input<'a> {
     pub vertices: &'a [DVec3],
     /// Seeds of the case (any arch; other arches are ignored).
     pub seeds: &'a [Seed],
+    /// The occlusal side of the arch was turned over by hand
+    /// (`AlignersState::occlusal_flipped`): the arch frame found is turned
+    /// over ([`ArchFrame::turned_over`]), as the plugin does after
+    /// `compute_frame` (`case_teeth._occlusal_flip`).
+    pub occlusal_flipped: bool,
 }
 
 /// Where the arch frame came from.
@@ -471,6 +471,7 @@ pub fn run(input: &Input<'_>, _params: &Params) -> Result<Output, FrameError> {
             (FrameSource::Mesh, f, c)
         }
     };
+    let arch_frame = oriented(input, arch_frame);
     Ok(output(input.arch, source, arch_frame, centre))
 }
 
@@ -486,7 +487,18 @@ pub fn run_from_seeds(input: &Input<'_>, _params: &Params) -> Result<Output, Fra
     let arch_seeds = arch_seeds(input);
     let arch_frame = arch_frame_from_seeds(&arch_seeds, centroid(input.vertices))?;
     let centre = arch_centre(&arch_frame, &arch_seeds);
+    let arch_frame = oriented(input, arch_frame);
     Ok(output(input.arch, FrameSource::Seeds, arch_frame, centre))
+}
+
+/// `frame` turned over when the occlusal side of the input was turned over
+/// by hand.
+fn oriented(input: &Input<'_>, frame: ArchFrame) -> ArchFrame {
+    if input.occlusal_flipped {
+        frame.turned_over()
+    } else {
+        frame
+    }
 }
 
 /// The seeds of the arch of the input.
@@ -609,20 +621,14 @@ mod tests {
     }
 
     #[test]
-    fn rotation_helpers_round_trip() {
-        let r = rot_axis_angle(DVec3::new(1.0, 2.0, -0.5), 0.8);
-        let v = matrix_to_rotvec(&r);
-        assert!((v.length() - 0.8).abs() < 1e-12);
-        assert!(rotvec_to_matrix(v).abs_diff_eq(r, 1e-12));
-        assert_eq!(rotvec_to_matrix(DVec3::ZERO), DMat3::IDENTITY);
-        assert_eq!(matrix_to_rotvec(&DMat3::IDENTITY), DVec3::ZERO);
-        // 180 degrees
-        let half = rot_axis_angle(DVec3::Z, std::f64::consts::PI);
-        assert!((matrix_to_rotvec(&half).length() - std::f64::consts::PI).abs() < 1e-9);
+    fn axis_angle_rotation() {
         assert_eq!(rot_axis_angle(DVec3::ZERO, 1.0), DMat3::IDENTITY);
         // 90 degrees about Z takes X to Y
         let q = rot_axis_angle(DVec3::Z, std::f64::consts::FRAC_PI_2);
         assert!((q * DVec3::X - DVec3::Y).length() < 1e-12);
+        // the axis is normalised first
+        let r = rot_axis_angle(DVec3::new(1.0, 2.0, -0.5), 0.8);
+        assert!((rotation::matrix_to_rotvec(&r).length() - 0.8).abs() < 1e-12);
     }
 
     #[test]
@@ -758,7 +764,7 @@ mod tests {
         let c = arch_centre(&f, &seeds);
         let d = world_delta(&f, Arch::Lower, c);
         assert!(is_identity(&d), "{d:?}");
-        assert!(rotation_degrees(&d) < 1e-6);
+        assert!(rotation::degrees(&d) < 1e-6);
     }
 
     #[test]
@@ -777,7 +783,7 @@ mod tests {
             0.002
         ))));
         assert!(
-            (rotation_degrees(&Pose::from_rotation(DQuat::from_rotation_z(1.0)))
+            (rotation::degrees(&Pose::from_rotation(DQuat::from_rotation_z(1.0)))
                 - 57.29577951308232)
                 .abs()
                 < 1e-9
@@ -820,6 +826,7 @@ mod tests {
                 arch,
                 vertices: &v,
                 seeds: &seeds,
+                occlusal_flipped: false,
             };
             let out = run(&input, &Params::default()).unwrap();
             assert_eq!(out.source, FrameSource::Seeds);
@@ -845,6 +852,7 @@ mod tests {
                     arch,
                     vertices: &v2,
                     seeds: &s2,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -866,6 +874,7 @@ mod tests {
                     arch,
                     vertices: &v,
                     seeds: &seeds,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -875,6 +884,7 @@ mod tests {
                     arch,
                     vertices: &v,
                     seeds: &[],
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -900,11 +910,46 @@ mod tests {
                     arch,
                     vertices: &v,
                     seeds: &other,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
             .unwrap();
             assert_eq!(ignored.source, FrameSource::Mesh);
+        }
+    }
+
+    #[test]
+    fn a_flipped_occlusal_side_turns_the_frame_over() {
+        // the plugin's arch_set(flip=True): frame X and Z reversed, Y kept
+        // (tests/archive/test_manual_tools.py), the same origin and centre
+        for (arch, with_seeds) in [
+            (Arch::Lower, true),
+            (Arch::Upper, true),
+            (Arch::Lower, false),
+        ] {
+            let (v, seeds) = demo_input(arch, with_seeds);
+            let input = |occlusal_flipped| Input {
+                arch,
+                vertices: &v,
+                seeds: &seeds,
+                occlusal_flipped,
+            };
+            let a = run(&input(false), &Params::default()).unwrap();
+            let b = run(&input(true), &Params::default()).unwrap();
+            assert_eq!(b.arch_frame, a.arch_frame.turned_over(), "{arch:?}");
+            assert_eq!(b.arch_frame.n, -a.arch_frame.n);
+            assert_eq!(b.arch_frame.x, -a.arch_frame.x);
+            assert_eq!(b.arch_frame.y, a.arch_frame.y);
+            assert_eq!(b.arch_frame.handedness(), 1.0);
+            assert_eq!((b.centre, b.source), (a.centre, a.source));
+            // the world frame turns the arch upside down
+            let up = |o: &Output| o.from_case.apply_vector(a.arch_frame.n);
+            assert!(up(&a).dot(up(&b)) < -0.999, "{arch:?}");
+            if with_seeds {
+                let strict = run_from_seeds(&input(true), &Params::default()).unwrap();
+                assert_eq!(strict.arch_frame, b.arch_frame);
+            }
         }
     }
 
@@ -917,6 +962,7 @@ mod tests {
                     arch: Arch::Lower,
                     vertices: &v,
                     seeds,
+                    occlusal_flipped: false,
                 },
                 &Params::default(),
             )
@@ -928,6 +974,7 @@ mod tests {
                 arch: Arch::Lower,
                 vertices: &v,
                 seeds: &seeds,
+                occlusal_flipped: false,
             },
             &Params::default(),
         )
@@ -953,6 +1000,7 @@ mod tests {
                 arch: Arch::Lower,
                 vertices: &v,
                 seeds: &seeds[..3],
+                occlusal_flipped: false,
             },
             &Params::default(),
         )
@@ -964,6 +1012,7 @@ mod tests {
                     arch: Arch::Lower,
                     vertices: &[],
                     seeds: &seeds,
+                    occlusal_flipped: false,
                 },
                 &Params::default()
             ),
@@ -991,6 +1040,7 @@ mod tests {
             arch: Arch::Lower,
             vertices: &[],
             seeds: &[],
+            occlusal_flipped: false,
         };
         assert_eq!(
             run(&input, &Params::default()),

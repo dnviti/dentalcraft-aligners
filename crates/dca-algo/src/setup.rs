@@ -42,6 +42,9 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
+use dca_model::{
+    SetupIprZone, SetupLeveling, SetupMidline, SetupScope, SetupSettings, SpacePriority,
+};
 use glam::{DMat3, DMat4, DVec2, DVec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -2023,6 +2026,94 @@ impl Params {
             ipr_zone: self.ipr_zone,
             ipr_surface_cap: self.ipr_surface_cap_mm,
             enamel_fraction: self.enamel_fraction,
+        }
+    }
+
+    /// The parameters the case settings give (`case_plan.conservative_config`
+    /// reads the scene settings): every arch, no tooth excluded, no drawn
+    /// line; the derotation limit and the canines held along the arch are
+    /// not settings of the plugin, they keep their defaults.
+    pub fn from_settings(s: &SetupSettings) -> Self {
+        Self {
+            align_scope: s.align_scope.into(),
+            line_sigma_mm: s.line_sigma_mm,
+            pos_tol_mm: s.pos_tol_mm,
+            normal_tol_mm: s.normal_tol_mm,
+            rot_tol_deg: s.rot_tol_deg,
+            post_normal_tol_mm: s.post_normal_tol_mm,
+            post_rot_tol_deg: s.post_rot_tol_deg,
+            leveling: s.leveling.into(),
+            vertical_max_mm: s.vertical_max_mm,
+            level_tol_mm: s.level_tol_mm,
+            level_canines: s.level_canines,
+            fix_molars: s.fix_molars,
+            fix_third: s.fix_third,
+            align_fixed: s.align_fixed,
+            contact_tol_mm: s.contact_tol_mm,
+            incisor_weight: s.incisor_weight,
+            midline: s.midline.into(),
+            close_spaces: s.close_spaces,
+            priority: priority(s.priority),
+            expansion_upper_mm: s.expansion_upper_mm,
+            expansion_lower_posterior_mm: s.expansion_lower_posterior_mm,
+            expansion_lower_canine_mm: s.expansion_lower_canine_mm,
+            advance_max_mm: s.advance_max_mm,
+            retract_max_mm: s.retract_max_mm,
+            ipr_zone: s.ipr_zone.into(),
+            ipr_surface_cap_mm: s.ipr_surface_cap_mm,
+            enamel_fraction: s.enamel_fraction,
+            ..Self::default()
+        }
+    }
+}
+
+/// The order of the therapies of a priority (`case_plan.PRIORITY`).
+fn priority(p: SpacePriority) -> Vec<Therapy> {
+    use Therapy::{Exp, Ipr, Pro};
+    match p {
+        SpacePriority::ExpIprPro => vec![Exp, Ipr, Pro],
+        SpacePriority::IprExpPro => vec![Ipr, Exp, Pro],
+        SpacePriority::ExpProIpr => vec![Exp, Pro, Ipr],
+    }
+}
+
+impl From<SetupScope> for AlignScope {
+    fn from(s: SetupScope) -> Self {
+        match s {
+            SetupScope::Anterior => AlignScope::Anterior,
+            SetupScope::Premolars => AlignScope::Premolars,
+            SetupScope::All => AlignScope::All,
+        }
+    }
+}
+
+impl From<SetupLeveling> for Leveling {
+    fn from(l: SetupLeveling) -> Self {
+        match l {
+            SetupLeveling::Smooth => Leveling::Smooth,
+            SetupLeveling::Flat => Leveling::Flat,
+            SetupLeveling::None => Leveling::None,
+        }
+    }
+}
+
+impl From<SetupMidline> for Midline {
+    fn from(m: SetupMidline) -> Self {
+        match m {
+            SetupMidline::Keep => Midline::Keep,
+            SetupMidline::Center => Midline::Center,
+            SetupMidline::Balance => Midline::Balance,
+        }
+    }
+}
+
+impl From<SetupIprZone> for IprZone {
+    fn from(z: SetupIprZone) -> Self {
+        match z {
+            SetupIprZone::None => IprZone::None,
+            SetupIprZone::Anterior => IprZone::Anterior,
+            SetupIprZone::AnteriorPremolars => IprZone::AnteriorPremolars,
+            SetupIprZone::All => IprZone::All,
         }
     }
 }

@@ -305,3 +305,49 @@ fn two_scans_of_one_arch_give_the_surer_the_arch_and_a_conflict() {
         assert_eq!(detection(&out, &c)["arch"], "lower", "scan_c detection");
     }
 }
+
+/// The import closes each scan with a base, and the steps that read the
+/// open border (finding the teeth, the separation, the frame, the 3D teeth)
+/// read the start of the closed scan back: it must be exactly the file as
+/// `dc_mesh::io::read` gives it, which is what the plugin oracles on the
+/// real scans (`dca-algo/tests/autoseed_real.rs`, `segmentation_real.rs`)
+/// feed the algorithms. So those oracles hold for the module path too.
+#[test]
+fn the_closed_scan_starts_with_the_file_as_the_real_scan_oracles_read_it() {
+    let Some(real) = scans() else { return };
+    for r in &real {
+        let l = r.letter;
+        let n = Neutral::new(&format!("closed-{l}"), &real);
+        let path = n.path(l);
+        let t = Instant::now();
+        let (state, out) = commands::find(IMPORT_SCANS)
+            .unwrap()
+            .execute(
+                &CaseState::default(),
+                &json!({ "files": [{ "path": path }] }),
+                &JobCtx::detached(),
+            )
+            .unwrap_or_else(|_| panic!("scan_{l}: the import failed"));
+        let secs = t.elapsed().as_secs_f64();
+        let base = &out["bases"][0];
+        assert_eq!(base["already_closed"], false, "scan_{l}: open as read");
+        assert_eq!(base["watertight"], true, "scan_{l}: closed solid");
+        let scan = &state.case.scans[0];
+        let closed = state.blobs.require(&scan.mesh).unwrap();
+        assert!(closed.validate().is_watertight(), "scan_{l}: watertight");
+        let data = state
+            .module_data::<dca_model::AlignersState>(dca_model::MODULE_ID)
+            .unwrap();
+        let record = data.scan_base(&scan.mesh).expect("a base record");
+        assert_eq!(record.closed_by, dca_model::ClosedBy::Import, "scan_{l}");
+        let open = dca_algo::scan_base::open_part(closed, &record).expect("the scan as read");
+        let file = dc_mesh::io::read(&path).unwrap_or_else(|_| panic!("scan_{l}: unreadable"));
+        assert!(open.positions == file.positions, "scan_{l}: points");
+        assert!(open.tris == file.tris, "scan_{l}: triangles");
+        // counts and time, never positions
+        eprintln!(
+            "scan_{l}: imported and closed in {secs:.2} s; base: {} border edges, {} points and {} triangles added",
+            base["closed_edges"], base["vertices_added"], base["faces_added"]
+        );
+    }
+}

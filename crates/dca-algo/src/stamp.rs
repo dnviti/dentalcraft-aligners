@@ -33,7 +33,8 @@
 //! on the surface and cuts them with a Blender boolean (Manifold, then
 //! Exact). Here the characters are the outlines of a bundled font
 //! (B612 Mono Bold subset, SIL OFL 1.1, `assets/`), filled with
-//! `lyon_tessellation`; the stamp is the signed distance field of the ink
+//! `lyon_tessellation` and set by their ink to the width of the plugin's
+//! label (`text`); the stamp is the signed distance field of the ink
 //! (2D, to the outline) extruded along the surface normals. There is no mesh
 //! boolean. Two ways to apply that field:
 //!
@@ -525,6 +526,10 @@ pub struct Input<'a> {
     pub arch: Arch,
     /// The teeth of the stage (only those with at least 20 crown points are used).
     pub teeth: Vec<ToothSite>,
+    /// The teeth the text may go on (those the aligner covers,
+    /// `aligner_teeth`); `None`: every tooth of `teeth`. The centre of the
+    /// arch is that of every tooth.
+    pub covered: Option<&'a std::collections::BTreeSet<Fdi>>,
 }
 
 /// Where the stamp was put.
@@ -803,6 +808,7 @@ fn candidates<'a>(input: &'a Input<'_>, first: ToothChoice) -> Vec<&'a ToothSite
             .teeth
             .iter()
             .find(|s| s.fdi == fdi && s.crown.len() >= 20)
+            && input.covered.is_none_or(|c| c.contains(&fdi))
             && !out.iter().any(|s| s.fdi == fdi)
         {
             out.push(site);

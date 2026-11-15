@@ -35,11 +35,11 @@
 
 use std::collections::BTreeMap;
 
-use dc_case::{Fdi, Pose};
+use dc_case::Fdi;
 use dc_geom::sdf::{SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
 use dca_model::{Ramp, RampKind, RampSettings};
-use glam::{DMat3, DMat4, DQuat, DVec3};
+use glam::{DMat3, DMat4, DVec3};
 use serde::Serialize;
 
 use crate::aligner_bite::occlusal::vertex_normals;
@@ -158,20 +158,6 @@ pub fn overbite(lower_incisors: &[DVec3], upper_incisors: &[DVec3]) -> Option<f6
     Some(percentile(&mut lo, 99.0) - percentile(&mut up, 1.0))
 }
 
-fn quat_of(m: &DMat4) -> DQuat {
-    DQuat::from_mat3(&DMat3::from_cols(
-        m.x_axis.truncate(),
-        m.y_axis.truncate(),
-        m.z_axis.truncate(),
-    ))
-    .normalize()
-}
-
-/// The pose of a rigid 4x4.
-pub fn pose_of(m: &DMat4) -> Pose {
-    Pose::new(m.w_axis.truncate(), quat_of(m))
-}
-
 /// 4x4 of a ramp in the coordinates of its tooth with its size as the scale
 /// (`T R S`, the Blender object matrix).
 pub fn matrix(ramp: &Ramp) -> DMat4 {
@@ -190,7 +176,7 @@ pub fn matrix(ramp: &Ramp) -> DMat4 {
 pub fn new_ramp(fdi: Fdi, m_local: &DMat4, size_mm: [f64; 3], kind: RampKind) -> Ramp {
     Ramp {
         fdi,
-        pose: pose_of(m_local),
+        pose: crate::rotation::pose_from_mat4(m_local),
         size_mm,
         kind,
     }
