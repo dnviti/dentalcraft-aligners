@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.0-alpha.5](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.4...v0.2.0-alpha.5) (2026-11-15)
+
+
+### Features
+
+* **aligners:** aligner in the 3D view, study models kept in the case, open scans closed at import ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** arch line drawn by hand ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** bite comes first when both arches are present ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** bite report, bite correction and plugin bite oracle ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** clinical review, attachments in the calendar and report ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** component selection, outline and transform gizmo command ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** diagnosis values entered by hand ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** production settings, aligner end, contact bridges, trim holes and checks, standard export and stamps ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** set the arch by hand, flip the occlusal side, close a scan with a base ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** setup parameters, result, reset and move-a-tooth steps ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** staging parameters, calendar, result line and slow a tooth ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** tooth region and margin line query ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+
+
+### Bug Fixes
+
+* **aligners:** keep the 3D teeth basis on bite move, build or name every arch ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+* **aligners:** use the shortest rotation everywhere ([b769c2d](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/b769c2dd6b64c22f3cfb0ed8df7a707fa39df44a))
+
 ## [0.2.0-alpha.4](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.3...v0.2.0-alpha.4) (2026-11-13)
 
 
