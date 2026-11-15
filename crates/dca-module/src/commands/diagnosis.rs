@@ -118,8 +118,12 @@ fn arch_data(
     if measured.is_empty() {
         return Ok(None);
     }
-    let mesh = state.blobs.require(&scan.mesh)?;
-    let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+    // the scan as it was read, where the teeth stage measured
+    let closed = state.blobs.require(&scan.mesh)?;
+    let case_vertices: Vec<_> = crate::open_scan::open_points(data, &scan.mesh, closed)
+        .iter()
+        .map(|p| p.as_dvec3())
+        .collect();
     // the arch frame the teeth stage measured in (the one the seeds define)
     let framed = frame::run(
         &frame::Input {
@@ -144,18 +148,18 @@ fn arch_data(
         .vertex_labels
         .as_ref()
         .ok_or_else(|| crate::commands::messages::labels_missing(arch))?;
-    if labels.len() != case_vertices.len() {
+    if labels.len() != closed.vertex_count() {
         return Err(crate::commands::messages::labels_mismatch(
             arch,
             labels.len(),
-            case_vertices.len(),
+            closed.vertex_count(),
         ));
     }
     let in_arch: Vec<_> = case_vertices
         .iter()
         .map(|&p| to_arch.transform_point3(p))
         .collect();
-    let crowns = diagnosis::crowns_of(&in_arch, labels);
+    let crowns = diagnosis::crowns_of(&in_arch, &labels[..in_arch.len()]);
     Ok(Some((teeth, Some(crowns))))
 }
 

@@ -80,6 +80,7 @@ macro_rules! stage_command {
     };
 }
 
+pub(crate) mod aligner_view;
 mod auto;
 pub(crate) mod autoseed;
 mod bite;
@@ -142,6 +143,7 @@ pub fn all() -> Vec<CommandSpec> {
         trim::specs,
         stamp::specs,
         export::specs,
+        aligner_view::specs,
         study_base::specs,
         visits::specs,
         manual::specs,

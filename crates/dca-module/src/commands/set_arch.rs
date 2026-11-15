@@ -116,13 +116,18 @@ fn role_word(role: ScanRole) -> &'static str {
 }
 
 /// The ids of what the label dependents of the arches `roles` hold
-/// (`clear_label_dependents` without clearing).
+/// (`clear_label_dependents` without clearing), and `study_models` when one
+/// of them has a study model (`renumber_arches` drops it).
 fn held(data: &AlignersState, roles: &BTreeSet<ScanRole>) -> BTreeSet<&'static str> {
     let mut d = data.clone();
-    roles
+    let mut ids: BTreeSet<&'static str> = roles
         .iter()
         .flat_map(|r| d.clear_label_dependents(*r))
-        .collect()
+        .collect();
+    if roles.iter().any(|r| data.study_models.contains_key(r)) {
+        ids.insert("study_models");
+    }
+    ids
 }
 
 /// `r` with every vertex label in the other arch; the old blob goes to
@@ -211,6 +216,13 @@ pub(super) fn run_set_arch(
         let visits: Vec<usize> = (0..data.visits.len())
             .filter(|&k| moved.contains(&data.visits[k].arch))
             .collect();
+        // the study models built for the old jaws go (`renumber_arches`)
+        stale.extend(
+            data.study_models
+                .iter()
+                .filter(|(r, _)| moved.contains(r) || moved.contains(&opposite(**r)))
+                .map(|(_, b)| *b),
+        );
         data.renumber_arches(&moved);
         for &r in &moved {
             let new = opposite(r);
@@ -476,6 +488,13 @@ mod tests {
         let mut state = two_demo_arches();
         let mut d = data(&state);
         d.bite_registered = true;
+        // a study model of the lower arch (a stand-in mesh)
+        let cast = dc_mesh::TriMesh::new(
+            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y],
+            vec![[0, 1, 2]],
+        );
+        let cast = state.blobs.insert(cast);
+        d.study_models.insert(ScanRole::Lower, cast);
         state.set_module(MODULE_ID, ModuleState::new(d));
         let lower = state.case.scan(ScanRole::Lower).unwrap().clone();
         let upper = state.case.scan(ScanRole::Upper).unwrap().clone();
@@ -508,6 +527,17 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|c| c == "bite_registered")
+        );
+        // the study model was built for the old jaw: it goes, and is reported
+        assert!(data(&next).study_models.is_empty());
+        assert!(!next.blobs.contains(&cast));
+        assert!(
+            out["module_cleared"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "study_models"),
+            "{out}"
         );
     }
 

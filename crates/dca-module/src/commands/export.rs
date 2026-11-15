@@ -115,6 +115,7 @@ fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, Com
         if schedule::active_stages(arch, &data.stages) == 0 {
             continue;
         }
+        // the scan of the case: a scan closed with a base is printed with it
         if let Some(scan) = labelled_scan(state, data, arch.role())? {
             let fdis: Vec<Fdi> = data
                 .tooth_frames
@@ -131,11 +132,12 @@ fn prepare(state: &CaseState, data: &AlignersState) -> Result<Vec<ArchData>, Com
                 .iter()
                 .map(|&f| (f, md_sign(data, &seq, &rest, f)))
                 .collect();
+            // the gingiva was built on the scan as it was read
             let gum = match data.gingiva.get(&arch.role()) {
                 Some(r) => Some(
                     GumDeform::new(
                         state.blobs.require(r)?,
-                        scan.mesh.vertex_count(),
+                        scan.scanned,
                         &dca_algo::gingiva::Params::default(),
                     )
                     .map_err(|e| CommandError::Invalid(format!("the stored gingiva: {e}")))?,
@@ -230,6 +232,7 @@ fn mesh_provider<'a>(
         date: choice.date,
         stamp_dates: choice.stamp_dates.clone(),
         cancel: choice.cancel.clone(),
+        checked: true,
     };
     match shells::ShellProvider::new(state, data, input, options)? {
         Ok(p) => {
@@ -411,19 +414,7 @@ fn run_report(
         &data.settings,
     );
     let input = input(&arches, &data);
-    // what the call does not give comes from the case settings
-    let stamp_settings = &data.settings.stamp;
-    let quality = *params.quality.get_or_insert(data.settings.quality);
-    let stamp = *params.stamp.get_or_insert(stamp_settings.enabled);
-    if params.stamp_code.trim().is_empty() {
-        params.stamp_code = stamp_settings.code.clone();
-    }
-    // the stamp carries the day of the export or the first day of the aligner
-    let stamp_dates = if stamp_settings.date == dca_model::StampDate::Start {
-        export::start_dates(&input, &params.base())
-    } else {
-        BTreeMap::new()
-    };
+    let choice = report_choice(&data, &input, &mut params, ctx.cancel_token().clone())?;
     let renders = if params.report && params.embed_renders {
         render_views(state, &data)
     } else {
@@ -437,16 +428,6 @@ fn run_report(
         renders,
         meshes: "",
         notes: Vec::new(),
-    };
-    let choice = MeshChoice {
-        shells: params.shells,
-        quality,
-        voxel_mm: params.voxel_mm,
-        stamp,
-        stamp_code: params.stamp_code.clone(),
-        date: export_date(params.generated.as_deref())?,
-        stamp_dates,
-        cancel: ctx.cancel_token().clone(),
     };
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
     let case = CaseInfo {
@@ -462,6 +443,176 @@ fn run_report(
         .map_err(export_error)?;
     let out = serde_json::to_value(&report).map_err(|e| CommandError::Failed(e.to_string()))?;
     Ok((state.clone(), with_doubts(out, &data)))
+}
+
+/// How `aligners.output.report` chooses its print files from `params`: the
+/// quality, the stamp and its code the call does not give are those of the
+/// case settings (written back into `params`, which the package reads), the
+/// stamp carries the day of the export or the first day of every aligner.
+/// The aligner of the 3D view built as the export writes it
+/// (`aligners.view.aligner-exact`) takes the same choice.
+fn report_choice(
+    data: &AlignersState,
+    input: &export::Input<'_>,
+    params: &mut FullParams,
+    cancel: dc_command::CancelToken,
+) -> Result<MeshChoice, CommandError> {
+    let stamp_settings = &data.settings.stamp;
+    let quality = *params.quality.get_or_insert(data.settings.quality);
+    let stamp = *params.stamp.get_or_insert(stamp_settings.enabled);
+    if params.stamp_code.trim().is_empty() {
+        params.stamp_code = stamp_settings.code.clone();
+    }
+    // the stamp carries the day of the export or the first day of the aligner
+    let stamp_dates = if stamp_settings.date == dca_model::StampDate::Start {
+        export::start_dates(input, &params.base())
+    } else {
+        BTreeMap::new()
+    };
+    Ok(MeshChoice {
+        shells: params.shells,
+        quality,
+        voxel_mm: params.voxel_mm,
+        stamp,
+        stamp_code: params.stamp_code.clone(),
+        date: export_date(params.generated.as_deref())?,
+        stamp_dates,
+        cancel,
+    })
+}
+
+// ---- the aligner of the 3D view ----------------------------------------------------------------------------------
+
+/// How the aligner of the 3D view is built (`aligners.view.*`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ViewBuild {
+    /// The preview (the plugin's `aligner_solid` at `preview_params`): the
+    /// construction of the print file at `voxel_mm`, reduced within
+    /// `tolerance_mm` as it comes, without the stamp and the checks of the
+    /// print files.
+    Preview {
+        /// Detail of the fields (mm).
+        voxel_mm: f64,
+        /// Tolerance of the surface (mm).
+        tolerance_mm: f64,
+    },
+    /// The aligner `aligners.output.export-all` writes, at `quality`.
+    Exact {
+        /// Quality of the print files.
+        quality: Quality,
+    },
+}
+
+/// An aligner built for the 3D view (case coordinates).
+pub(crate) struct ViewAligner {
+    pub arch: Arch,
+    pub stage: u32,
+    pub mesh: dc_mesh::TriMesh,
+    pub seconds: f64,
+}
+
+/// The aligner of every `(arch, stage)` of `wanted` built for the 3D view by
+/// the provider of the export, as `build` says, the arches at the same time;
+/// also the notes of the provider. The arches of the input are those with
+/// aligners, a separated scan, closed teeth and a gingiva: with both, the
+/// input of the export, so an exact aligner is the solid the export writes.
+pub(crate) fn view_aligners(
+    state: &CaseState,
+    data: &AlignersState,
+    wanted: &[(Arch, u32)],
+    build: ViewBuild,
+    ctx: &JobCtx,
+) -> Result<(Vec<ViewAligner>, Vec<Note>), CommandError> {
+    let built = |a: Arch| {
+        data.gingiva.contains_key(&a.role()) && data.crowns.keys().any(|f| Arch::of(*f) == a)
+    };
+    let arches: Vec<ArchData> = prepare(state, data)?
+        .into_iter()
+        .filter(|a| built(a.arch))
+        .collect();
+    if let Some((a, _)) = wanted
+        .iter()
+        .find(|(a, _)| !arches.iter().any(|d| d.arch == *a))
+    {
+        return Err(messages::invalid(
+            "aligners-err-no-3d-teeth",
+            &[("arch", &messages::arch_word(*a))],
+        ));
+    }
+    let input = input(&arches, data);
+    let provider: Box<dyn MeshProvider + '_> = match build {
+        ViewBuild::Exact { quality } => {
+            // `aligners.output.export-all`: the shells required, the quality
+            // asked, the rest from the case settings
+            let mut params = FullParams {
+                shells: Some(true),
+                quality: Some(quality),
+                ..FullParams::default()
+            };
+            calendar_defaults(
+                &mut params.start_date,
+                &mut params.interval_days,
+                &mut params.policy,
+                &data.settings,
+            );
+            let choice = report_choice(data, &input, &mut params, ctx.cancel_token().clone())?;
+            mesh_provider(state, data, &input, &choice)?.0
+        }
+        ViewBuild::Preview {
+            voxel_mm,
+            tolerance_mm,
+        } => {
+            let options = shells::Options {
+                voxel_mm,
+                tolerance_mm,
+                stamp: false,
+                stamp_code: String::new(),
+                date: schedule::Date::today(),
+                stamp_dates: BTreeMap::new(),
+                cancel: ctx.cancel_token().clone(),
+                checked: false,
+            };
+            match shells::ShellProvider::new(state, data, &input, options)? {
+                Ok(p) => Box::new(p),
+                Err(why) => return Err(CommandError::Invalid(why)),
+            }
+        }
+    };
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let provider = provider.as_ref();
+    let results: Vec<Result<Option<ViewAligner>, export::ExportError>> = std::thread::scope(|s| {
+        let jobs: Vec<_> = wanted
+            .iter()
+            .map(|&(arch, stage)| {
+                let done = &done;
+                s.spawn(move || {
+                    let t = std::time::Instant::now();
+                    let mesh = provider.aligner(arch, stage)?;
+                    let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    ctx.set_fraction(n as f32 / wanted.len() as f32);
+                    Ok(mesh.map(|mesh| ViewAligner {
+                        arch,
+                        stage,
+                        mesh,
+                        seconds: t.elapsed().as_secs_f64(),
+                    }))
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| {
+                j.join()
+                    .unwrap_or_else(|_| Err(export::ExportError::Package("panicked".into())))
+            })
+            .collect()
+    });
+    let mut out = Vec::new();
+    for r in results {
+        if let Some(a) = r.map_err(export_error)? {
+            out.push(a);
+        }
+    }
+    Ok((out, provider.notes()))
 }
 
 // ---- print check -------------------------------------------------------------------------------------------------
@@ -656,7 +807,7 @@ fn run_manifest(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::{Value, json};
 
@@ -1051,7 +1202,7 @@ mod tests {
 
     /// The golden scans of both arches as the app imports them (STL files in
     /// a new case), through the automatic pipeline up to the bite.
-    fn golden_pipeline() -> CaseState {
+    pub(crate) fn golden_pipeline() -> CaseState {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../golden/fixtures");
         let dir = temp("pipeline");
         std::fs::create_dir_all(&dir).unwrap();

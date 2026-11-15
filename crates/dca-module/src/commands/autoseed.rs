@@ -136,9 +136,10 @@ fn run_orientation(
         .scan(arch.role())
         .ok_or_else(crate::commands::messages::reference_missing)?;
     require_settled(scan)?;
-    let mesh = state.blobs.require(&scan.mesh)?;
-    let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let data = aligners_data(state)?;
+    // the scan as it was read: the side of the teeth comes from its open border
+    let mesh = crate::open_scan::open_scan(state, &data, &scan.mesh)?;
+    let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let input = frame::Input {
         arch,
         vertices: &vertices,
@@ -202,7 +203,8 @@ fn run_numbering(
             .case
             .scan(arch.role())
             .ok_or_else(|| crate::commands::messages::no_scan(arch))?;
-        let mesh = state.blobs.require(&scan.mesh)?;
+        // the scan as it was read: the side of the teeth comes from its open border
+        let mesh = crate::open_scan::open_scan(state, &data, &scan.mesh)?;
         let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let input = autoseed::Input {
             arch,

@@ -147,8 +147,12 @@ impl ArchPrint {
         if crowns.is_empty() {
             return Ok(None);
         }
+        // the frame of the teeth stage, on the scan as it was read
         let mesh = state.blobs.require(&scan.mesh)?;
-        let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+        let case_vertices: Vec<_> = crate::open_scan::open_points(data, &scan.mesh, mesh)
+            .iter()
+            .map(|p| p.as_dvec3())
+            .collect();
         let framed = frame::run(
             &frame::Input {
                 arch,

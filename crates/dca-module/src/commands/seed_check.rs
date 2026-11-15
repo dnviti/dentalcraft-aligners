@@ -85,23 +85,25 @@ fn scan_of(state: &CaseState, arch: Arch) -> Result<Option<Scan>, CommandError> 
     let (Some(scan), Some(labels_ref)) = (state.case.scan(role), data.labels.get(&role)) else {
         return Ok(None);
     };
-    let mesh = state.blobs.require(&scan.mesh)?;
+    let closed = state.blobs.require(&scan.mesh)?;
     let labelled = state.blobs.require(labels_ref)?;
     let labels = labelled
         .vertex_labels
-        .clone()
+        .as_ref()
         .ok_or_else(|| messages::labels_missing(arch))?;
-    if labels.len() != mesh.vertex_count() {
+    if labels.len() != closed.vertex_count() {
         return Err(messages::labels_mismatch(
             arch,
             labels.len(),
-            mesh.vertex_count(),
+            closed.vertex_count(),
         ));
     }
+    // the scan as it was read, as the separation it checks
+    let mesh = crate::open_scan::open_part(&data, &scan.mesh, closed)?;
     Ok(Some(Scan {
         vertices: mesh.positions.iter().map(|p| p.as_dvec3()).collect(),
         tris: mesh.tris.clone(),
-        labels,
+        labels: crate::open_scan::open_labels(labels, &mesh).to_vec(),
     }))
 }
 

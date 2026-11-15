@@ -211,9 +211,13 @@ pub(crate) fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandE
 pub(crate) struct LabelledScan {
     pub mesh: std::sync::Arc<dc_mesh::TriMesh>,
     pub labels: Vec<u16>,
+    /// The first points of `mesh` that are the scan as it was read: all of
+    /// them but the base of a scan closed with one (`crate::open_scan`).
+    pub scanned: usize,
 }
 
-/// The scan and labels of an arch; `Ok(None)` when it has none.
+/// The scan and labels of an arch, the scan as the case holds it (the
+/// closed solid of a scan closed with a base); `Ok(None)` when it has none.
 pub(crate) fn labelled_scan(
     state: &CaseState,
     data: &AlignersState,
@@ -234,7 +238,39 @@ pub(crate) fn labelled_scan(
             mesh.vertex_count(),
         ));
     }
-    Ok(Some(LabelledScan { mesh, labels }))
+    let scanned = data
+        .scan_base(&scan.mesh)
+        .map_or(mesh.vertex_count(), |b| b.vertices as usize);
+    Ok(Some(LabelledScan {
+        mesh,
+        labels,
+        scanned,
+    }))
+}
+
+/// [`labelled_scan`] as the scan was read: without the base of a scan
+/// closed with one, for the steps the plugin runs on the open scan.
+pub(crate) fn open_labelled_scan(
+    state: &CaseState,
+    data: &AlignersState,
+    role: ScanRole,
+) -> Result<Option<LabelledScan>, CommandError> {
+    let Some(scan) = state.case.scan(role) else {
+        return Ok(None);
+    };
+    let Some(LabelledScan {
+        mesh, mut labels, ..
+    }) = labelled_scan(state, data, role)?
+    else {
+        return Ok(None);
+    };
+    let mesh = crate::open_scan::open_part(data, &scan.mesh, &mesh)?;
+    labels.truncate(mesh.vertex_count());
+    Ok(Some(LabelledScan {
+        scanned: mesh.vertex_count(),
+        mesh,
+        labels,
+    }))
 }
 
 /// `+1` when the x axis of the tooth frame points mesially: from the
@@ -288,7 +324,8 @@ fn run_automatic(
                 Ok(true)
             }
         };
-        let Some(scan) = labelled_scan(state, &data, role)? else {
+        // the scan as it was read, where the teeth stage measured
+        let Some(scan) = open_labelled_scan(state, &data, role)? else {
             skip("aligners-err-why-not-separated")?;
             continue;
         };

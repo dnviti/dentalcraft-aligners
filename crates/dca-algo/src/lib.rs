@@ -16,6 +16,7 @@
 //! it as a command with `stage_command!`.
 
 pub mod aligner_bite;
+pub mod aligner_view;
 pub mod anatomy;
 pub mod arch_check;
 pub mod archform;

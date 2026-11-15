@@ -10,16 +10,19 @@
 //! Units are millimetres and degrees unless a field name says otherwise;
 //! poses are [`dc_case::Pose`] (millimetres, radians in the quaternion).
 
+mod aligner_view;
 mod bite;
 mod bite_report;
 mod components;
 mod migrate;
 mod production;
 mod review;
+mod scan_base;
 mod settings;
 mod state;
 mod visit;
 
+pub use aligner_view::{AlignerBase, AlignerView, view_key};
 pub use bite::{
     AlignerBite, BiteClosing, OcclusalMode, OcclusalSettings, Ramp, RampKind, RampSettings,
 };
@@ -30,6 +33,7 @@ pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScal
 pub use migrate::{ModelError, migrate};
 pub use production::{AlignerEnd, AlignerEndSuggestion, Side};
 pub use review::{ReviewKind, ReviewRecord, ReviewStatus};
+pub use scan_base::{ClosedBy, ScanBase};
 pub use settings::{
     FindTeethSettings, INTERVAL_DAYS, InsertionAxis, IntervalPolicy, PRODUCTION_GROUPS,
     PRODUCTION_NUMBERS, PerioStage, Quality, SegmentationSettings, Settings, SetupIprZone,

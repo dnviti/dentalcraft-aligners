@@ -53,7 +53,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::messages;
-use super::staging::{aligners_data, arch_name, complexity_of, labelled_scan, md_sign};
+use super::staging::{aligners_data, arch_name, complexity_of, md_sign, open_labelled_scan};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -378,7 +378,8 @@ fn run_visit(
             &[("arch", &messages::arch_word(arch))],
         ));
     }
-    let Some(case_scan) = labelled_scan(state, &data, role)? else {
+    // the scan as it was read: an open progress scan is registered on it
+    let Some(case_scan) = open_labelled_scan(state, &data, role)? else {
         return Err(messages::not_segmented(arch));
     };
     let last = data.stages.iter().map(|s| s.index).max().unwrap_or(0);
@@ -686,7 +687,7 @@ fn run_replan(
             "aligner {from} is not in the plan ({last} aligners)"
         )));
     }
-    let Some(scan) = labelled_scan(state, &data, arch.role())? else {
+    let Some(scan) = open_labelled_scan(state, &data, arch.role())? else {
         return Err(messages::not_segmented(arch));
     };
 
@@ -913,7 +914,9 @@ mod tests {
     ) -> std::path::PathBuf {
         let data = aligners_data(state).unwrap();
         let arch = pick_arch(&Params::default(), &data).unwrap();
-        let scan = labelled_scan(state, &data, arch.role()).unwrap().unwrap();
+        let scan = open_labelled_scan(state, &data, arch.role())
+            .unwrap()
+            .unwrap();
         let v: Vec<DVec3> = scan.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
         let blend = gingiva::scan_blend(&v, &scan.mesh.tris, &scan.labels).unwrap();
         let deltas: BTreeMap<Fdi, DMat4> = data

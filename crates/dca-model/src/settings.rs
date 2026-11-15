@@ -275,6 +275,38 @@ impl Quality {
             Self::High => 0.005,
         }
     }
+
+    /// Detail of the aligner shown in the 3D view (mm), before the view
+    /// keeps it within a share of the wall: the plugin's `preview_voxel`
+    /// (`quality.py:63`: Leggera 0.4, Standard 0.3, Alta 0.2; the draft, which
+    /// the plugin does not have, takes the lightest).
+    pub fn preview_voxel_mm(self) -> f64 {
+        match self {
+            Self::Draft | Self::Light => 0.4,
+            Self::Standard => 0.3,
+            Self::High => 0.2,
+        }
+    }
+
+    /// Tolerance of the surface of the aligner shown in the 3D view (mm): the
+    /// plugin's `preview_tolerance` (`quality.py:64`).
+    pub fn preview_tolerance_mm(self) -> f64 {
+        match self {
+            Self::Draft | Self::Light => 0.08,
+            Self::Standard => 0.04,
+            Self::High => 0.02,
+        }
+    }
+
+    /// Most aligners built for the 3D view kept per arch: the plugin's
+    /// `preview_max_bases` (`quality.py:66`).
+    pub fn preview_max_bases(self) -> usize {
+        match self {
+            Self::Draft | Self::Light => 2,
+            Self::Standard => 4,
+            Self::High => 12,
+        }
+    }
 }
 
 /// Tooth the identification text is tried on first (the plugin's

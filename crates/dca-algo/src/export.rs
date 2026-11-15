@@ -134,16 +134,21 @@ pub struct ArchSeries<'a> {
 /// The first vertices of a gingiva mesh are the scan vertices, in the same
 /// order (the membrane ones moved under the crowns); the vertices of the
 /// margin cut follow. A gingiva vertex of the scan moves by the displacement
-/// of its gingiva vertex.
+/// of its gingiva vertex. The gingiva is built on the scan as it was read: a
+/// scan closed with a base has the points of its base after those, and they
+/// stay where they are.
 #[derive(Debug, Clone)]
 pub struct GumDeform {
     rest: Vec<DVec3>,
     prep: gingiva::DeformPrep,
+    /// The points of the scan the gingiva was built on.
+    scan: usize,
 }
 
 impl GumDeform {
     /// The deformation of the gingiva mesh `gum` (`AlignersState::gingiva`,
-    /// case coordinates) of a scan with `scan_vertices` vertices.
+    /// case coordinates) of a scan with `scan_vertices` vertices as it was
+    /// read (without the base of a scan closed with one).
     pub fn new(
         gum: &TriMesh,
         scan_vertices: usize,
@@ -167,6 +172,7 @@ impl GumDeform {
         Ok(Self {
             prep: gingiva::deform_prep(&w),
             rest: g.vertices,
+            scan: scan_vertices,
         })
     }
 
@@ -293,8 +299,9 @@ pub fn stage_deltas(series: &ArchSeries<'_>, stages: &[Stage], k: u32) -> BTreeM
         .collect()
 }
 
-/// The gingiva follows the teeth: every vertex labelled `0` moves by the
-/// displacement of its vertex in `gum`; `positions` already carry the teeth.
+/// The gingiva follows the teeth: every vertex of the scan labelled `0`
+/// moves by the displacement of its vertex in `gum` (the base of a scan
+/// closed with one stays); `positions` already carry the teeth.
 fn deform_gingiva(
     positions: &mut [Vec3],
     labels: &[u16],
@@ -305,7 +312,8 @@ fn deform_gingiva(
         return;
     }
     let disp = gum.displacements(deltas);
-    for ((p, &l), d) in positions.iter_mut().zip(labels).zip(&disp) {
+    let scanned = positions.len().min(gum.scan);
+    for ((p, &l), d) in positions[..scanned].iter_mut().zip(labels).zip(&disp) {
         if l == 0 && *d != DVec3::ZERO {
             *p = (p.as_dvec3() + *d).as_vec3();
         }

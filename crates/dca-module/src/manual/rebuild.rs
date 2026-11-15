@@ -101,9 +101,12 @@ pub(crate) fn run_rebuild(
         if sel.is_empty() {
             return Err(invalid("the selection is empty"));
         }
-        if sel.iter().any(|&v| v as usize >= n) {
+        // a point after those of the scan as it was read is on the base of
+        // the scan closed with one: gingiva, never a tooth
+        let all = al.closed.vertex_count();
+        if sel.iter().any(|&v| v as usize >= all) {
             return Err(invalid(format!(
-                "a vertex index is out of range (the {} scan has {n} vertices)",
+                "a vertex index is out of range (the {} scan has {all} vertices)",
                 arch_name(arch)
             )));
         }
@@ -112,7 +115,7 @@ pub(crate) fn run_rebuild(
                 *l = 0;
             }
         }
-        for &v in sel {
+        for &v in sel.iter().filter(|&&v| (v as usize) < n) {
             labels[v as usize] = want;
         }
     }
@@ -134,7 +137,7 @@ pub(crate) fn run_rebuild(
     let mut stale = Vec::new();
     let changed = labels != al.labels;
     if changed || !al.had_labels {
-        store_labels(&mut next, &mut data, &mut stale, arch, &al.scan, labels);
+        store_labels(&mut next, &mut data, &mut stale, arch, &al.closed, labels);
     }
     data.dirty.remove(&f);
     data.rebuilt_by_hand(arch.role());

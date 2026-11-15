@@ -184,6 +184,8 @@ fn fill_arch(case: &mut CaseState, st: &mut AlignersState, role: ScanRole, tag: 
     let scan = blob(0.4);
     st.visits
         .push(visit(if role == Upper { 1 } else { 2 }, role, scan));
+    let study = blob(0.5);
+    st.study_models.insert(role, study);
 }
 
 /// Results that need both arches.
@@ -249,6 +251,7 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         assert!(!st.aligner_bite.ramps.ramps.iter().any(|r| arch(&r.fdi)));
         assert!(!st.visits.iter().any(|v| v.arch == role));
         assert!(!st.review.iter().any(|r| r.arch == role));
+        assert!(!st.study_models.contains_key(&role));
         // the blobs of the cleared records are no longer referenced; the
         // other arch keeps exactly its own (blobs are content addressed)
         let (_, rest) = case_with(&[other(role)]);
@@ -257,7 +260,7 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         live.sort();
         want.sort();
         assert_eq!(live, want, "{role:?}");
-        assert_eq!(live.len(), 5);
+        assert_eq!(live.len(), 6);
     }
 }
 
@@ -292,6 +295,7 @@ fn only_group(id: &str, role: ScanRole) -> AlignersState {
         "review" => st.review = full.review,
         "ramps" => st.aligner_bite.ramps.ramps = full.aligner_bite.ramps.ramps,
         "visits" => st.visits = full.visits,
+        "study_models" => st.study_models = full.study_models,
         other => panic!("unknown id {other}"),
     }
     st

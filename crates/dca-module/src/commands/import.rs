@@ -4,9 +4,9 @@
 //! * `aligners.case.import-scans` is `case.import` with a resolver: a file
 //!   with neither an explicit role nor a name hint gets its arch from the
 //!   geometry ([`autoseed::detect_arch`]). Same parameters and same output as
-//!   `case.import`, plus `detections`, because MCP and the CLI prefer it over
-//!   `case.import` ([`dc_module_api::IMPORT_SCANS_SUFFIX`]). The app calls
-//!   [`import_scans`] directly.
+//!   `case.import`, plus `detections` and `bases`, because MCP and the CLI
+//!   prefer it over `case.import` ([`dc_module_api::IMPORT_SCANS_SUFFIX`]).
+//!   The app calls [`import_scans`] directly.
 //! * `aligners.case.detect-arch` is the plugin's `arcata` step: it refuses an
 //!   arch scan with too few faces (`case_auto.auto_steps`) and resolves the
 //!   scans still [`RoleSource::Provisional`]. `aligners.auto` runs it first.
@@ -21,6 +21,15 @@
 //!
 //! Detection runs on the thread of the job and needs no decimation: about
 //! 0.3 s in a release build on a real scan of 855k faces.
+//!
+//! Every imported arch scan that is open under the gum is then closed with a
+//! flat base in the same change ([`close_imported`]): the closed solid is the
+//! scan of the case from then on, the scan as it was read stays its start
+//! (`AlignersState::scan_bases`, `crate::open_scan`). A deviation from the
+//! plugin, which closes a scan only when asked and needs the tooth marks for
+//! it: the import has none, so the base is perpendicular to the occlusal
+//! direction of the scan itself (`dca_algo::scan_base::occlusal_direction`).
+//! A bite scan stays as it is, and so does a scan that is closed already.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -29,11 +38,13 @@ use dc_case::import::{
     Detection, ImportFile, ImportReport, ImportRequest, ImportWarning, LOW_POLYGON_FACES,
     PreparedScan, ScanMove, WarningCode, import_files, roles_changed,
 };
-use dc_case::{CaseState, RoleSource, Scan, ScanRole};
+use dc_case::{CaseState, ModuleState, RoleSource, Scan, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_mesh::TriMesh;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::autoseed::{self, ArchDetection, ArchSource};
+use dca_algo::scan_base::{self, HEIGHT_DEFAULT_MM};
+use dca_model::{AlignersState, MODULE_ID};
 use glam::DVec3;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -146,11 +157,44 @@ pub struct ScanImport {
     /// The report of the import. Its `warnings` also hold the warnings of
     /// this module, in the same form: failed recognition, arch to check after
     /// segmentation. A bite registration that an arch replacement leaves
-    /// applied is reported in `module_cleared` (`bite_registered`).
+    /// applied is reported in `module_cleared` (`bite_registered`). An arch
+    /// scan closed with a base is reported as the case holds it: the blob
+    /// and the counts of the closed solid.
     pub report: ImportReport,
     /// The recognised files, in request order.
     pub detections: Vec<ScanDetection>,
+    /// The base of every imported arch scan, in the order of
+    /// `report.imported` ([`close_imported`]).
+    pub bases: Vec<ScanClosure>,
 }
+
+/// What the import did to close one imported arch scan with a base.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ScanClosure {
+    /// Id of the scan (as in the `imported` list of the report).
+    pub scan_id: String,
+    /// Its role.
+    pub role: ScanRole,
+    /// It had no open edge: it stays as it was read.
+    pub already_closed: bool,
+    /// Open edges closed (`0` when it was not closed).
+    pub closed_edges: usize,
+    /// Points the base added.
+    pub vertices_added: usize,
+    /// Triangles the base added.
+    pub faces_added: usize,
+    /// Thickness of the base under the lowest point of the scan (mm).
+    pub height_mm: f64,
+    /// The scan of the case is a closed solid.
+    pub watertight: bool,
+    /// Why an open scan was not closed (it stays open; "Close with a base"
+    /// closes it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_closed: Option<String>,
+}
+
+/// The step of the import that closes the scans, for the status bar.
+pub const CLOSING_KEY: &str = "aligners-import-closing";
 
 fn tr(key: &str, args: &[(&str, &str)]) -> String {
     crate::loader();
@@ -308,7 +352,8 @@ fn mark_unsure(state: &mut CaseState, report: &mut ImportReport, detections: &[S
 }
 
 /// Imports a batch into `state`, recognising the arch of the files with
-/// neither an explicit role nor a name hint: the Aligners form of
+/// neither an explicit role nor a name hint, and closes the open arch scans
+/// with a base ([`close_imported`]): the Aligners form of
 /// [`dc_case::import::import_files`], for `create_job` and for the command.
 ///
 /// Runs on the caller's thread, so a job can call it. A scan under
@@ -318,6 +363,7 @@ fn mark_unsure(state: &mut CaseState, report: &mut ImportReport, detections: &[S
 /// Callers holding a shared state clone it first and keep the old one for
 /// undo: the whole batch is one change.
 pub fn import_scans(state: &mut CaseState, request: &ImportRequest, ctx: &JobCtx) -> ScanImport {
+    let before = state.clone();
     let mut detections = Vec::new();
     let mut failures = Vec::new();
     let mut resolve = |scan: &PreparedScan| -> Option<Detection> {
@@ -347,12 +393,117 @@ pub fn import_scans(state: &mut CaseState, request: &ImportRequest, ctx: &JobCtx
     if report.cancelled {
         return ScanImport {
             report,
-            detections: Vec::new(),
+            ..ScanImport::default()
         };
     }
     report.warnings.extend(failures);
     mark_unsure(state, &mut report, &detections);
-    ScanImport { report, detections }
+    let Some(bases) = close_imported(state, &mut report, ctx) else {
+        *state = before;
+        return ScanImport {
+            report: ImportReport {
+                cancelled: true,
+                ..ImportReport::default()
+            },
+            ..ScanImport::default()
+        };
+    };
+    ScanImport {
+        report,
+        detections,
+        bases,
+    }
+}
+
+/// Closes with a base every arch scan of `report.imported` that is open
+/// under the gum ([`scan_base::make_base`], [`HEIGHT_DEFAULT_MM`] under its
+/// lowest point, perpendicular to [`scan_base::occlusal_direction`]: the
+/// case has no tooth marks yet). The closed solid becomes the scan of the
+/// case, and `report` describes it (its blob and counts); where the scan as
+/// it was read ends in it is kept (`AlignersState::scan_bases`). A bite
+/// scan and a closed scan stay as they are, and so does a scan whose
+/// direction cannot be found (said in [`ScanClosure::not_closed`]).
+/// `None` when the job was cancelled: `state` is then half done.
+fn close_imported(
+    state: &mut CaseState,
+    report: &mut ImportReport,
+    ctx: &JobCtx,
+) -> Option<Vec<ScanClosure>> {
+    let mut data = match state.module(MODULE_ID) {
+        None => AlignersState::default(),
+        Some(m) => match m.downcast_ref::<AlignersState>() {
+            Some(d) => d.clone(),
+            // data of a newer version, which this one cannot write: the
+            // scans stay as they were read
+            None => return Some(Vec::new()),
+        },
+    };
+    let mut out = Vec::new();
+    let mut stale = Vec::new();
+    for imported in report
+        .imported
+        .iter_mut()
+        // a bite stays as it is; a mesh too small to be a dental scan too
+        // (the arch step refuses it)
+        .filter(|s| s.role != ScanRole::Bite && s.faces >= LOW_POLYGON_FACES)
+    {
+        if ctx.is_cancelled() {
+            return None;
+        }
+        ctx.set_progress(1.0, Some(CLOSING_KEY));
+        let Some(mesh) = state.blobs.get(&imported.mesh).cloned() else {
+            continue;
+        };
+        let mut closure = ScanClosure {
+            scan_id: imported.scan_id.to_string(),
+            role: imported.role,
+            already_closed: false,
+            closed_edges: 0,
+            vertices_added: 0,
+            faces_added: 0,
+            height_mm: HEIGHT_DEFAULT_MM,
+            watertight: false,
+            not_closed: None,
+        };
+        let based = scan_base::occlusal_direction(&mesh)
+            .and_then(|n| scan_base::make_base(&mesh, n, HEIGHT_DEFAULT_MM));
+        match based {
+            Ok(None) => {
+                closure.already_closed = true;
+                closure.watertight = mesh.validate().is_watertight();
+            }
+            Err(e) => closure.not_closed = Some(e.to_string()),
+            Ok(Some(based)) => {
+                closure.closed_edges = based.closed_edges;
+                closure.vertices_added = based.sources.len();
+                closure.faces_added = based.mesh.face_count() - mesh.face_count();
+                closure.watertight = based.mesh.validate().is_watertight();
+                let (vertices, faces) = (based.mesh.vertex_count(), based.mesh.face_count());
+                let r = state.blobs.insert(based.mesh);
+                for s in state
+                    .case
+                    .scans
+                    .iter_mut()
+                    .filter(|s| s.id == imported.scan_id)
+                {
+                    s.mesh = r;
+                }
+                data.scan_bases.insert(r, based.scan);
+                stale.push(imported.mesh);
+                imported.mesh = r;
+                imported.vertices = vertices;
+                imported.faces = faces;
+            }
+        }
+        out.push(closure);
+    }
+    if !stale.is_empty() {
+        data.prune_scan_bases(state.case.scans.iter().map(|s| &s.mesh));
+        state.set_module(MODULE_ID, ModuleState::new(data));
+        crate::manual::common::finish_blobs(state, &stale);
+    }
+    ctx.set_progress(1.0, None);
+    Some(out)
 }
 
 /// The files of an import, from exactly one of `path` and `files`.
@@ -405,7 +556,11 @@ fn run_import(
     let request = import_request(&params)?;
     ctx.check_cancelled()?;
     let mut next = state.clone();
-    let ScanImport { report, detections } = import_scans(&mut next, &request, ctx);
+    let ScanImport {
+        report,
+        detections,
+        bases,
+    } = import_scans(&mut next, &request, ctx);
     if report.cancelled {
         return Err(CommandError::Cancelled);
     }
@@ -444,6 +599,7 @@ fn run_import(
     out.insert("cleanup".into(), to_value(report.cleanup)?);
     out.insert("module_cleared".into(), json!(report.module_cleared));
     out.insert("detections".into(), to_value(&detections)?);
+    out.insert("bases".into(), to_value(&bases)?);
     Ok((next, Value::Object(out)))
 }
 
@@ -543,9 +699,14 @@ fn run_detect_arch(
     if arch_scans().next().is_none() {
         return Err(invalid("aligners-arch-error-no-scan", &[]));
     }
-    // case_auto.py: `len(obj.data.polygons) < 1000`, whatever the source of the arch
+    // case_auto.py: `len(obj.data.polygons) < 1000`, whatever the source of
+    // the arch; the scan as it was read (without the base it was closed with)
+    let data = super::staging::aligners_data(state)?;
     for scan in arch_scans() {
-        let faces = state.blobs.require(&scan.mesh)?.face_count();
+        let mesh = state.blobs.require(&scan.mesh)?;
+        let faces = data
+            .scan_base(&scan.mesh)
+            .map_or(mesh.face_count(), |b| b.faces as usize);
         if faces < LOW_POLYGON_FACES {
             return Err(invalid(
                 "aligners-arch-error-not-dental",
@@ -563,7 +724,8 @@ fn run_detect_arch(
     let mut detected = Vec::new();
     let mut not_recognised = Vec::new();
     for scan in arch_scans().filter(is_provisional) {
-        match detect(state.blobs.require(&scan.mesh)?, &scan.source_name) {
+        let mesh = crate::open_scan::open_scan(state, &data, &scan.mesh)?;
+        match detect(&mesh, &scan.source_name) {
             Ok(d) => detected.push((scan, d)),
             Err(e) => {
                 warnings.push(detection_failed(&scan.source_name, &e));
@@ -927,6 +1089,53 @@ mod tests {
         let mut state = CaseState::default();
         add(&mut state, strip(1000), "lower", "explicit", 1);
         assert!(detect_step(&state).is_ok());
+    }
+
+    #[test]
+    fn an_open_arch_scan_is_closed_with_a_base_and_keeps_the_scan_as_read() {
+        let files = Files::new("open");
+        // the demo arch opened under the gum: the faces of its lowest 4 mm
+        // (its occlusal axis is +Z) go
+        let closed = demo_mesh(LOWER, 1);
+        let low = closed
+            .positions
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::INFINITY, f32::min)
+            + 4.0;
+        let mut open = closed.clone();
+        open.tris
+            .retain(|t| !t.iter().all(|&i| closed.positions[i as usize].z < low));
+        let path = files.stl("scan_a.stl", &open);
+        let read = dc_case::import::prepare(std::path::Path::new(&path), &JobCtx::detached())
+            .unwrap()
+            .mesh;
+        assert!(!read.validate().is_watertight());
+        let params = json!({ "path": path, "role": "lower" });
+        let (next, out) = import(&CaseState::default(), params).unwrap();
+        let base = &out["bases"][0];
+        assert_eq!(base["already_closed"], false, "{out}");
+        assert_eq!(base["watertight"], true, "{out}");
+        // the closed solid is the scan of the case, and the report says so
+        let scan = next.case.scan(ScanRole::Lower).unwrap();
+        assert_eq!(out["mesh"], json!(scan.mesh), "{out}");
+        let mesh = next.blobs.require(&scan.mesh).unwrap();
+        assert!(mesh.validate().is_watertight());
+        assert_eq!(out["vertices"], mesh.vertex_count(), "{out}");
+        // the scan as it was read is its start, exactly
+        let data = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        let record = data.scan_base(&scan.mesh).unwrap();
+        assert_eq!(record.closed_by, dca_model::ClosedBy::Import);
+        let back = dca_algo::scan_base::open_part(mesh, &record).unwrap();
+        assert_eq!(back, *read);
+        assert_eq!(next.blobs.len(), 1, "the scan as read is not kept twice");
+
+        // a closed scan stays as it is, with no record
+        let path = files.stl("scan_b.stl", &demo_mesh(LOWER, 2));
+        let (next, out) = import(&CaseState::default(), json!({ "path": path })).unwrap();
+        assert_eq!(out["bases"][0]["already_closed"], true, "{out}");
+        let data = next.module_data::<AlignersState>(MODULE_ID);
+        assert!(data.is_none_or(|d| d.scan_bases.is_empty()));
     }
 
     #[test]

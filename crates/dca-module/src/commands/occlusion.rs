@@ -111,7 +111,13 @@ pub(crate) fn moved_mesh(mesh: &TriMesh, delta: &DMat4) -> TriMesh {
 
 /// Moves the scans with role `role`, in order, by `deltas` (one move per
 /// scan; scans beyond the moves stay) in `next`; returns the replaced blobs.
-fn move_scans(next: &mut CaseState, role: ScanRole, deltas: &[DMat4]) -> Vec<BlobRef> {
+/// The base a moved scan was closed with holds on its new blob.
+fn move_scans(
+    next: &mut CaseState,
+    data: &mut AlignersState,
+    role: ScanRole,
+    deltas: &[DMat4],
+) -> Vec<BlobRef> {
     let mut stale = Vec::new();
     let mut k = 0;
     for i in 0..next.case.scans.len() {
@@ -122,6 +128,7 @@ fn move_scans(next: &mut CaseState, role: ScanRole, deltas: &[DMat4]) -> Vec<Blo
         if let Some(mesh) = next.blobs.get(&old).cloned() {
             let r = next.blobs.insert(moved_mesh(&mesh, &deltas[k]));
             next.case.scans[i].mesh = r;
+            data.scan_moved(old, r);
             stale.push(old);
         }
         k += 1;
@@ -131,10 +138,11 @@ fn move_scans(next: &mut CaseState, role: ScanRole, deltas: &[DMat4]) -> Vec<Blo
 
 /// Moves the scan of `arch` with its labels, seeds, tooth frames and
 /// measures, closed crowns (a size corrected by hand stays with its moved
-/// solid), gingiva, setup arch line and the record of what its 3D teeth were
-/// built from (so a move alone never leaves them out of date) by the
+/// solid), gingiva, study model, setup arch line and the record of what its
+/// 3D teeth were built from (so a move alone never leaves them out of date) by the
 /// case-coordinate rigid move `delta`, and moves the scans of the bite (role
-/// `Bite`, in order) by `bite_deltas`. Unused blobs are dropped.
+/// `Bite`, in order) by `bite_deltas`. A moved scan keeps the base it was
+/// closed with. Unused blobs are dropped.
 pub(crate) fn move_arch(
     state: &CaseState,
     mut data: AlignersState,
@@ -143,8 +151,18 @@ pub(crate) fn move_arch(
     bite_deltas: &[DMat4],
 ) -> CaseState {
     let mut next = state.clone();
-    let mut stale = move_scans(&mut next, arch.role(), std::slice::from_ref(delta));
-    stale.extend(move_scans(&mut next, ScanRole::Bite, bite_deltas));
+    let mut stale = move_scans(
+        &mut next,
+        &mut data,
+        arch.role(),
+        std::slice::from_ref(delta),
+    );
+    stale.extend(move_scans(
+        &mut next,
+        &mut data,
+        ScanRole::Bite,
+        bite_deltas,
+    ));
     let old_labels = data.labels.get(&arch.role()).copied();
     if let Some(old) = old_labels
         && let Some(mesh) = next.blobs.get(&old).cloned()
@@ -163,18 +181,25 @@ pub(crate) fn move_arch(
             s.position = delta.transform_point3(s.position);
         }
     }
-    // the closed crowns and the gingiva are case-coordinate blobs too
+    // the closed crowns, the gingiva and the study model are case-coordinate
+    // blobs too
     let blobs: Vec<BlobRef> = data
         .crowns
         .iter()
         .filter(|(f, _)| Arch::of(**f) == arch)
         .map(|(_, r)| *r)
         .chain(data.gingiva.get(&arch.role()).copied())
+        .chain(data.study_models.get(&arch.role()).copied())
         .collect();
     for old in blobs {
         if let Some(mesh) = next.blobs.get(&old).cloned() {
             let r = next.blobs.insert(moved_mesh(&mesh, delta));
-            for v in data.crowns.values_mut().chain(data.gingiva.values_mut()) {
+            for v in data
+                .crowns
+                .values_mut()
+                .chain(data.gingiva.values_mut())
+                .chain(data.study_models.values_mut())
+            {
                 if *v == old {
                     *v = r;
                 }
@@ -227,6 +252,7 @@ pub(crate) fn move_arch(
     {
         f.pose = pose.compose(&f.pose);
     }
+    data.prune_scan_bases(next.case.scans.iter().map(|s| &s.mesh));
     next.set_module(MODULE_ID, ModuleState::new(data));
     let used = next.referenced_blobs();
     let keep = next
@@ -441,6 +467,16 @@ pub(crate) mod tests {
         ] {
             state = exec(id, &state, Value::Null).0;
         }
+        // stand-ins for the study models: the scans raised by 1 mm
+        let mut data = aligners_data(&state).unwrap();
+        for role in [ScanRole::Upper, ScanRole::Lower] {
+            let mut m = (**state.mesh(&state.case.scan(role).unwrap().mesh).unwrap()).clone();
+            for p in &mut m.positions {
+                p.z += 1.0;
+            }
+            data.study_models.insert(role, state.blobs.insert(m));
+        }
+        state.set_module(MODULE_ID, ModuleState::new(data));
         let (next, _) = exec("aligners.occlusion.virtual-bite", &state, Value::Null);
         let d0 = state.module_data::<AlignersState>(MODULE_ID).unwrap();
         let d1 = next.module_data::<AlignersState>(MODULE_ID).unwrap();
@@ -485,6 +521,17 @@ pub(crate) mod tests {
         // the lower arch stays
         assert_eq!(d0.crowns[&f31], d1.crowns[&f31]);
         assert_eq!(d0.gingiva[&ScanRole::Lower], d1.gingiva[&ScanRole::Lower]);
+        // the study model of the upper arch moved with it, the lower one stays
+        let s0 = state.mesh(&d0.study_models[&ScanRole::Upper]).unwrap();
+        let s1 = next.mesh(&d1.study_models[&ScanRole::Upper]).unwrap();
+        assert!(close(
+            delta.transform_point3(s0.positions[3].as_dvec3()),
+            s1.positions[3].as_dvec3()
+        ));
+        assert_eq!(
+            d0.study_models[&ScanRole::Lower],
+            d1.study_models[&ScanRole::Lower]
+        );
         // no stale blob left
         let used = next.referenced_blobs();
         assert!(next.blobs.iter().all(|(r, _)| used.contains(r)));

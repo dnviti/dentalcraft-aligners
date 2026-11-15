@@ -61,19 +61,23 @@ fn run_frames(
             }
             continue;
         };
-        let mesh = state.blobs.require(&scan.mesh)?;
+        let closed = state.blobs.require(&scan.mesh)?;
         let labelled = state.blobs.require(labels_ref)?;
         let labels = labelled
             .vertex_labels
             .as_ref()
             .ok_or_else(|| crate::commands::messages::labels_missing(arch))?;
-        if labels.len() != mesh.vertex_count() {
+        if labels.len() != closed.vertex_count() {
             return Err(crate::commands::messages::labels_mismatch(
                 arch,
                 labels.len(),
-                mesh.vertex_count(),
+                closed.vertex_count(),
             ));
         }
+        // the scan as it was read and its labels (the plugin measures the
+        // teeth on the open scan)
+        let mesh = crate::open_scan::open_part(&data, &scan.mesh, closed)?;
+        let labels = crate::open_scan::open_labels(labels, &mesh);
         let case_vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
 
         // the arch frame of this arch (the one the seeds define): its z is occlusal

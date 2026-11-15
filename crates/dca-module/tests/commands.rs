@@ -126,6 +126,9 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.production.aligner-end",
     // the gizmo of the viewport on a selected 3D component
     "aligners.components.transform",
+    // the aligner in the view: the toolbar layer and the Aligners inspector
+    "aligners.view.aligner",
+    "aligners.view.aligner-exact",
 ];
 
 #[test]

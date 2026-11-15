@@ -26,7 +26,7 @@ use dc_module_api::CommandOutput;
 use dca_algo::anatomy::Arch;
 use dca_algo::frame;
 use dca_algo::scan_base::{self, BaseError, HEIGHT_DEFAULT_MM};
-use dca_model::MODULE_ID;
+use dca_model::{ClosedBy, MODULE_ID, ScanBase};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -75,20 +75,35 @@ pub(super) fn run_make_base(
         .scan(role)
         .ok_or_else(|| messages::no_scan(arch))?;
     let mut data = data_of(state)?;
-    let mesh = state.blobs.require(&scan.mesh)?;
+    let closed = state.blobs.require(&scan.mesh)?;
+    // the scan as it was read: a scan closed with a base gets it again,
+    // never a second one
+    let rebuilt = data.scan_base(&scan.mesh).is_some();
+    let mesh = crate::open_scan::open_part(&data, &scan.mesh, closed)?;
     let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+    let flipped = data.occlusal_flipped.contains(&role);
+    // the frame of the tooth marks, as the plugin; without them the occlusal
+    // direction of the scan itself, as the import
     let framed = frame::run_from_seeds(
         &frame::Input {
             arch,
             vertices: &vertices,
             seeds: &data.seeds,
-            occlusal_flipped: data.occlusal_flipped.contains(&role),
+            occlusal_flipped: flipped,
         },
         &frame::Params::default(),
-    )
-    .map_err(|e| messages::frame_error(arch, &e))?;
+    );
+    let (n, from_marks) = match framed {
+        Ok(f) => (f.arch_frame.n, true),
+        Err(frame::FrameError::TooFewSeeds | frame::FrameError::SeedsOnOneSide) => {
+            let n = scan_base::occlusal_direction(&mesh)
+                .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
+            (if flipped { -n } else { n }, false)
+        }
+        Err(e) => return Err(messages::frame_error(arch, &e)),
+    };
     ctx.check_cancelled()?;
-    let based = scan_base::make_base(mesh, framed.arch_frame.n, height).map_err(|e| match e {
+    let based = scan_base::make_base(&mesh, n, height).map_err(|e| match e {
         BaseError::Height(h) => height_error(h),
         BaseError::Direction | BaseError::Mesh => {
             CommandError::Failed(format!("{} arch: {e}", arch_name(arch)))
@@ -102,11 +117,13 @@ pub(super) fn run_make_base(
                 "arch": arch_name(arch),
                 "scan_id": scan_id,
                 "already_closed": true,
+                "rebuilt": false,
+                "frame": if from_marks { "tooth_marks" } else { "scan" },
                 "closed_edges": 0,
                 "vertices_added": 0,
                 "faces_added": 0,
                 "height_mm": height,
-                "watertight": mesh.validate().is_watertight(),
+                "watertight": closed.validate().is_watertight(),
                 "labels_extended": false,
             }),
         ));
@@ -118,8 +135,8 @@ pub(super) fn run_make_base(
     let vertices_added = based.sources.len();
     let faces_added = based.mesh.tris.len() - mesh.tris.len();
     let watertight = based.mesh.validate().is_watertight();
-    // the labels of the arch follow the points: the new ones take the label
-    // of the point they come from
+    // the labels of the arch follow the points of the scan; the base is
+    // gingiva
     let mut labels_extended = false;
     if let Some(old) = data.labels.get(&role).copied() {
         let labelled = state.blobs.require(&old)?;
@@ -127,15 +144,15 @@ pub(super) fn run_make_base(
             .vertex_labels
             .as_ref()
             .ok_or_else(|| messages::labels_missing(arch))?;
-        if labels.len() != mesh.vertex_count() {
+        if labels.len() != closed.vertex_count() {
             return Err(messages::labels_mismatch(
                 arch,
                 labels.len(),
-                mesh.vertex_count(),
+                closed.vertex_count(),
             ));
         }
-        let mut extended = labels.clone();
-        extended.extend(based.sources.iter().map(|&s| labels[s as usize]));
+        let mut extended = crate::open_scan::open_labels(labels, &mesh).to_vec();
+        extended.resize(based.mesh.vertex_count(), 0);
         let mut new = based.mesh.clone();
         new.vertex_labels = Some(extended);
         new.face_labels = None;
@@ -150,10 +167,20 @@ pub(super) fn run_make_base(
         stale.push(old);
         labels_extended = true;
     }
+    let record = ScanBase {
+        closed_by: if from_marks {
+            ClosedBy::ToothMarks
+        } else {
+            ClosedBy::Hand
+        },
+        ..based.scan
+    };
     let mesh_ref = next.blobs.insert(based.mesh);
     if let Some(s) = next.case.scans.iter_mut().find(|s| s.id == scan_id) {
         s.mesh = mesh_ref;
     }
+    data.scan_bases.insert(mesh_ref, record);
+    data.prune_scan_bases(next.case.scans.iter().map(|s| &s.mesh));
     next.set_module(MODULE_ID, ModuleState::new(data));
     finish_blobs(&mut next, &stale);
     Ok((
@@ -162,6 +189,8 @@ pub(super) fn run_make_base(
             "arch": arch_name(arch),
             "scan_id": scan_id,
             "already_closed": false,
+            "rebuilt": rebuilt,
+            "frame": if from_marks { "tooth_marks" } else { "scan" },
             "closed_edges": based.closed_edges,
             "vertices_added": vertices_added,
             "faces_added": faces_added,
@@ -317,11 +346,26 @@ mod tests {
         for r in next.referenced_blobs() {
             assert!(next.blobs.get(&r).is_some());
         }
-        // a second time: already closed, nothing changes
-        let (again, out) = exec(MAKE_BASE, &next, json!({ "arch": "lower" })).unwrap();
-        assert_eq!(out["already_closed"], true, "{out}");
-        assert_eq!(out["closed_edges"], 0, "{out}");
+        // the scan as it was read is kept as the start of the closed one
+        let base = d
+            .scan_base(&next.case.scan(ScanRole::Lower).unwrap().mesh)
+            .unwrap();
+        assert_eq!(base.closed_by, ClosedBy::ToothMarks);
+        let open = dca_algo::scan_base::open_part(&new, &base).unwrap();
+        assert_eq!(open, *old);
+        // a second time: the base is made again from the scan as it was
+        // read, never a second one; the same height gives the same solid
+        let (again, out) = exec(
+            MAKE_BASE,
+            &next,
+            json!({ "arch": "lower", "height_mm": 2.5 }),
+        )
+        .unwrap();
+        assert_eq!(out["already_closed"], false, "{out}");
+        assert_eq!(out["rebuilt"], true, "{out}");
+        assert_eq!(out["frame"], "tooth_marks", "{out}");
         assert_eq!(again.case, next.case);
+        assert_eq!(data(&again).scan_bases, data(&next).scan_bases);
         // one undo step brings the open scan back
         let mut undo = UndoStack::new(Arc::new(state.clone()), UndoStack::DEFAULT_BUDGET);
         undo.push(Arc::new(next), MAKE_BASE);
@@ -340,13 +384,18 @@ mod tests {
         assert!(exec(MAKE_BASE, &state, json!({})).is_ok());
         let e = exec(MAKE_BASE, &state, json!({ "arch": "lower" })).unwrap_err();
         assert!(matches!(e, CommandError::Invalid(_)), "{e:?}");
-        // without tooth marks there is no arch frame (`compute_frame` raises)
+        // without tooth marks the base is perpendicular to the occlusal
+        // direction of the scan itself, as the import makes it
         let mut bare = state.clone();
         let mut d = data(&bare).clone();
         d.seeds.clear();
         bare.set_module(MODULE_ID, ModuleState::new(d));
-        let e = exec(MAKE_BASE, &bare, json!({})).unwrap_err();
-        assert!(matches!(e, CommandError::Invalid(_)), "{e:?}");
+        let (closed, out) = exec(MAKE_BASE, &bare, json!({})).unwrap();
+        assert_eq!(out["frame"], "scan", "{out}");
+        assert_eq!(out["watertight"], true, "{out}");
+        let records = &data(&closed).scan_bases;
+        assert_eq!(records.len(), 1);
+        assert!(records.values().all(|b| b.closed_by == ClosedBy::Hand));
     }
 
     #[test]

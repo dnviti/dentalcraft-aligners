@@ -84,8 +84,9 @@ pub(crate) struct ArchScan {
 }
 
 /// The segmented scan of `arch` in its arch frame (the frame its seeds
-/// define, as the teeth stage does); `None` when the arch has no scan or no
-/// labels.
+/// define, as the teeth stage does), as it was read (without the base a
+/// scan closed with one has: the closed teeth and the gingiva follow its
+/// open border); `None` when the arch has no scan or no labels.
 pub(crate) fn arch_scan(
     state: &CaseState,
     data: &AlignersState,
@@ -95,19 +96,21 @@ pub(crate) fn arch_scan(
     let (Some(scan), Some(labels_ref)) = (state.case.scan(role), data.labels.get(&role)) else {
         return Ok(None);
     };
-    let mesh = state.blobs.require(&scan.mesh)?;
+    let closed = state.blobs.require(&scan.mesh)?;
     let labelled = state.blobs.require(labels_ref)?;
     let labels = labelled
         .vertex_labels
         .as_ref()
         .ok_or_else(|| crate::commands::messages::labels_missing(arch))?;
-    if labels.len() != mesh.vertex_count() {
+    if labels.len() != closed.vertex_count() {
         return Err(crate::commands::messages::labels_mismatch(
             arch,
             labels.len(),
-            mesh.vertex_count(),
+            closed.vertex_count(),
         ));
     }
+    let mesh = crate::open_scan::open_part(data, &scan.mesh, closed)?;
+    let labels = crate::open_scan::open_labels(labels, &mesh);
     let case_vertices: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let framed = frame::run(
         &frame::Input {
@@ -129,7 +132,7 @@ pub(crate) fn arch_scan(
             .map(|&p| to_arch.transform_point3(p))
             .collect(),
         tris: mesh.tris.clone(),
-        labels: labels.clone(),
+        labels: labels.to_vec(),
     }))
 }
 

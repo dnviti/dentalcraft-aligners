@@ -465,6 +465,28 @@ pub struct AlignersState {
     /// arch that changes place.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub aligner_end: BTreeMap<ScanRole, AlignerEnd>,
+    /// The study model of each arch (`aligners.output.study-models`, B6):
+    /// a mesh blob in case coordinates, the scan of the arch on its trimmed
+    /// base, as the last build made it. It moves with its arch (the bite,
+    /// a move by hand), goes when the scan is replaced or changes jaw, and
+    /// is made again by the next build.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub study_models: BTreeMap<ScanRole, BlobRef>,
+    /// The aligner shown in the 3D view and the aligners built for it
+    /// (`aligners.view.aligner`, `aligners.view.aligner-exact`; the plugin's
+    /// `show_aligner` and its preview). A built aligner is kept with the key
+    /// of what it was built from and is drawn only while the case gives the
+    /// same key.
+    #[serde(skip_serializing_if = "crate::AlignerView::is_empty")]
+    pub aligner_view: crate::AlignerView,
+    /// The scans of the case closed with a base (by the import, or by
+    /// "Close with a base"), by the blob of the closed scan: where the scan
+    /// as it was read ends in it ([`crate::ScanBase`]). The steps that read
+    /// the open border read that part. It holds on a scan moved rigidly
+    /// ([`AlignersState::scan_moved`]); a blob with no record is a scan as
+    /// it was read (open, or closed by the scanner).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub scan_bases: BTreeMap<BlobRef, crate::ScanBase>,
 }
 
 /// The same tooth in the other arch, on the same side (the plugin's
@@ -513,7 +535,7 @@ fn opposite(role: ScanRole) -> ScanRole {
 /// the move is NOT undone, and the registration has to be done again with the
 /// new arch. The workspace shows the ids by the key
 /// `aligners-cleared-<id>` (`_` as `-`).
-pub const CLEARED_IDS: [&str; 16] = [
+pub const CLEARED_IDS: [&str; 17] = [
     "bite_registered",
     "seeds",
     "missing",
@@ -530,6 +552,7 @@ pub const CLEARED_IDS: [&str; 16] = [
     "review",
     "ramps",
     "visits",
+    "study_models",
 ];
 
 /// `fdi` belongs to the arch of `role` (`false` for a bite role).
@@ -617,7 +640,7 @@ impl AlignersState {
     /// labels (and the teeth flagged for a rebuild), tooth frames, measures,
     /// closed crowns and gingiva; its space analysis and details; the setup
     /// (poses, locks, IPR, arch line); its poses and IPR in every stage; its
-    /// ramps; its control visits, with their scan blobs.
+    /// ramps; its control visits, with their scan blobs; its study model.
     ///
     /// Results that need both arches go when either one is replaced: the
     /// Bolton ratios, the complexity score (unless it can only come from the
@@ -659,6 +682,9 @@ impl AlignersState {
         self.visits.retain(|v| v.arch != role);
         if self.visits.len() != n {
             cleared.push("visits");
+        }
+        if self.study_models.remove(&role).is_some() {
+            cleared.push("study_models");
         }
         // a correction of the scan that was replaced
         self.occlusal_flipped.remove(&role);
@@ -828,7 +854,8 @@ impl AlignersState {
     /// Call it after [`AlignersState::clear_label_dependents`] on every
     /// moved arch: the built teeth and what follows them are made again from
     /// the renumbered labels, never renumbered. The record of what the teeth
-    /// were built from goes with them.
+    /// were built from goes with them, and so does the study model of each
+    /// moved arch and of the arch it lands on (built for the other jaw).
     ///
     /// Entries of the arch a single scan moves to (it had no scan) are kept
     /// for the sets and replaced for the rest, as in the plugin, where the
@@ -877,6 +904,8 @@ impl AlignersState {
             .map(|(r, v)| (role_map(r), v))
             .collect();
         self.teeth_basis
+            .retain(|r, _| !moved.contains(r) && !landing.contains(r));
+        self.study_models
             .retain(|r, _| !moved.contains(r) && !landing.contains(r));
         self.occlusal_flipped = self
             .occlusal_flipped
@@ -1127,15 +1156,17 @@ impl dc_case::ModuleData for AlignersState {
     fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
     }
-    /// The label, closed crown, gingiva and control-visit scan blobs are the
-    /// blob references in the state (the other fields are plain numbers and
-    /// poses).
+    /// The label, closed crown, gingiva, control-visit scan, study model and
+    /// view aligner blobs are the blob references in the state (the other
+    /// fields are plain numbers and poses).
     fn referenced_blobs(&self) -> Vec<BlobRef> {
         self.labels
             .values()
             .chain(self.crowns.values())
             .chain(self.gingiva.values())
             .chain(self.visits.iter().filter_map(|v| v.scan.as_ref()))
+            .chain(self.study_models.values())
+            .chain(self.aligner_view.bases.iter().map(|b| &b.mesh))
             .copied()
             .collect()
     }

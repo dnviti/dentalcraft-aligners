@@ -5,7 +5,9 @@ use dc_mesh::TriMesh;
 use dc_module_api::{Module, ModuleRegistry};
 use dc_scene::{MeshColoring, SceneItem};
 use dca_model::{AlignersState, Stage, ToothFrame};
-use dca_module::{AlignersModule, GINGIVA_COLOR, MODULE_ID};
+use dca_module::{
+    AlignersModule, GINGIVA_COLOR, MODULE_ID, STUDY_MODEL_COLOR, is_study_model, study_models_drawn,
+};
 use glam::{DVec3, Vec3};
 
 fn tri() -> TriMesh {
@@ -137,6 +139,70 @@ fn the_registry_collects_it_and_the_scan_is_hidden() {
         .filter_map(|e| e.arch)
         .collect();
     assert_eq!(hidden, [ScanRole::Upper, ScanRole::Lower]);
+}
+
+/// [`built`] with a study model of the upper arch.
+fn with_study() -> (CaseState, dc_case::BlobRef) {
+    let mut s = built();
+    let mut data = s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+    let blob = s.blobs.insert(TriMesh::new(
+        vec![Vec3::ZERO, Vec3::Z, Vec3::Y],
+        vec![[0, 1, 2]],
+    ));
+    data.study_models.insert(ScanRole::Upper, blob);
+    s.set_module(MODULE_ID, ModuleState::new(data));
+    (s, blob)
+}
+
+#[test]
+fn a_study_model_is_an_entry_of_its_arch_at_every_stage() {
+    let (s, blob) = with_study();
+    let data = s.module_data::<AlignersState>(MODULE_ID).unwrap();
+    for stage in [None, Some(0), Some(2), Some(9)] {
+        let entries = AlignersModule::new().scene_at(&s, stage);
+        assert_eq!(entries.len(), 4, "{stage:?}");
+        let study: Vec<_> = entries.iter().filter(|e| is_study_model(data, e)).collect();
+        assert_eq!(study.len(), 1, "{stage:?}");
+        let e = study[0];
+        assert_eq!(
+            (e.arch, e.tooth, e.hides_scan),
+            (Some(ScanRole::Upper), None, false)
+        );
+        assert_eq!(
+            e.item,
+            SceneItem::Mesh {
+                blob,
+                coloring: MeshColoring::Uniform(STUDY_MODEL_COLOR),
+                xform: Pose::IDENTITY,
+                pickable: true,
+            }
+        );
+    }
+}
+
+#[test]
+fn a_render_draws_the_study_model_in_place_of_its_arch_or_leaves_it_out() {
+    let (s, _) = with_study();
+    let data = s.module_data::<AlignersState>(MODULE_ID).unwrap();
+    let entries = AlignersModule::new().scene_at(&s, None);
+    // shown: the upper arch is its study model alone, hiding the scan
+    let drawn = study_models_drawn(&s, entries.clone(), true);
+    let upper: Vec<_> = drawn
+        .iter()
+        .filter(|e| e.arch == Some(ScanRole::Upper))
+        .collect();
+    assert_eq!(upper.len(), 1);
+    assert!(is_study_model(data, upper[0]) && upper[0].hides_scan);
+    // the lower arch keeps its tooth
+    assert!(drawn.iter().any(|e| e.tooth == Some(31)));
+    assert_eq!(drawn.len(), 2);
+    // not shown: the entries without the study model
+    let hidden = study_models_drawn(&s, entries, false);
+    assert_eq!(hidden.len(), 3);
+    assert!(!hidden.iter().any(|e| is_study_model(data, e)));
+    // whatever the entries given (e.g. the scan model left the upper arch
+    // out), the study model comes from the case
+    assert_eq!(study_models_drawn(&s, Vec::new(), true).len(), 1);
 }
 
 /// A flat strip of gingiva along +X (1 mm grid, 3 rows) whose first column

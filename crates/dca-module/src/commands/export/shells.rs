@@ -84,6 +84,12 @@ pub(crate) struct Options {
     pub stamp_dates: BTreeMap<(Arch, u32), Date>,
     /// Stops the build of a mesh at the end of its current step.
     pub cancel: dc_command::CancelToken,
+    /// The files are checked as print files: a reduction is kept only when
+    /// it is no worse to print than the full resolution, and the reach of an
+    /// EQUATOR border is measured for the print check. `false` (the preview
+    /// of the 3D view, `aligners.view.aligner`): reduced within the
+    /// tolerance as it comes, the plugin's `_reduce` (`check=False`).
+    pub checked: bool,
 }
 
 /// The models and the aligners of every stage from the shell stage.
@@ -311,6 +317,11 @@ impl<'a> ShellProvider<'a> {
         let tol = self.params.tolerance_mm;
         if tol <= 0.0 {
             return Ok((full, None));
+        }
+        if !self.options.checked {
+            let r = shell::reduce_to(&full, tol, Some(to_case))
+                .map_err(|e| package("reduction", arch, k, e))?;
+            return Ok((r, None));
         }
         let base = check(&rigid(to_case, &full), min_wall);
         let wall = |c: &printcheck::PrintCheck| c.min_thickness_mm.unwrap_or(f64::INFINITY);
@@ -641,7 +652,7 @@ impl MeshProvider for ShellProvider<'_> {
 
         // no fin, no flap far from the teeth (EQUATOR: a straight or
         // scalloped border covers the gingiva on purpose)
-        if self.trim.mode == trim::Mode::Equator {
+        if self.options.checked && self.trim.mode == trim::Mode::Equator {
             let (teeth_mesh, face_fdi) = shell::reach_teeth(&print.input(&g));
             let outer = self.design.clearance_mm + self.design.thickness_mm;
             let reach =

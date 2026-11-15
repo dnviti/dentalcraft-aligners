@@ -47,8 +47,6 @@ fn run_frame(
         .scan(arch.role())
         .ok_or_else(crate::commands::messages::reference_missing)?;
     super::import::require_settled(scan)?;
-    let mesh = state.blobs.require(&scan.mesh)?;
-    let vertices: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
     let data = match state.module(MODULE_ID) {
         None => AlignersState::default(),
         Some(m) => m
@@ -56,6 +54,12 @@ fn run_frame(
             .ok_or_else(crate::commands::messages::no_data)?
             .clone(),
     };
+    // the scan as it was read, without the base it was closed with
+    let mesh = state.blobs.require(&scan.mesh)?;
+    let vertices: Vec<_> = crate::open_scan::open_points(&data, &scan.mesh, mesh)
+        .iter()
+        .map(|p| p.as_dvec3())
+        .collect();
     let input = dca_algo::frame::Input {
         arch,
         vertices: &vertices,

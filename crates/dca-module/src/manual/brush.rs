@@ -153,10 +153,13 @@ pub(crate) fn run_brush(
     let arch = pick_arch(state, p.arch, fdi)?;
     let al = arch_labels(state, &data, arch)?;
     let vertices = al.vertices();
+    // the points of the scan as it was read; a point of the closed solid
+    // after them is on its base, which is gingiva and is not painted
     let n = vertices.len();
-    if p.vertices.iter().any(|&v| v as usize >= n) {
+    let all = al.closed.vertex_count();
+    if p.vertices.iter().any(|&v| v as usize >= all) {
         return Err(invalid(format!(
-            "a vertex index is out of range (the {} scan has {n} vertices)",
+            "a vertex index is out of range (the {} scan has {all} vertices)",
             arch_name(arch)
         )));
     }
@@ -165,7 +168,7 @@ pub(crate) fn run_brush(
 
     // the target vertices
     let mut target = vec![false; n];
-    for &v in &p.vertices {
+    for &v in p.vertices.iter().filter(|&&v| (v as usize) < n) {
         target[v as usize] = true;
     }
     let centre = p.centre.map(point).transpose()?;
@@ -180,6 +183,11 @@ pub(crate) fn run_brush(
         BrushMode::Fill => {
             let v = match (p.vertex, centre) {
                 (Some(v), _) if (v as usize) < n => v,
+                (Some(v), _) if (v as usize) < all => {
+                    return Err(invalid(format!(
+                        "vertex {v} is on the base of the scan, which stays gingiva"
+                    )));
+                }
                 (Some(v), _) => return Err(invalid(format!("vertex {v} is out of range"))),
                 (None, Some(c)) => scan
                     .nearest(c)
@@ -248,7 +256,7 @@ pub(crate) fn run_brush(
     let mut dirty = Vec::new();
     if changed > 0 || !al.had_labels {
         blob = Some(store_labels(
-            &mut next, &mut data, &mut stale, arch, &al.scan, labels,
+            &mut next, &mut data, &mut stale, arch, &al.closed, labels,
         ));
         dirty = mark_dirty(&mut data, &teeth);
     }
@@ -323,7 +331,7 @@ pub(crate) fn run_clean(
         let changed = changed_teeth(&al.labels, &labels);
         let mut dirty = Vec::new();
         if rep.vertices > 0 {
-            store_labels(&mut next, &mut data, &mut stale, arch, &al.scan, labels);
+            store_labels(&mut next, &mut data, &mut stale, arch, &al.closed, labels);
             dirty = mark_dirty(&mut data, &changed);
         }
         report.insert(

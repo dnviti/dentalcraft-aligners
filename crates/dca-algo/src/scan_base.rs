@@ -15,22 +15,36 @@
 //!    triangulates them and makes the normals consistent and outward
 //!    (`recalc_face_normals`).
 //!
-//! The same here, on a [`TriMesh`]: the vertices of the scan keep their
-//! index and the new ones follow, each with the label (and colour) of the
-//! boundary vertex it was extruded from, as bmesh copies the attributes of
-//! the source vertex. Every boundary loop is extruded, holes inside the scan
-//! too, as in the plugin. The flat caps are triangulated by ear clipping in
-//! the base plane (Blender's "beauty" fill gives other triangles over the
-//! same flat area). The new faces follow the winding of the scan; when the
-//! closed result has a negative volume every face is turned, the outward
-//! orientation `recalc_face_normals` gives. A boundary chain that does not
-//! close on itself (around a non-manifold vertex) gets its wall but no cap,
-//! as `holes_fill` only fills closed loops.
+//! The same here, on a [`TriMesh`]: the vertices and triangles of the scan
+//! keep their index and the new ones follow, so the scan as it was read is
+//! the start of the closed solid ([`Based::scan`], [`open_part`]). Every
+//! boundary loop is extruded, holes inside the scan too, as in the plugin.
+//! The flat caps are triangulated by ear clipping in the base plane
+//! (Blender's "beauty" fill gives other triangles over the same flat area).
+//! The new faces follow the winding of the scan; when the closed result has
+//! a negative volume every face is turned, the outward orientation
+//! `recalc_face_normals` gives. A boundary chain that does not close on
+//! itself (around a non-manifold vertex) gets its wall but no cap, as
+//! `holes_fill` only fills closed loops.
+//!
+//! Two deviations from bmesh, which copies every attribute of the source
+//! vertex: a point of the base gets the label `0` (gingiva), never a tooth,
+//! so no tooth reaches into the base (its colour still follows the source
+//! vertex); and the points of the scan keep their normals (turned with the
+//! faces), so that the scan as it was read comes back exactly.
+//!
+//! The import closes every open arch scan before anything is computed on it
+//! (the case has no tooth marks yet): its occlusal direction is then the one
+//! [`occlusal_direction`] finds without them, where the plugin needs the
+//! arch frame of the tooth marks.
 
 use std::collections::HashSet;
 
 use dc_mesh::TriMesh;
+use dca_model::{ClosedBy, ScanBase};
 use glam::{DVec2, DVec3, Vec3};
+
+use crate::autoseed;
 
 /// Default thickness of the base (mm): the plugin's `base_height`.
 pub const HEIGHT_DEFAULT_MM: f64 = 3.0;
@@ -66,6 +80,8 @@ pub struct Based {
     pub sources: Vec<u32>,
     /// Height of the base plane along the occlusal direction (mm).
     pub plane: f64,
+    /// Where the scan ends in [`Based::mesh`], for [`open_part`].
+    pub scan: ScanBase,
 }
 
 /// Closes `mesh` with a flat base perpendicular to `occlusal` (the
@@ -155,9 +171,10 @@ pub fn make_base(
     }
 
     let mut out = TriMesh::new(positions, tris);
+    // the base is gingiva, never a tooth (bmesh would copy the label)
     if let Some(labels) = &mesh.vertex_labels {
         let mut l = labels.clone();
-        l.extend(sources.iter().map(|&s| labels[s as usize]));
+        l.resize(out.positions.len(), 0);
         out.vertex_labels = Some(l);
     }
     if let Some(colors) = &mesh.vertex_colors {
@@ -171,20 +188,104 @@ pub fn make_base(
         out.face_labels = Some(l);
     }
     // outward normals
-    if signed_volume(&out) < 0.0 {
+    let flipped = signed_volume(&out) < 0.0;
+    if flipped {
         for t in &mut out.tris {
             t.swap(1, 2);
         }
     }
-    if mesh.normals.is_some() {
-        out.update_normals();
+    // the points of the scan keep their normals, turned with the faces; the
+    // points of the base get those of the closed solid
+    if let Some(normals) = &mesh.normals {
+        let all = out.compute_vertex_normals();
+        let mut n: Vec<Vec3> = if flipped {
+            normals.iter().map(|v| -*v).collect()
+        } else {
+            normals.clone()
+        };
+        n.extend_from_slice(&all[mesh.positions.len()..]);
+        out.normals = Some(n);
     }
+    // who closed it is the caller's to say (the import by default)
+    let scan = ScanBase {
+        vertices: mesh.positions.len() as u32,
+        faces: mesh.tris.len() as u32,
+        flipped,
+        closed_by: ClosedBy::default(),
+    };
     Ok(Some(Based {
         mesh: out,
         closed_edges,
         sources,
         plane,
+        scan,
     }))
+}
+
+/// The scan [`make_base`] closed into `closed`, as `base` (its
+/// [`Based::scan`]) says where it ends: its points and triangles in their
+/// order, the triangles turned back when the base turned them, with their
+/// labels, colours and normals. Exactly the scan [`make_base`] was given.
+/// `None` when `base` does not fit `closed`: more points or triangles than
+/// it has, or a triangle of the scan on a point of the base.
+pub fn open_part(closed: &TriMesh, base: &ScanBase) -> Option<TriMesh> {
+    let (nv, nf) = (base.vertices as usize, base.faces as usize);
+    if nv > closed.positions.len() || nf > closed.tris.len() {
+        return None;
+    }
+    let mut tris = closed.tris[..nf].to_vec();
+    if tris.iter().flatten().any(|&i| i as usize >= nv) {
+        return None;
+    }
+    if base.flipped {
+        for t in &mut tris {
+            t.swap(1, 2);
+        }
+    }
+    let mut out = TriMesh::new(closed.positions[..nv].to_vec(), tris);
+    out.normals = closed.normals.as_ref().map(|n| {
+        if base.flipped {
+            n[..nv].iter().map(|v| -*v).collect()
+        } else {
+            n[..nv].to_vec()
+        }
+    });
+    out.vertex_labels = closed.vertex_labels.as_ref().map(|l| l[..nv].to_vec());
+    out.face_labels = closed.face_labels.as_ref().map(|l| l[..nf].to_vec());
+    out.vertex_colors = closed.vertex_colors.as_ref().map(|c| c[..nv].to_vec());
+    Some(out)
+}
+
+/// The occlusal direction of an open arch scan without its tooth marks, for
+/// the base the import closes it with: the smallest principal axis of its
+/// points, pointing away from its open border, as the automatic tooth marks
+/// start (`autoseed::occlusal_axis`, the plugin's `autoseed._occlusal_axis`).
+///
+/// Measured against the occlusal normal of the tooth marks
+/// (`frame::run_from_seeds`): 1.6 to 12.6 degrees on four real scans, 0.5
+/// to 4.8 degrees on the six demo arches opened under the gum; never on the
+/// side of the teeth. The base of an arch with its tooth marks can be made
+/// again with their frame (`aligners.case.make-base`).
+pub fn occlusal_direction(mesh: &TriMesh) -> Result<DVec3, BaseError> {
+    let v: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+    autoseed::occlusal_axis(&v, &mesh.tris)
+        .map(|(n, _)| n)
+        .map_err(|_| BaseError::Mesh)
+}
+
+/// `true` when `mesh` has an edge of one triangle only: an open scan that
+/// [`make_base`] would close. Sorts the edges instead of building the
+/// adjacency: fast enough to be asked once per scan by the window.
+pub fn is_open(mesh: &TriMesh) -> bool {
+    let mut edges: Vec<u64> = mesh
+        .tris
+        .iter()
+        .flat_map(|t| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])])
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| (u64::from(a.min(b)) << 32) | u64::from(a.max(b)))
+        .collect();
+    edges.sort_unstable();
+    edges.chunk_by(|a, b| a == b).any(|run| run.len() == 1)
 }
 
 /// Volume enclosed by a closed mesh, positive with outward normals (mm³).
@@ -352,9 +453,20 @@ mod tests {
             let p = out.mesh.positions[n + k];
             let q = mesh.positions[s as usize];
             assert_eq!((p.x, p.y, p.z), (q.x, q.y, -3.0));
-            // the label of the point it comes from
-            assert_eq!(out.mesh.vertex_labels.as_ref().unwrap()[n + k], s as u16);
+            // gingiva, whatever the label of the point it comes from
+            assert_eq!(out.mesh.vertex_labels.as_ref().unwrap()[n + k], 0);
         }
+        // the scan as it was given is the start of the closed box
+        assert_eq!(
+            out.scan,
+            ScanBase {
+                vertices: n as u32,
+                faces: mesh.tris.len() as u32,
+                flipped: false,
+                closed_by: ClosedBy::Import,
+            }
+        );
+        assert_eq!(open_part(&out.mesh, &out.scan).as_ref(), Some(&mesh));
         // the closed box: 10 x 10 x 8 mm, outward normals
         assert!((signed_volume(&out.mesh) - 800.0).abs() < 1e-3);
         // every face of the cap lies on the plane and faces down
@@ -365,14 +477,80 @@ mod tests {
     }
 
     #[test]
-    fn an_inverted_scan_comes_out_with_outward_normals() {
+    fn an_inverted_scan_comes_out_with_outward_normals_and_back_as_it_was() {
         let mut mesh = open_box(10.0, 5.0, 2);
         for t in &mut mesh.tris {
             t.swap(1, 2);
         }
+        // normals as wound (inwards), labels and colours: all come back
+        mesh.update_normals();
+        mesh.vertex_labels = Some(vec![11; mesh.positions.len()]);
+        mesh.vertex_colors = Some(vec![[1, 2, 3, 255]; mesh.positions.len()]);
+        mesh.face_labels = Some(vec![7; mesh.tris.len()]);
         let out = make_base(&mesh, DVec3::Z, 0.5).unwrap().unwrap();
         assert!(out.mesh.validate().is_watertight());
         assert!((signed_volume(&out.mesh) - 550.0).abs() < 1e-3);
+        assert!(out.scan.flipped);
+        // the normals of the closed solid point out, those of the scan too
+        let normals = out.mesh.normals.as_ref().unwrap();
+        assert_eq!(normals.len(), out.mesh.positions.len());
+        let n = mesh.positions.len();
+        assert_eq!(normals[n - 1], -mesh.normals.as_ref().unwrap()[n - 1]);
+        assert!(
+            normals[n..].iter().all(|v| v.z < 0.0),
+            "the base faces down"
+        );
+        let back = open_part(&out.mesh, &out.scan).unwrap();
+        assert_eq!(back, mesh);
+    }
+
+    #[test]
+    fn a_record_that_does_not_fit_the_mesh_gives_no_scan() {
+        let mesh = open_box(10.0, 5.0, 2);
+        let out = make_base(&mesh, DVec3::Z, 3.0).unwrap().unwrap();
+        let n = out.mesh.positions.len() as u32;
+        let f = out.mesh.tris.len() as u32;
+        for bad in [
+            ScanBase {
+                vertices: n + 1,
+                ..out.scan
+            },
+            ScanBase {
+                faces: f + 1,
+                ..out.scan
+            },
+            // a triangle of the scan on a point of the base
+            ScanBase {
+                faces: out.scan.faces + 1,
+                ..out.scan
+            },
+        ] {
+            assert_eq!(open_part(&out.mesh, &bad), None, "{bad:?}");
+        }
+        // the whole solid is a record that fits
+        let whole = ScanBase {
+            vertices: n,
+            faces: f,
+            flipped: false,
+            closed_by: ClosedBy::Import,
+        };
+        assert_eq!(open_part(&out.mesh, &whole).as_ref(), Some(&out.mesh));
+    }
+
+    #[test]
+    fn an_open_scan_is_told_and_its_teeth_side_found_without_tooth_marks() {
+        // 32 rim points: the open border gives the side (away from it, +Z)
+        let mesh = open_box(10.0, 5.0, 8);
+        assert!(is_open(&mesh));
+        let n = occlusal_direction(&mesh).unwrap();
+        assert!(n.dot(DVec3::Z) > 0.999, "{n}");
+        let out = make_base(&mesh, n, 3.0).unwrap().unwrap();
+        assert!(!is_open(&out.mesh));
+        assert!(!is_open(&TriMesh::default()));
+        assert_eq!(
+            occlusal_direction(&TriMesh::default()),
+            Err(BaseError::Mesh)
+        );
     }
 
     #[test]

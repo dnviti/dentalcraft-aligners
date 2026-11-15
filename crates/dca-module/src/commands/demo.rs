@@ -85,6 +85,8 @@ fn run_demo(
     let teeth: Vec<u8> = demo.seeds.iter().map(|s| s.fdi.get()).collect();
     data.seeds.extend(demo.seeds);
     data.labels.insert(role, labels_ref);
+    // the demo scan is closed: no base; the record of the scan it replaces goes
+    data.prune_scan_bases(next.case.scans.iter().map(|s| &s.mesh));
     next.set_module(MODULE_ID, ModuleState::new(data));
     // drop the replaced scan and labels, unless something else still uses them
     let used = next.referenced_blobs();

@@ -216,7 +216,11 @@ fn move_scan(
                 .ok_or_else(|| invalid(format!("the case has no scan {id}")))?;
             let old = next.case.scans[i].mesh;
             let mesh = next.blobs.require(&old)?.clone();
-            next.case.scans[i].mesh = next.blobs.insert(moved_mesh(&mesh, &step.to_mat4()));
+            let new = next.blobs.insert(moved_mesh(&mesh, &step.to_mat4()));
+            next.case.scans[i].mesh = new;
+            // a scan closed with a base keeps it
+            data.scan_moved(old, new);
+            data.prune_scan_bases(next.case.scans.iter().map(|s| &s.mesh));
             finish(&mut next, data, &[old]);
             next
         }
