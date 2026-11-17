@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0-alpha.6](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.5...v0.2.0-alpha.6) (2026-11-17)
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.3 ([#13](https://github.com/dnviti-personal-org/dentalcraft-aligners/issues/13)) ([72aca11](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/72aca11813f8fa0ae7b51dc590c7f9aba8e21320))
+
 ## [0.2.0-alpha.5](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.4...v0.2.0-alpha.5) (2026-11-15)
 
 
