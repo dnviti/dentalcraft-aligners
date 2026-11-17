@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0-alpha.7](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.6...v0.2.0-alpha.7) (2026-11-17)
+
+
+### Bug Fixes
+
+* **planning:** guard the stage day against NaN and the next visit against an empty calendar ([68664a9](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/68664a908e993b7abd1a004fa58327da7b6b1e1f))
+* **planning:** report a seed change independently of the order of the seeds ([68664a9](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/68664a908e993b7abd1a004fa58327da7b6b1e1f))
+* **planning:** validate the days of wear (5 to 21) in the schedule and export commands ([68664a9](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/68664a908e993b7abd1a004fa58327da7b6b1e1f))
+
 ## [0.2.0-alpha.6](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.5...v0.2.0-alpha.6) (2026-11-17)
 
 
