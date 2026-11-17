@@ -482,3 +482,81 @@ mod tests {
         assert_eq!(serde_json::to_string(&Arch::Upper).unwrap(), "\"upper\"");
     }
 }
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A valid tooth number (permanent or deciduous).
+    fn any_fdi() -> Fdi {
+        let n: u8 = kani::any();
+        match Fdi::new(n) {
+            Ok(f) => f,
+            Err(_) => {
+                kani::assume(false);
+                unreachable!()
+            }
+        }
+    }
+
+    /// A tooth of the permanent arch order.
+    fn any_in_order(order: &[Fdi; 16]) -> Fdi {
+        let i: usize = kani::any();
+        kani::assume(i < 16);
+        order[i]
+    }
+
+    // Every table index is inside its table, for any position digit and any table of 1 to 8
+    // rows.
+    #[kani::proof]
+    fn slot_is_inside_the_table() {
+        let position: u8 = kani::any();
+        let max: u8 = kani::any();
+        kani::assume((1..=8).contains(&max));
+        assert!(slot(position, max) < usize::from(max));
+    }
+
+    // The anatomy tables answer every valid tooth, deciduous ones included, without panicking,
+    // and every length, diameter and enamel thickness they give is positive.
+    #[kani::proof]
+    fn the_tables_answer_every_tooth() {
+        let f = any_fdi();
+        let (crown, root) = crown_root_length(f);
+        let (md, bl) = typical_diameters(f);
+        let mesial = enamel_thickness(f, Surface::Mesial);
+        let distal = enamel_thickness(f, Surface::Distal);
+        assert!(crown > 0.0 && root > 0.0 && md > 0.0 && bl > 0.0);
+        assert!(mesial > 0.0 && distal > 0.0);
+    }
+
+    // Along any subset of the arch, a tooth is the distal neighbour of its mesial neighbour,
+    // and the other way round, except across the midline, where each central incisor is the
+    // mesial neighbour of the other. (The subset is built in an array: a vector pushed a
+    // symbolic number of times made the solver run out of memory.)
+    #[kani::proof]
+    #[kani::unwind(17)]
+    fn mesial_and_distal_neighbours_are_symmetric() {
+        for arch in [Arch::Upper, Arch::Lower] {
+            let order = arch_order(arch);
+            let mask: u16 = kani::any();
+            let mut subset = order;
+            let mut len = 0;
+            for (i, f) in order.iter().enumerate() {
+                if (mask >> i) & 1 == 1 {
+                    subset[len] = *f;
+                    len += 1;
+                }
+            }
+            let seq = &subset[..len];
+            let a = any_in_order(&order);
+            let b = any_in_order(&order);
+            let centrals = index(a) == 1 && index(b) == 1;
+            if mesial_neighbor(seq, a) == Some(b) && !centrals {
+                assert_eq!(distal_neighbor(seq, b), Some(a));
+            }
+            if distal_neighbor(seq, b) == Some(a) {
+                assert_eq!(mesial_neighbor(seq, a), Some(b));
+            }
+        }
+    }
+}

@@ -504,6 +504,26 @@ fn run_automatic(
     Ok((next, Value::Object(report)))
 }
 
+/// `days` if it is within the days of wear the staging settings accept
+/// ([`INTERVAL_DAYS`]), else the error of a setting out of its range. The
+/// commands that build a calendar check it too: the calendar counts its
+/// days in a `u32`, which a huge interval would overflow.
+pub(crate) fn check_interval_days(days: u32) -> Result<u32, CommandError> {
+    let (lo, hi) = INTERVAL_DAYS;
+    if (lo..=hi).contains(&days) {
+        return Ok(days);
+    }
+    Err(messages::invalid(
+        "aligners-err-staging-settings-range",
+        &[
+            ("name", "interval_days"),
+            ("value", &days.to_string()),
+            ("min", &lo.to_string()),
+            ("max", &hi.to_string()),
+        ],
+    ))
+}
+
 fn run_settings(
     state: &CaseState,
     patch: SettingsPatch,
@@ -550,16 +570,7 @@ fn run_settings(
             hi.to_string(),
         ));
     }
-    let (lo, hi) = INTERVAL_DAYS;
-    let days = patch.interval_days.unwrap_or(data.settings.interval_days);
-    if !(lo..=hi).contains(&days) {
-        return Err(range(
-            "interval_days",
-            days.to_string(),
-            lo.to_string(),
-            hi.to_string(),
-        ));
-    }
+    let days = check_interval_days(patch.interval_days.unwrap_or(data.settings.interval_days))?;
     let start_date = match patch.start_date.as_deref().map(str::trim) {
         None => data.settings.start_date.clone(),
         Some("") => None,
