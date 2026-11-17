@@ -216,3 +216,43 @@ mod tests {
         );
     }
 }
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A component from {-1, -0.5, -0, 0, 0.5, 1}.
+    fn any_component() -> f64 {
+        match kani::any::<u8>() % 6 {
+            0 => -1.0,
+            1 => -0.5,
+            2 => -0.0,
+            3 => 0.0,
+            4 => 0.5,
+            _ => 1.0,
+        }
+    }
+
+    // The canonical form of a unit quaternion takes the short way round: its w is never
+    // negative, and at exactly 180 degrees (w = 0) the largest component of its axis is not
+    // negative either; it is the same rotation (the quaternion or its opposite). Only the
+    // sign rule is checked, on the unit quaternions with components in {-1, -0.5, -0, 0,
+    // 0.5, 1}: the identity and the half turns about each axis (w = 0), and the turns by 120
+    // degrees about the cube diagonals, with every sign and both zeros. With arbitrary floats
+    // the square root of `normalize` kept the solver busy for more than 6 minutes.
+    #[kani::proof]
+    fn canonical_takes_the_short_way() {
+        let q = DQuat::from_xyzw(
+            any_component(),
+            any_component(),
+            any_component(),
+            any_component(),
+        );
+        kani::assume(q.length_squared() == 1.0);
+        let n = q.normalize();
+        let c = canonical(q);
+        assert!(c.w >= 0.0);
+        assert!(c.w != 0.0 || largest(c.xyz()) >= 0.0);
+        assert!(c == n || c == -n);
+    }
+}

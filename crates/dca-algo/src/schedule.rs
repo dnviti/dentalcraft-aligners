@@ -365,17 +365,18 @@ pub fn run(input: &Input, params: &Params) -> Result<Calendar, ScheduleError> {
 }
 
 /// Control visit after aligner `last` has been worn: the day the next
-/// aligner would start (`next_visit`).
+/// aligner would start (`next_visit`; `None` for an empty calendar).
 pub fn next_visit(cal: &Calendar, last: u32) -> Option<Date> {
-    let last = last.clamp(1, cal.rows.len() as u32);
+    let last = last.max(1).min(cal.rows.len() as u32);
     cal.rows
         .get((last as usize).checked_sub(1)?)
         .map(|r| r.end.add_days(1))
 }
 
-/// Treatment day at the (fractional) stage `t` (`day_of_stage`).
+/// Treatment day at the (fractional) stage `t` (`day_of_stage`; 0 for a
+/// stage that is not a number).
 pub fn day_of_stage(cal: &Calendar, t: f64) -> f64 {
-    if t <= 0.0 || cal.rows.is_empty() {
+    if t.is_nan() || t <= 0.0 || cal.rows.is_empty() {
         return 0.0;
     }
     let k = (t.ceil() as usize).min(cal.rows.len());
@@ -818,6 +819,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_nan_stage_and_an_empty_calendar_do_not_panic() {
+        let p = Params {
+            start_date: Some("2026-03-01".into()),
+            ..Params::default()
+        };
+        let cal = run(&simple(2), &p).unwrap();
+        assert_eq!(day_of_stage(&cal, f64::NAN), 0.0);
+        let empty = run(&simple(0), &p).unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(next_visit(&empty, 0), None);
+        assert_eq!(next_visit(&empty, 3), None);
+    }
+
+    #[test]
     fn passive_aligners_fill_up_to_the_total() {
         let p = Params {
             start_date: Some("2026-03-01".into()),
@@ -1010,5 +1025,221 @@ pub(crate) mod tests {
         assert!(fold(&"é".repeat(100)).split("\r\n").all(|l| l.len() <= 75));
         assert_eq!(unfold(&fold(&"é".repeat(100))), "é".repeat(100));
         assert_eq!(escape_text("a,b;c\\d\ne"), "a\\,b\\;c\\\\d\\ne");
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A valid date with its year in [-10000, 10000].
+    fn any_date() -> Date {
+        let year: i32 = kani::any();
+        let month: u32 = kani::any();
+        let day: u32 = kani::any();
+        kani::assume((-10_000..=10_000).contains(&year));
+        kani::assume((1..=12).contains(&month));
+        kani::assume(day >= 1 && day <= days_in_month(year, month));
+        Date { year, month, day }
+    }
+
+    /// A calendar of the first `n` (at most 2) of two rows of 10 days each,
+    /// from 2026-03-01. The two rows are always built and then cut, which
+    /// keeps the allocation concrete for the solver.
+    fn calendar(n: usize) -> Calendar {
+        let start = Date {
+            year: 2026,
+            month: 3,
+            day: 1,
+        };
+        let row = |i: u32| Row {
+            aligner: i + 1,
+            number: i + 1,
+            passive: false,
+            start: Date {
+                day: 1 + 10 * i,
+                ..start
+            },
+            end: Date {
+                day: 10 + 10 * i,
+                ..start
+            },
+            days: 10,
+            first_day: 10 * i,
+            todo: Vec::new(),
+        };
+        let mut rows = vec![row(0), row(1)];
+        rows.truncate(n);
+        Calendar {
+            rows,
+            n_active: n as u32,
+            n_total: n as u32,
+            start,
+            offset: 0,
+            end: Date {
+                day: 1 + 10 * n as u32,
+                ..start
+            },
+            total_days: 10 * n as u32,
+            wear_hours: 22.0,
+            policy: Policy::Fixed,
+        }
+    }
+
+    // Every month of every year has 28 to 31 days; only February has fewer than 30, and it
+    // has 29 exactly in the leap years of the Gregorian calendar.
+    #[kani::proof]
+    fn days_in_month_is_a_month_length() {
+        let year: i32 = kani::any();
+        let month: u32 = kani::any();
+        kani::assume((1..=12).contains(&month));
+        let n = days_in_month(year, month);
+        assert!((28..=31).contains(&n));
+        assert_eq!(n < 30, month == 2);
+        let leap =
+            year.rem_euclid(4) == 0 && (year.rem_euclid(100) != 0 || year.rem_euclid(400) == 0);
+        assert!(month != 2 || (n == 29) == leap);
+    }
+
+    // Every valid date with its year in [-10000, 10000] comes back unchanged from its day
+    // count.
+    #[kani::proof]
+    fn date_days_roundtrip() {
+        let d = any_date();
+        assert_eq!(Date::from_days(d.days()), d);
+    }
+
+    // Every day count of the years [-10000, 10000] is a valid date (month 1-12, day within
+    // its month, year in the range) whose day count is the same number.
+    #[kani::proof]
+    fn from_days_gives_a_valid_date() {
+        let lo = Date {
+            year: -10_000,
+            month: 1,
+            day: 1,
+        }
+        .days();
+        let hi = Date {
+            year: 10_000,
+            month: 12,
+            day: 31,
+        }
+        .days();
+        let x: i64 = kani::any();
+        kani::assume(x >= lo && x <= hi);
+        let d = Date::from_days(x);
+        assert!((1..=12).contains(&d.month));
+        assert!(d.day >= 1 && d.day <= days_in_month(d.year, d.month));
+        assert!((-10_000..=10_000).contains(&d.year));
+        assert_eq!(d.days(), x);
+    }
+
+    // Adding n days to a date moves its day count by exactly n, for |n| up to 100 000 days
+    // (no calendar of aligners is longer).
+    #[kani::proof]
+    fn add_days_moves_by_n() {
+        let d = any_date();
+        let n: i64 = kani::any();
+        kani::assume((-100_000..=100_000).contains(&n));
+        assert_eq!(d.add_days(n).days(), d.days() + n);
+    }
+
+    /// Builds the calendar of `n_stages` aligners (`n_total` with the passive ones) with any
+    /// days of wear the commands accept (`INTERVAL_DAYS`), any policy and any offset whose
+    /// numbering fits a u32, and checks its rows.
+    fn check_run(n_stages: u32, n_total: Option<u32>) {
+        let (lo, hi) = dca_model::INTERVAL_DAYS;
+        let offset: u32 = kani::any();
+        kani::assume(offset <= u32::MAX - 3);
+        let interval_days: u32 = kani::any();
+        kani::assume((lo..=hi).contains(&interval_days));
+        let input = Input {
+            n_stages,
+            n_total,
+            offset,
+            ..Input::default()
+        };
+        let params = Params {
+            start_date: Some("2026-03-02".to_owned()),
+            interval_days,
+            policy: if kani::any() {
+                Policy::Fixed
+            } else {
+                Policy::Adaptive
+            },
+            wear_hours: 22.0,
+            lang: Lang::En,
+        };
+        let cal = run(&input, &params).unwrap();
+        let n = n_stages.max(n_total.unwrap_or(n_stages));
+        assert_eq!(cal.rows.len(), n as usize);
+        let mut day = 0;
+        for (i, r) in cal.rows.iter().enumerate() {
+            let k = i as u32 + 1;
+            assert_eq!(r.aligner, k);
+            assert_eq!(r.number, offset + k);
+            assert_eq!(r.passive, k > n_stages);
+            assert!(r.days >= lo.min(7) && r.days <= hi.max(14));
+            assert_eq!(r.first_day, day);
+            day += r.days;
+        }
+        assert_eq!(cal.total_days, day);
+    }
+
+    // With the days of wear the commands accept (`INTERVAL_DAYS`) and any offset whose
+    // numbering fits a u32, the calendar never overflows: one row per aligner (passive ones
+    // included), numbered after the offset, each starting on the treatment day the previous
+    // one ends, the series lasting the sum of their days. The dates themselves are the start
+    // plus those day counts (`add_days_moves_by_n`); checking them here as well kept the
+    // solver busy for more than 6 minutes. The aligner counts are concrete on each path (no
+    // aligners; passive ones after the active one; a total below the active count): `run`
+    // allocates by them, and an allocation of a symbolic size makes the solver run out of
+    // memory.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn run_rows_follow_each_other() {
+        match kani::any::<u8>() % 3 {
+            0 => check_run(0, None),
+            1 => check_run(1, Some(2)),
+            _ => check_run(2, Some(1)),
+        }
+    }
+
+    // `next_visit` never panics: an empty calendar has no visit, and otherwise the visit is
+    // the day after the row of aligner `last` (clamped to the calendar) ends.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn next_visit_is_the_day_after_a_row() {
+        let n: usize = kani::any();
+        kani::assume(n <= 2);
+        let cal = calendar(n);
+        let last: u32 = kani::any();
+        let visit = next_visit(&cal, last);
+        if n == 0 {
+            assert!(visit.is_none());
+        } else {
+            let i = (last.max(1) as usize).min(n) - 1;
+            assert_eq!(visit, Some(cal.rows[i].end.add_days(1)));
+        }
+    }
+
+    // `day_of_stage` never panics, not even for a NaN or infinite stage: a stage that is not
+    // positive (or not a number) is day 0, and a stage t in (k-1, k] lies within the days the
+    // aligner k is worn.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn day_of_stage_stays_in_its_row() {
+        let n: usize = kani::any();
+        kani::assume(n <= 2);
+        let cal = calendar(n);
+        let t: f64 = kani::any();
+        let day = day_of_stage(&cal, t);
+        if t.is_nan() || t <= 0.0 || n == 0 {
+            assert_eq!(day, 0.0);
+        } else if t <= n as f64 {
+            let r = &cal.rows[t.ceil() as usize - 1];
+            assert!(day >= f64::from(r.first_day));
+            assert!(day <= f64::from(r.first_day + r.days));
+        }
     }
 }

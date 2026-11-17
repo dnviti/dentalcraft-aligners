@@ -1124,20 +1124,37 @@ impl AlignersState {
     /// Puts `seeds` in the place of the seeds of the arch `role`; `true` when
     /// they differ (in any order) from the ones it had.
     fn set_arch_seeds(&mut self, role: ScanRole, seeds: &[Seed]) -> bool {
-        let key = |s: &Seed| s.fdi.get();
-        let mut old: Vec<Seed> = self
+        let old: Vec<Seed> = self
             .seeds
             .iter()
             .filter(|s| in_arch(s.fdi, role))
             .copied()
             .collect();
-        let mut new = seeds.to_vec();
-        old.sort_by_key(key);
-        new.sort_by_key(key);
         self.seeds.retain(|s| !in_arch(s.fdi, role));
         self.seeds.extend_from_slice(seeds);
-        old != new
+        seeds_differ(old, seeds)
     }
+}
+
+/// `old` and `new` do not hold the same seeds (in any order).
+fn seeds_differ(mut old: Vec<Seed>, new: &[Seed]) -> bool {
+    let mut new = new.to_vec();
+    old.sort_by(seed_order);
+    new.sort_by(seed_order);
+    old != new
+}
+
+/// Order of seeds by number, then by position, so that two lists holding the
+/// same seeds sort alike even when a number repeats (`-0.0 + 0.0` is `0.0`:
+/// the two zeros, equal as positions, sort together).
+fn seed_order(a: &Seed, b: &Seed) -> std::cmp::Ordering {
+    let key = |s: &Seed| (s.position + 0.0).to_array();
+    let (pa, pb) = (key(a), key(b));
+    a.fdi
+        .cmp(&b.fdi)
+        .then(pa[0].total_cmp(&pb[0]))
+        .then(pa[1].total_cmp(&pb[1]))
+        .then(pa[2].total_cmp(&pb[2]))
 }
 
 impl dc_case::ModuleData for AlignersState {
@@ -1289,6 +1306,41 @@ mod tests {
         // asking does not change anything
         assert_eq!(st.seed_dependents(ScanRole::Upper), outdated);
         assert_eq!(st, expect);
+    }
+
+    #[test]
+    fn the_same_seeds_in_another_order_change_nothing_even_with_a_repeated_number() {
+        let mut st = sample();
+        let f11 = Fdi::new(11).unwrap();
+        let at = |x: f64| Seed {
+            fdi: f11,
+            position: DVec3::new(x, -30.0, 2.0),
+        };
+        st.seeds = vec![at(1.0), at(2.0)];
+        let before = st.clone();
+        // the counterexample of the Kani harness: the old sort by number only
+        // kept the two marks of 11 in their order and reported a change
+        assert!(
+            st.replace_arch_seeds(ScanRole::Upper, &[at(2.0), at(1.0)])
+                .is_empty()
+        );
+        assert!(st.labels.contains_key(&ScanRole::Upper));
+        assert_eq!(st.seeds, [at(2.0), at(1.0)]);
+        st.seeds = before.seeds.clone();
+        assert!(
+            st.edit_arch_seeds(ScanRole::Upper, &[at(2.0), at(1.0)])
+                .is_empty()
+        );
+        // the positive zero is the negative zero: no change either
+        st.seeds = vec![at(0.0), at(1.0)];
+        assert!(
+            st.edit_arch_seeds(ScanRole::Upper, &[at(1.0), at(-0.0)])
+                .is_empty()
+        );
+        assert!(
+            !st.edit_arch_seeds(ScanRole::Upper, &[at(1.0), at(3.0)])
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1712,5 +1764,85 @@ mod tests {
             .extend([ScanRole::Lower, ScanRole::Upper]);
         st.clear_arch(ScanRole::Lower);
         assert_eq!(st.occlusal_flipped, BTreeSet::from([ScanRole::Upper]));
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A valid tooth number (permanent or deciduous).
+    fn any_fdi() -> Fdi {
+        let n: u8 = kani::any();
+        match Fdi::new(n) {
+            Ok(f) => f,
+            Err(_) => {
+                kani::assume(false);
+                unreachable!()
+            }
+        }
+    }
+
+    /// A coordinate from a set with both zeros and a repeat, so that seeds
+    /// can be equal, equal up to the sign of a zero, or different.
+    fn any_coord() -> f64 {
+        match kani::any::<u8>() % 3 {
+            0 => 0.0,
+            1 => -0.0,
+            _ => 1.0,
+        }
+    }
+
+    /// A seed of any valid tooth, its position on the x axis (the order of
+    /// seeds looks at the coordinates one after the other).
+    fn any_seed() -> Seed {
+        Seed {
+            fdi: any_fdi(),
+            position: DVec3::new(any_coord(), 0.0, 0.0),
+        }
+    }
+
+    // A sort of a symbolic length makes the solver explore every branch of
+    // the standard library's sort (more than 10 minutes), and an allocation
+    // of a symbolic size makes it run out of memory: the lists sorted below
+    // have a concrete length on each path.
+
+    /// `a` and `b` hold the same seeds, each as many times, in any order.
+    fn same_seeds(a: &[Seed], b: &[Seed]) -> bool {
+        let count = |list: &[Seed], s: &Seed| list.iter().filter(|t| *t == s).count();
+        a.len() == b.len() && a.iter().all(|s| count(a, s) == count(b, s))
+    }
+
+    // Every valid tooth belongs to exactly one of the upper and the lower arch, and never to
+    // the bite: the per-arch seed edits and clears split the teeth without overlap.
+    #[kani::proof]
+    fn every_tooth_is_in_exactly_one_arch() {
+        let f = any_fdi();
+        assert_ne!(in_arch(f, ScanRole::Upper), in_arch(f, ScanRole::Lower));
+        assert_eq!(in_arch(f, ScanRole::Upper), f.is_upper());
+        assert!(!in_arch(f, ScanRole::Bite));
+    }
+
+    // `set_arch_seeds` reports a change with `seeds_differ` on the old and the new seeds of
+    // the arch, checked here on plain lists. The rest of `set_arch_seeds` (the other arch kept,
+    // the arch holding exactly the seeds given) is not harnessed: building and dropping a
+    // whole `AlignersState`, or even retaining and extending 90 short lists of seeds of
+    // concrete arches, keeps the solver in symbolic execution for more than 15 minutes.
+
+    // Setting the seeds of an arch reports a change exactly when the arch held other seeds
+    // before: the same seeds in another order (even with a repeated tooth number, or a zero
+    // of the other sign) are no change. Every pair of lengths up to 2 is checked, each with
+    // its own concrete length.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn set_arch_seeds_reports_a_change_iff_the_seeds_differ() {
+        let old = [any_seed(), any_seed()];
+        let new = [any_seed(), any_seed()];
+        for a in 0..=2 {
+            for b in 0..=2 {
+                let (old, new) = (&old[..a], &new[..b]);
+                assert_eq!(seeds_differ(old.to_vec(), new), !same_seeds(old, new));
+            }
+        }
     }
 }

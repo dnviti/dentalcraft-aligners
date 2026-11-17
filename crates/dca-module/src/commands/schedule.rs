@@ -6,7 +6,9 @@
 //! before it (attachments, IPR) and the passive aligners that keep the two
 //! arches in step. The start date, the days and the policy not given are
 //! those of the case settings (`Settings::start_date`, `interval_days`,
-//! `interval_policy`; no start date: today). The attachments bonded before
+//! `interval_policy`; no start date: today). The days of wear must be within
+//! the range the staging settings accept (`INTERVAL_DAYS`, 5 to 21), or the
+//! command fails. The attachments bonded before
 //! the first aligner are those of the clinical review of the arch (the
 //! plugin's `schedule.build`) unless the parameters give them. The calendar
 //! is returned; the case is not modified. The `.ics` file is written by the
@@ -23,7 +25,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::messages;
-use super::staging::{aligners_data, arch_name};
+use super::staging::{aligners_data, arch_name, check_interval_days};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -88,7 +90,9 @@ fn run_schedule(
         .unwrap_or_else(|| schedule::Date::today().to_iso());
     let cal_params = schedule::Params {
         start_date: Some(start),
-        interval_days: params.interval_days.unwrap_or(data.settings.interval_days),
+        interval_days: check_interval_days(
+            params.interval_days.unwrap_or(data.settings.interval_days),
+        )?,
         policy: params
             .policy
             .unwrap_or_else(|| data.settings.interval_policy.into()),
@@ -191,6 +195,34 @@ mod tests {
             exec("aligners.planning.schedule", &s, json!({ "arch": "upper" })),
             Err(CommandError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn days_of_wear_outside_the_staging_range_are_refused() {
+        use super::super::staging::tests::staged_input;
+        let s = staged_input("lower", &CaseState::default());
+        let (s, _) = exec("aligners.planning.staging.automatic", &s, Value::Null).unwrap();
+        // u32::MAX made the day counter of the calendar overflow
+        for days in [0, 4, 22, u32::MAX] {
+            let err = exec(
+                "aligners.planning.schedule",
+                &s,
+                json!({ "start_date": "2026-01-05", "interval_days": days }),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, CommandError::Invalid(m) if m.contains("interval_days") && m.contains("21")),
+                "{err:?}"
+            );
+        }
+        for days in [5, 21] {
+            exec(
+                "aligners.planning.schedule",
+                &s,
+                json!({ "start_date": "2026-01-05", "interval_days": days }),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

@@ -59,7 +59,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::messages;
-use super::staging::{LabelledScan, aligners_data, labelled_scan, md_sign};
+use super::staging::{LabelledScan, aligners_data, check_interval_days, labelled_scan, md_sign};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -274,17 +274,22 @@ fn export_error(e: export::ExportError) -> CommandError {
 
 /// The start date, days and policy of the calendar not given: those of the
 /// case settings (no start date in the case either: today, in the export).
+/// The days of wear must be within the staging range
+/// ([`check_interval_days`]).
 fn calendar_defaults(
     start_date: &mut Option<String>,
     interval_days: &mut Option<u32>,
     policy: &mut Option<schedule::Policy>,
     settings: &Settings,
-) {
+) -> Result<(), CommandError> {
     if start_date.is_none() {
         start_date.clone_from(&settings.start_date);
     }
-    interval_days.get_or_insert(settings.interval_days);
+    *interval_days = Some(check_interval_days(
+        interval_days.unwrap_or(settings.interval_days),
+    )?);
     policy.get_or_insert(settings.interval_policy.into());
+    Ok(())
 }
 
 fn run_export(
@@ -307,7 +312,7 @@ fn run_export(
         &mut params.interval_days,
         &mut params.policy,
         &data.settings,
-    );
+    )?;
     let arches = prepare(state, &data)?;
     let input = input(&arches, &data);
     ctx.check_cancelled()?;
@@ -412,7 +417,7 @@ fn run_report(
         &mut params.interval_days,
         &mut params.policy,
         &data.settings,
-    );
+    )?;
     let input = input(&arches, &data);
     let choice = report_choice(&data, &input, &mut params, ctx.cancel_token().clone())?;
     let renders = if params.report && params.embed_renders {
@@ -554,7 +559,7 @@ pub(crate) fn view_aligners(
                 &mut params.interval_days,
                 &mut params.policy,
                 &data.settings,
-            );
+            )?;
             let choice = report_choice(data, &input, &mut params, ctx.cancel_token().clone())?;
             mesh_provider(state, data, &input, &choice)?.0
         }
