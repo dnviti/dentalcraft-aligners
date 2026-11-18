@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0-alpha.8](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.7...v0.2.0-alpha.8) (2026-11-18)
+
+
+### Features
+
+* **aligners:** offer the 3D scanner on scan import with upper, lower and bite roles ([aa08daf](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/aa08daf1b7e62fbd24817d8199f70e19000631f5))
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.4 ([aa08daf](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/aa08daf1b7e62fbd24817d8199f70e19000631f5))
+
 ## [0.2.0-alpha.7](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.6...v0.2.0-alpha.7) (2026-11-17)
 
 
