@@ -30,7 +30,8 @@
 //! is registered in [`crate::commands`]; otherwise it is a placeholder
 //! (`Stub`).
 
-use dc_module_api::{CommandDesc, LeafInput, MenuItem, MenuStatus, MenuTree};
+use dc_case::ScanRole;
+use dc_module_api::{CommandDesc, LeafInput, MenuItem, MenuStatus, MenuTree, ScannerInput};
 
 use crate::tree_data::{GROUPS, TOOLS};
 
@@ -50,6 +51,9 @@ pub struct Node {
     pub shortcut: Option<&'static str>,
     /// What the shell asks the user before running a leaf.
     pub input: Option<LeafInput>,
+    /// The scanner the shell also offers for the leaf's scans, with the roles
+    /// an acquired scan can take.
+    pub scanner: Option<ScannerInput>,
     /// The leaf is a step of the workflow (not a shortcut over the steps, not
     /// an optional correction).
     pub counts_as_step: bool,
@@ -73,6 +77,7 @@ impl Node {
             icon,
             shortcut: None,
             input: None,
+            scanner: None,
             counts_as_step: true,
             children: &[],
         }
@@ -87,6 +92,13 @@ impl Node {
     /// The same leaf asking the user for `input` before it runs.
     pub(crate) const fn input(mut self, input: LeafInput) -> Self {
         self.input = Some(input);
+        self
+    }
+
+    /// The same leaf whose scans can also come from a 3D scanner, with one
+    /// of `roles`.
+    pub(crate) const fn scanner(mut self, roles: &'static [ScanRole]) -> Self {
+        self.scanner = Some(ScannerInput { roles });
         self
     }
 
@@ -111,6 +123,7 @@ impl Node {
             icon,
             shortcut: None,
             input: None,
+            scanner: None,
             counts_as_step: true,
             children,
         }
@@ -154,6 +167,7 @@ impl Node {
         };
         let mut item = item.with_icon(self.icon);
         item.input = self.input;
+        item.scanner = self.scanner;
         item.counts_as_step = self.counts_as_step;
         if self.status() == MenuStatus::Stub {
             item.stub()

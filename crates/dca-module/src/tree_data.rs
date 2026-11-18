@@ -1,6 +1,7 @@
 //! The data of the menu tree and of the manual tools (see `tree` for the id
 //! and key naming scheme).
 
+use dc_case::ScanRole;
 use dc_module_api::LeafInput;
 
 use crate::tree::Node;
@@ -20,7 +21,9 @@ pub(crate) static GROUPS: &[Node] = &[
                 "aligners-menu-case-import-scans",
                 "aligners-desc-case-import-scans",
                 "upload-simple",
-            ),
+            )
+            // a scan from the scanner: an arch or a bite, as a file is
+            .scanner(&[ScanRole::Upper, ScanRole::Lower, ScanRole::Bite]),
             Node::leaf(
                 "aligners.auto",
                 "aligners-menu-auto",
