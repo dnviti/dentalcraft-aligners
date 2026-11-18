@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dc_case::CaseState;
+use dc_case::{CaseState, ScanRole};
 use dc_i18n::{Lang, parity};
 use dc_jobs::JobSystem;
 use dc_module_api::{
@@ -293,6 +293,23 @@ fn the_shell_is_told_what_to_ask_before_a_leaf_runs() {
         let schema = dca_module::commands::find(id).unwrap().schema();
         assert!(schema["properties"][param].is_object(), "{id}: {schema}");
     }
+}
+
+#[test]
+fn only_import_scans_offers_the_scanner_with_every_role() {
+    let menu = AlignersModule::new().menu();
+    let scanning: Vec<_> = menu
+        .iter()
+        .filter_map(|(_, i)| i.scanner.map(|s| (i.id, s.roles)))
+        .collect();
+    assert_eq!(
+        scanning,
+        [(
+            "aligners.case.import-scans",
+            &[ScanRole::Upper, ScanRole::Lower, ScanRole::Bite][..]
+        )]
+    );
+    assert!(dc_module_api::is_import_scans_command(scanning[0].0));
 }
 
 /// What the menu shows as the progress of the case: the nine steps of the
