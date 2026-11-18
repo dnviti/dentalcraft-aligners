@@ -19,15 +19,15 @@ dca-algo = { path = "crates/dca-algo" }
 dca-module = { path = "crates/dca-module" }
 
 # dentalcraft-core crates
-dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-command = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-jobs = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
-dc-scene = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.4" }
+dc-case = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-command = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-geom = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-i18n = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-jobs = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-mesh = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-module-api = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-raster = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
+dc-scene = { git = "https://github.com/dnviti-personal-org/dentalcraft-core.git", tag = "v0.3.0-alpha.5" }
 
 # GUI: must be the same egui version as dentalcraft-core
 egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }
