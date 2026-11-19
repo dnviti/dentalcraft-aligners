@@ -302,10 +302,10 @@ impl<'a> ShellProvider<'a> {
     /// The reduction of `full` (arch coordinates) within the tolerance (or
     /// half of it, [`shell::reduce_to`]: no crossing where the vertices land
     /// in case coordinates, `to_case`) when it is no worse to print than
-    /// `full`: no more self-intersections, the same holes, no wall thinner
-    /// than `min_wall` that `full` does not have. Otherwise the full
-    /// resolution, with a note. Also the self-intersections of the mesh
-    /// returned, in case coordinates.
+    /// `full`: no more self-intersections and triangles of no area, the same
+    /// holes, no wall thinner than `min_wall` that `full` does not have.
+    /// Otherwise the full resolution, with a note. Also the defects of the
+    /// mesh returned, in case coordinates.
     fn reduce_checked(
         &self,
         full: TriMesh,
@@ -313,7 +313,7 @@ impl<'a> ShellProvider<'a> {
         (arch, k): (Arch, u32),
         aligner: bool,
         min_wall: Option<f64>,
-    ) -> Result<(TriMesh, Option<usize>), ExportError> {
+    ) -> Result<(TriMesh, Option<Defects>), ExportError> {
         let tol = self.params.tolerance_mm;
         if tol <= 0.0 {
             return Ok((full, None));
@@ -333,32 +333,33 @@ impl<'a> ShellProvider<'a> {
                 break;
             }
             let c = check(&rigid(to_case, &r), min_wall);
-            if c.self_intersections <= base.self_intersections
+            if Defects::of(&c).no_worse_than(&Defects::of(&base))
                 && c.genus == base.genus
                 && c.boundary_edges == 0
                 && (min_wall.is_none() || wall(&c) >= floor - 1e-9)
             {
-                return Ok((r, c.self_intersections));
+                return Ok((r, Some(Defects::of(&c))));
             }
         }
         self.note(arch, k, aligner, "rpt-note-reduce", format!("{tol} mm"));
-        Ok((full, base.self_intersections))
+        Ok((full, Some(Defects::of(&base))))
     }
 
     /// The stamp on `mesh` (arch coordinates), on one of the `covered`
-    /// teeth of `sites`: the mesh stamped, or `None` with a note (no room, or
-    /// the text would fold the surface: more self-intersections in case
-    /// coordinates, `to_case`, than `before`, the ones of `mesh` there when
-    /// known).
+    /// teeth of `sites`: the mesh stamped and the file it makes (`land`: the
+    /// mesh in case coordinates), or `None` with a note (no room). A text
+    /// that would fold the surface (more self-intersections or triangles of
+    /// no area in the file than `base`, those of the file of `mesh` when
+    /// known) is not kept: the next tooth is tried.
     fn stamped(
         &self,
         mesh: &TriMesh,
-        before: Option<usize>,
-        to_case: &DMat4,
+        base_known: Option<Defects>,
+        land: &dyn Fn(&TriMesh) -> TriMesh,
         (arch, k): (Arch, u32),
         kind: stamp::Kind,
         (sites, covered): (Vec<ToothSite>, &std::collections::BTreeSet<Fdi>),
-    ) -> Option<TriMesh> {
+    ) -> Option<(TriMesh, TriMesh)> {
         let aligner = kind == stamp::Kind::Shell;
         // the text, the tooth, the face and the sizes of the case settings
         let case = match super::super::stamp::case_stamp_params(
@@ -394,24 +395,57 @@ impl<'a> ShellProvider<'a> {
             teeth: sites,
             covered: Some(covered),
         };
-        let why = match stamp::run(&input, &params) {
+        let base = std::cell::OnceCell::new();
+        let flat = |stamped: &TriMesh| -> Result<(), String> {
+            let base = base.get_or_init(|| {
+                base_known.unwrap_or_else(|| Defects::of(&check(&land(mesh), None)))
+            });
+            let after = Defects::of(&check(&land(stamped), None));
+            if after.no_worse_than(base) {
+                return Ok(());
+            }
+            Err(format!(
+                "the text would fold the surface ({} self-intersections, {} triangles of no area)",
+                after
+                    .self_intersections
+                    .unwrap_or(0)
+                    .saturating_sub(base.self_intersections.unwrap_or(0)),
+                after.degenerate.saturating_sub(base.degenerate)
+            ))
+        };
+        let why = match stamp::run_checked(&input, &params, &flat) {
             Ok(Outcome::Stamped(done)) => {
-                let before =
-                    before.or_else(|| check(&rigid(to_case, mesh), None).self_intersections);
-                let after = check(&rigid(to_case, &done.mesh), None).self_intersections;
-                if after <= before {
-                    return Some(done.mesh);
-                }
-                format!(
-                    "the text would fold the surface ({} self-intersections)",
-                    after.unwrap_or(0) - before.unwrap_or(0)
-                )
+                let file = land(&done.mesh);
+                return Some((done.mesh, file));
             }
             Ok(Outcome::Skipped { reason }) => reason,
             Err(e) => e.to_string(),
         };
         self.note(arch, k, aligner, "rpt-note-stamp", why);
         None
+    }
+}
+
+/// What the print check finds wrong in a file that a later step (the
+/// reduction, the stamp) must not make worse.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Defects {
+    /// Pairs of triangles that cross.
+    self_intersections: Option<usize>,
+    /// Triangles of no area.
+    degenerate: usize,
+}
+
+impl Defects {
+    fn of(c: &printcheck::PrintCheck) -> Self {
+        Self {
+            self_intersections: c.self_intersections,
+            degenerate: c.degenerate,
+        }
+    }
+
+    fn no_worse_than(&self, base: &Self) -> bool {
+        self.self_intersections <= base.self_intersections && self.degenerate <= base.degenerate
     }
 }
 
@@ -487,19 +521,36 @@ impl MeshProvider for ShellProvider<'_> {
         };
         let sites = self.stamp_sites(&parts, &g, &to_arch);
         let local = rigid(&to_arch, &model);
-        Ok(Some(
-            match self.stamped(
-                &local,
-                None,
-                &from_arch,
-                (arch, k),
-                stamp::Kind::Model,
-                (sites, &print.covered),
-            ) {
-                Some(done) => rigid(&from_arch, &done),
-                None => model,
-            },
-        ))
+        // back in case coordinates, every vertex the stamp left where it was
+        // keeps its own position: going to the arch and back rounds it twice,
+        // which can lay the three corners of a sliver in line or make two
+        // triangles that nearly touch cross (SUP_modello_08 of a real case)
+        let land = |s: &TriMesh| {
+            let n = local.positions.len();
+            let positions = s
+                .positions
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    if i < n && *p == local.positions[i] {
+                        model.positions[i]
+                    } else {
+                        from_arch.transform_point3(p.as_dvec3()).as_vec3()
+                    }
+                })
+                .collect();
+            TriMesh::new(positions, s.tris.clone())
+        };
+        let base = Defects::of(&check(&model, None));
+        let stamped = self.stamped(
+            &local,
+            Some(base),
+            &land,
+            (arch, k),
+            stamp::Kind::Model,
+            (sites, &print.covered),
+        );
+        Ok(Some(stamped.map_or(model, |(_, file)| file)))
     }
 
     fn aligner(&self, arch: Arch, k: u32) -> Result<Option<TriMesh>, ExportError> {
@@ -624,8 +675,10 @@ impl MeshProvider for ShellProvider<'_> {
                 format!("{} holes through the wall left", done.genus),
             );
         }
-        let (mut mesh, si) =
+        let (mut mesh, base) =
             self.reduce_checked(done.mesh, &from_arch, (arch, k), true, Some(MIN_WALL_MM))?;
+        let land = |s: &TriMesh| rigid(&from_arch, s);
+        let mut file = None;
 
         // the stamp, engraved inside the wall
         if self.options.stamp {
@@ -638,15 +691,16 @@ impl MeshProvider for ShellProvider<'_> {
                     .map(|all| self.stamp_sites(&all, &g, &to_arch))
                     .unwrap_or_default()
             };
-            if let Some(done) = self.stamped(
+            if let Some((done, landed)) = self.stamped(
                 &mesh,
-                si,
-                &from_arch,
+                base,
+                &land,
                 (arch, k),
                 stamp::Kind::Shell,
                 (sites, &print.covered),
             ) {
                 mesh = done;
+                file = Some(landed);
             }
         }
 
@@ -663,7 +717,7 @@ impl MeshProvider for ShellProvider<'_> {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert((arch, k), reach);
         }
-        Ok(Some(rigid(&from_arch, &mesh)))
+        Ok(Some(file.unwrap_or_else(|| land(&mesh))))
     }
 
     fn reach(&self, arch: Arch, k: u32) -> Option<printcheck::Reach> {
