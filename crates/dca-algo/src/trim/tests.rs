@@ -731,3 +731,57 @@ fn a_missing_central_incisor_is_bridged_and_the_aligner_stays_whole() {
         );
     }
 }
+
+#[test]
+fn the_reach_over_a_bar_is_the_reach_of_the_crowns_and_its_top() {
+    // a strip over the space between two incisors, 1 mm above them
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let top = |f: u8| {
+        let t = a.teeth.iter().find(|t| t.fdi.get() == f).unwrap();
+        t.crown
+            .iter()
+            .copied()
+            .reduce(|p, q| if q.z > p.z { q } else { p })
+            .unwrap()
+    };
+    let (p, q) = (top(31), top(42));
+    let across = (q - p).cross(DVec3::Z).normalize();
+    let rows = 12;
+    let path: Vec<DVec3> = (0..rows)
+        .flat_map(|i| {
+            let c = p + (q - p) * (i as f64 / (rows - 1) as f64) + DVec3::Z;
+            (0..bars::PATH_COLUMNS).map(move |j| c + across * (j as f64 - 2.0) * 0.8)
+        })
+        .collect();
+    let bar = bars::Bar {
+        teeth: (Fdi::new(31).unwrap(), Fdi::new(42).unwrap()),
+        p0: p.truncate(),
+        p1: q.truncate(),
+        z0: p.z,
+        z1: q.z,
+        solid: TriMesh::new(Vec::new(), Vec::new()),
+        path,
+    };
+    let r = 0.6 + smooth::SMOOTH_NEAR_MM;
+    let both = {
+        let s = strips(std::slice::from_ref(&bar));
+        let mut pos = a.crowns.positions.clone();
+        let mut tris = a.crowns.tris.clone();
+        let off = pos.len() as u32;
+        pos.extend(s.positions);
+        tris.extend(s.tris.iter().map(|t| t.map(|v| v + off)));
+        near_grid(&TriMesh::new(pos, tris), r, &a.shell).unwrap()
+    };
+    let crowns = near_grid(&a.crowns, r, &a.shell).unwrap();
+    let united = near_with_strips(crowns.clone(), &[bar], r, &a.shell).unwrap();
+    let (mut same, mut all, mut grown) = (0usize, 0usize, 0usize);
+    both.for_each_voxel(|ijk, _| {
+        let x = both.voxel_position(ijk);
+        all += 1;
+        same += usize::from(both.contains(x) == united.contains(x));
+        grown += usize::from(united.contains(x) && !crowns.contains(x));
+    });
+    // the same region, the strip taken in
+    assert!(grown > 0);
+    assert!(same as f64 >= 0.9999 * all as f64, "{same} of {all}");
+}

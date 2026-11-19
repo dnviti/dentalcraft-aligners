@@ -802,11 +802,10 @@ impl<'a> BarSource<'a> {
     }
 }
 
-/// `crowns` with the tops of the `bars` added: the reach of the aligner
-/// takes them in (the points along the top of every bar, `points_solid`).
-fn with_strips(crowns: &TriMesh, bars: &[bars::Bar]) -> TriMesh {
-    let mut pos = crowns.positions.clone();
-    let mut tris = crowns.tris.clone();
+/// The tops of the `bars`: the reach of the aligner takes them in (the
+/// points along the top of every bar, `points_solid`).
+fn strips(bars: &[bars::Bar]) -> TriMesh {
+    let (mut pos, mut tris) = (Vec::new(), Vec::new());
     for b in bars {
         let s = b.top_strip();
         let off = pos.len() as u32;
@@ -814,6 +813,22 @@ fn with_strips(crowns: &TriMesh, bars: &[bars::Bar]) -> TriMesh {
         tris.extend(s.tris.iter().map(|t| t.map(|v| v + off)));
     }
     TriMesh::new(pos, tris)
+}
+
+/// The reach `near` of the aligner (from [`near_grid`]) grown over the tops
+/// of the `bars`: the distance to the crowns and the strips is the smaller
+/// of the two, so only the strips are measured, then united with it.
+fn near_with_strips(
+    mut near: SdfGrid,
+    bars: &[bars::Bar],
+    radius: f64,
+    like: &SdfGrid,
+) -> Result<SdfGrid, TrimError> {
+    let s = strips(bars);
+    if !s.tris.is_empty() {
+        near.union(&near_grid(&s, radius, like)?).map_err(geom)?;
+    }
+    Ok(near)
 }
 
 /// Trims the shell of one aligner: the trim line of the mode, the trim
@@ -1017,7 +1032,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
             z = surface(&made);
             b = Build {
                 shell: Cow::Owned(shell),
-                near: near_grid(&with_strips(input.crowns, &made), near_r, input.shell)?,
+                near: near_with_strips(b.near, &made, near_r, input.shell)?,
                 ..b
             };
             cut = b.cut(&z)?;
