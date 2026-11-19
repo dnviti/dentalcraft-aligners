@@ -278,6 +278,23 @@ fn run_export_all(
     let (next, record) = run_step(state, &step, 0, ctx)?;
     let mut out = record["output"].clone();
     out["seconds"] = json!(t0.elapsed().as_secs_f64());
+    // a file that fails the print check is not to be printed as it is: the
+    // export ends in error, naming the files (the report and print_check.json
+    // in the folder say what is wrong with them)
+    let failed: Vec<&str> = out["print_check"]["failed"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !failed.is_empty() {
+        return Err(CommandError::Failed(super::messages::tr(
+            "aligners-err-print-check-failed",
+            &[
+                ("dir", out["dir"].as_str().unwrap_or(&params.dir)),
+                ("count", &failed.len().to_string()),
+                ("files", &failed.join(", ")),
+            ],
+        )));
+    }
     Ok((next, out))
 }
 

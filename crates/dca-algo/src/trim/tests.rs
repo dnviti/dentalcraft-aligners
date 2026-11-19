@@ -110,16 +110,50 @@ pub(super) struct DemoArch {
     pub shell: SdfGrid,
     pub wall: f64,
     pub voxel: f32,
+    /// The closed model the shell is laid on ...
+    pub model: TriMesh,
+    /// ... with crevices narrower than twice this filled (mm).
+    pub blockout: f64,
 }
 
 pub(super) fn demo_arch(arch: Arch, wall: f64, voxel: f32) -> DemoArch {
+    demo_arch_without(arch, wall, voxel, &[], crate::shell::BLOCKOUT_MM)
+}
+
+/// The demo arch without the teeth `missing`: their closed shells taken
+/// out of the model, the gum tube left under them (an edentulous space);
+/// the shell laid on it with `blockout`.
+pub(super) fn demo_arch_without(
+    arch: Arch,
+    wall: f64,
+    voxel: f32,
+    missing: &[u16],
+    blockout: f64,
+) -> DemoArch {
     let d = demo::run(&demo::Params {
         arch,
         ..demo::Params::default()
     });
-    let m = &d.mesh;
+    let all = d.mesh.vertex_labels.clone().unwrap();
+    let mut map = vec![u32::MAX; all.len()];
+    let (mut pos, mut labels) = (Vec::new(), Vec::new());
+    for (i, l) in all.iter().enumerate() {
+        if !missing.contains(l) {
+            map[i] = pos.len() as u32;
+            pos.push(d.mesh.positions[i]);
+            labels.push(*l);
+        }
+    }
+    let tris: Vec<[u32; 3]> = d
+        .mesh
+        .tris
+        .iter()
+        .filter(|t| t.iter().all(|&v| map[v as usize] != u32::MAX))
+        .map(|t| t.map(|v| map[v as usize]))
+        .collect();
+    let mut m = TriMesh::new(pos, tris);
+    m.vertex_labels = Some(labels.clone());
     let v: Vec<DVec3> = m.positions.iter().map(|p| p.as_dvec3()).collect();
-    let labels = m.vertex_labels.clone().unwrap();
     let parts = model::parts(&v, &m.tris, &labels, &BTreeMap::new(), None);
     assert!(parts.scan_border.is_empty());
     assert!(
@@ -128,8 +162,9 @@ pub(super) fn demo_arch(arch: Arch, wall: f64, voxel: f32) -> DemoArch {
             .iter()
             .all(|t| t.margin.len() >= 20 && t.crown.len() >= 20)
     );
-    // the shell: a sheet of `wall` on the closed model (crevices under 0.6 mm filled)
-    let shell = model::untrimmed_shell(m, f64::from(voxel), 0.3, 0.0, wall).unwrap();
+    // the shell: a sheet of `wall` on the closed model (crevices under twice
+    // the blockout filled)
+    let shell = model::untrimmed_shell(&m, f64::from(voxel), blockout, 0.0, wall).unwrap();
     DemoArch {
         teeth_mesh: parts.teeth_mesh,
         gingiva: parts.gingiva,
@@ -138,6 +173,8 @@ pub(super) fn demo_arch(arch: Arch, wall: f64, voxel: f32) -> DemoArch {
         shell,
         wall,
         voxel,
+        model: m,
+        blockout,
     }
 }
 
@@ -153,7 +190,28 @@ impl DemoArch {
             clearance_mm: 0.0,
             thickness_mm: self.wall,
             cut: None,
+            rebuild: None,
         }
+    }
+
+    /// The shell laid on the model with the closed `extra` solids added to
+    /// it, as [`Input::rebuild`] wants it.
+    pub(super) fn shell_with(&self, extra: &[TriMesh]) -> Result<SdfGrid, String> {
+        let mut pos = self.model.positions.clone();
+        let mut tris = self.model.tris.clone();
+        for e in extra {
+            let off = pos.len() as u32;
+            pos.extend_from_slice(&e.positions);
+            tris.extend(e.tris.iter().map(|t| t.map(|v| v + off)));
+        }
+        model::untrimmed_shell(
+            &TriMesh::new(pos, tris),
+            f64::from(self.voxel),
+            self.blockout,
+            0.0,
+            self.wall,
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -573,4 +631,289 @@ fn the_outer_side_of_the_wall_grows_and_the_fitting_surface_stays() {
             grown.sample(p)
         );
     }
+}
+
+/// The highest crown point of every covered tooth is under the aligner (a
+/// ray down from above it meets the aligner).
+fn uncapped(out: &Output, teeth: &[Tooth]) -> Vec<Fdi> {
+    let bvh = Bvh::build(&out.mesh).unwrap();
+    teeth
+        .iter()
+        .filter(|t| t.covered)
+        .filter(|t| {
+            let top = t
+                .crown
+                .iter()
+                .copied()
+                .reduce(|a, b| if b.z > a.z { b } else { a })
+                .unwrap();
+            bvh.ray_cast((top + DVec3::Z * 10.0).as_vec3(), Vec3::NEG_Z, 20.0)
+                .is_none()
+        })
+        .map(|t| t.fdi)
+        .collect()
+}
+
+#[test]
+fn a_missing_central_incisor_is_bridged_and_the_aligner_stays_whole() {
+    // the demo upper arch without 21: the space of a central incisor between
+    // 11 and 22, wider than the reach of the aligner from the two crowns; the
+    // shell laid with the blockout of the border, as the export lays it
+    let (f11, f22) = (Fdi::new(11).unwrap(), Fdi::new(22).unwrap());
+    for mode in [Mode::Smooth, Mode::Equator] {
+        let blockout = if mode == Mode::Smooth {
+            crate::shell::SMOOTH_BLOCKOUT_MM
+        } else {
+            crate::shell::BLOCKOUT_MM
+        };
+        let a = demo_arch_without(Arch::Upper, 1.0, 0.25, &[21], blockout);
+        assert!(a.teeth.iter().all(|t| t.fdi.get() != 21));
+        let shell_with = |extra: &[TriMesh]| a.shell_with(extra);
+        let p = Params {
+            mode,
+            insertion_axis: warp::InsertionAxis::Vertical,
+            ..Params::default()
+        };
+        // without a way to build the shell again, the aligner that comes
+        // apart over the space is refused, never cut down to its largest piece
+        match run(&a.input(), &p) {
+            Err(TrimError::Split(lost)) => {
+                assert!(!lost.is_empty(), "{mode:?}");
+                assert!(lost.iter().all(|f| a.teeth.iter().any(|t| t.fdi == *f)));
+            }
+            Err(e) => panic!("{mode:?}: {e}"),
+            Ok(out) => panic!(
+                "{mode:?}: kept {} pieces dropped, uncapped {:?}",
+                out.dropped_pieces,
+                uncapped(&out, &a.teeth)
+            ),
+        }
+        // with it, a bar joins 11 and 22 over the space and the aligner is one
+        // piece over the whole arch
+        let input = Input {
+            rebuild: Some(Rebuild(&shell_with)),
+            ..a.input()
+        };
+        let t0 = std::time::Instant::now();
+        let out = run(&input, &p).unwrap();
+        eprintln!(
+            "{mode:?}: {} tris, bars {:?}, weak {:?}, dropped {}, genus {}, {:.1?}",
+            out.mesh.face_count(),
+            out.bars.iter().map(|b| b.teeth).collect::<Vec<_>>(),
+            out.weak,
+            out.dropped_pieces,
+            out.genus,
+            t0.elapsed()
+        );
+        check_solid(&out);
+        // no hole through the wall
+        assert_eq!(out.genus, 0, "{mode:?}");
+        assert!(
+            out.bars.iter().any(|b| b.teeth == (f11, f22)),
+            "{mode:?}: {:?}",
+            out.bars.iter().map(|b| b.teeth).collect::<Vec<_>>()
+        );
+        assert!(
+            out.weak.iter().all(|w| !w.split),
+            "{mode:?}: {:?}",
+            out.weak
+        );
+        assert_eq!(uncapped(&out, &a.teeth), Vec::<Fdi>::new(), "{mode:?}");
+        // the bar lies over the space: the aligner covers the middle of it
+        let bar = out.bars.iter().find(|b| b.teeth == (f11, f22)).unwrap();
+        let rows = bar.path.len() / bars::PATH_COLUMNS;
+        let mid = bar.path[(rows / 2) * bars::PATH_COLUMNS + bars::PATH_COLUMNS / 2];
+        let bvh = Bvh::build(&out.mesh).unwrap();
+        assert!(
+            bvh.ray_cast((mid + DVec3::Z * 10.0).as_vec3(), Vec3::NEG_Z, 20.0)
+                .is_some(),
+            "{mode:?}: nothing over the space"
+        );
+    }
+}
+
+#[test]
+fn the_reach_over_a_bar_is_the_reach_of_the_crowns_and_its_top() {
+    // a strip over the space between two incisors, 1 mm above them
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let top = |f: u8| {
+        let t = a.teeth.iter().find(|t| t.fdi.get() == f).unwrap();
+        t.crown
+            .iter()
+            .copied()
+            .reduce(|p, q| if q.z > p.z { q } else { p })
+            .unwrap()
+    };
+    let (p, q) = (top(31), top(42));
+    let across = (q - p).cross(DVec3::Z).normalize();
+    let rows = 12;
+    let path: Vec<DVec3> = (0..rows)
+        .flat_map(|i| {
+            let c = p + (q - p) * (i as f64 / (rows - 1) as f64) + DVec3::Z;
+            (0..bars::PATH_COLUMNS).map(move |j| c + across * (j as f64 - 2.0) * 0.8)
+        })
+        .collect();
+    let bar = bars::Bar {
+        teeth: (Fdi::new(31).unwrap(), Fdi::new(42).unwrap()),
+        p0: p.truncate(),
+        p1: q.truncate(),
+        z0: p.z,
+        z1: q.z,
+        solid: TriMesh::new(Vec::new(), Vec::new()),
+        path,
+    };
+    let r = 0.6 + smooth::SMOOTH_NEAR_MM;
+    let both = {
+        let s = strips(std::slice::from_ref(&bar));
+        let mut pos = a.crowns.positions.clone();
+        let mut tris = a.crowns.tris.clone();
+        let off = pos.len() as u32;
+        pos.extend(s.positions);
+        tris.extend(s.tris.iter().map(|t| t.map(|v| v + off)));
+        near_grid(&TriMesh::new(pos, tris), r, &a.shell).unwrap()
+    };
+    let crowns = near_grid(&a.crowns, r, &a.shell).unwrap();
+    let united = near_with_strips(crowns.clone(), &[bar], r, &a.shell).unwrap();
+    let (mut same, mut all, mut grown) = (0usize, 0usize, 0usize);
+    both.for_each_voxel(|ijk, _| {
+        let x = both.voxel_position(ijk);
+        all += 1;
+        same += usize::from(both.contains(x) == united.contains(x));
+        grown += usize::from(united.contains(x) && !crowns.contains(x));
+    });
+    // the same region, the strip taken in
+    assert!(grown > 0);
+    assert!(same as f64 >= 0.9999 * all as f64, "{same} of {all}");
+}
+
+/// The margin of the demo arch in arch order with the distal half of the
+/// last tooth of each side raised to `below` under the top of its crown (a
+/// flange of the scan at the height of the crown behind it: the label of the
+/// tooth stops on its distal ridge), the crowns, the covered teeth and the
+/// end teeth with the centre of their crown and the distal direction.
+#[allow(clippy::type_complexity)]
+fn demo_flanged(
+    a: &DemoArch,
+    below: f64,
+) -> (
+    Vec<(Fdi, Vec<DVec3>)>,
+    BTreeMap<Fdi, Vec<DVec3>>,
+    BTreeSet<Fdi>,
+    Vec<(Fdi, DVec2, DVec2)>,
+) {
+    let order = smooth_order(&a.input());
+    let crowns: BTreeMap<Fdi, Vec<DVec3>> =
+        a.teeth.iter().map(|t| (t.fdi, t.crown.clone())).collect();
+    let covered: BTreeSet<Fdi> = a.teeth.iter().map(|t| t.fdi).collect();
+    let centre =
+        |f: Fdi| crowns[&f].iter().map(|p| p.truncate()).sum::<DVec2>() / crowns[&f].len() as f64;
+    let n = order.len();
+    let ends: Vec<(Fdi, DVec2, DVec2)> = [(order[0], order[1]), (order[n - 1], order[n - 2])]
+        .into_iter()
+        .map(|(f, g)| (f, centre(f), (centre(f) - centre(g)).normalize()))
+        .collect();
+    let marg = order
+        .iter()
+        .map(|&f| {
+            let mut m = a.teeth.iter().find(|t| t.fdi == f).unwrap().margin.clone();
+            if let Some((_, c, t)) = ends.iter().find(|e| e.0 == f) {
+                let top = crowns[&f]
+                    .iter()
+                    .map(|p| p.z)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                for p in &mut m {
+                    if (p.truncate() - *c).dot(*t) > 0.0 {
+                        p.z = top - below;
+                    }
+                }
+            }
+            (f, m)
+        })
+        .collect();
+    (marg, crowns, covered, ends)
+}
+
+#[test]
+fn the_border_rounds_the_last_tooth_at_the_gum_not_on_a_flange() {
+    // HQ2: behind 16 the scan stands at the height of the crown, the margin of
+    // its distal half on the distal ridge; the border taken from it (+ the gap)
+    // lay over the crown and cut a notch into the end of the aligner
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let p = Params::default();
+    let (marg, crowns, covered, ends) = demo_flanged(&a, 0.5);
+    let (border, high) =
+        smooth::smooth_border(&marg, &crowns, &covered, 0.6, p.margin_gap_mm, p.scallop_mm)
+            .unwrap();
+    for (f, c, t) in &ends {
+        let crown = &crowns[f];
+        let top = crown.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max);
+        let reach = crown
+            .iter()
+            .map(|q| (q.truncate() - *c).dot(*t))
+            .fold(0.0, f64::max);
+        // the border round the distal half stays at least 2 mm under the top
+        // of the crown: the distal face covered, no notch
+        let cap: Vec<f64> = border
+            .iter()
+            .filter(|q| {
+                let s = (q.truncate() - *c).dot(*t);
+                s > 0.0 && s < reach + 2.0 && (q.truncate() - *c).length() < 12.0
+            })
+            .map(|q| q.z)
+            .collect();
+        assert!(!cap.is_empty(), "{f}");
+        let z = cap.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(z < top - 2.0, "{f}: border at {z:.2}, crown top {top:.2}");
+        // and nothing is kept behind it: rows of high points from just past
+        // the shell to 8 mm on, past the end of the line of the arch too
+        let behind: Vec<f64> = high
+            .iter()
+            .map(|q| (q.truncate() - *c).dot(*t) - reach)
+            .filter(|&s| s > 0.0)
+            .collect();
+        let far = behind.iter().copied().fold(0.0, f64::max);
+        assert!(
+            far > 7.5,
+            "{f}: high points only {far:.2} mm behind the crown"
+        );
+    }
+}
+
+#[test]
+fn past_the_last_tooth_the_aligner_reaches_only_near_its_crown() {
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let input = a.input();
+    let order = smooth_order(&input);
+    let (r, e) = (
+        0.6 + smooth::SMOOTH_NEAR_MM,
+        0.6 + smooth::SMOOTH_END_NEAR_MM,
+    );
+    let plain = near_grid(&a.crowns, r, &a.shell).unwrap();
+    let ends = smooth_near(&input, &order, r, e, &a.shell).unwrap();
+    let (first, last) = (order[0], order[order.len() - 1]);
+    let (mut pts, mut at_end) = (Vec::new(), Vec::new());
+    for t in &a.teeth {
+        pts.extend(t.crown.iter().map(|p| p.as_vec3()));
+        at_end.extend(std::iter::repeat_n(
+            t.fdi == first || t.fdi == last,
+            t.crown.len(),
+        ));
+    }
+    let index = dc_geom::knn::KnnIndex::build(&pts).unwrap();
+    let slop = 2.0 * f64::from(a.voxel);
+    let (mut dropped, mut extra, mut wrong) = (0usize, 0usize, 0usize);
+    plain.for_each_voxel(|ijk, _| {
+        let x = plain.voxel_position(ijk);
+        let (inp, ine) = (plain.contains(x), ends.contains(x));
+        extra += usize::from(ine && !inp);
+        if inp && !ine {
+            dropped += 1;
+            // only near the end teeth, farther than `e` from their crowns
+            let n = index.nearest(x).unwrap();
+            wrong += usize::from(!at_end[n.index as usize] || f64::from(n.distance) < e - slop);
+        }
+    });
+    assert!(dropped > 0);
+    assert_eq!(extra, 0);
+    assert_eq!(wrong, 0, "{wrong} of {dropped}");
 }

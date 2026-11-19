@@ -978,6 +978,21 @@ pub fn apply(target: &mut SdfGrid, located: &Located) -> Result<(), StampError> 
 /// for a mesh that cannot be sampled. A text that cannot be placed is not an
 /// error: it is [`Outcome::Skipped`].
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Outcome, StampError> {
+    run_checked(input, params, &|_| Ok(()))
+}
+
+/// [`run`], every stamped mesh also given to `accept`: a mesh it refuses
+/// (the reason) is not kept and the next candidate tooth is tried, as for a
+/// place where the text does not fit (the caller's checks of the file: a
+/// text that would fold the surface on one tooth may lie flat on another).
+///
+/// # Errors
+/// As [`run`].
+pub fn run_checked(
+    input: &Input<'_>,
+    params: &Params,
+    accept: &dyn Fn(&TriMesh) -> Result<(), String>,
+) -> Result<Outcome, StampError> {
     let lay = Layouts::new(params, input.arch)?;
     let surface = Surface::new(input.mesh)?;
     let resolution = params.resolution();
@@ -1030,6 +1045,10 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Outcome, StampError> {
                     (mesh, 0)
                 }
             };
+            if let Err(why) = accept(&mesh) {
+                tried.push(format!("{label}{why}"));
+                return Ok(None);
+            }
             Ok(Some(Stamped {
                 mesh,
                 placed: located.placed,

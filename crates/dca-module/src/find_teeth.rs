@@ -5,8 +5,9 @@
 //! * the box "Search also the third molars" (`include_third_molars`);
 //! * the field "Missing teeth" (`missing_teeth`): FDI numbers separated by
 //!   commas, validated while typing and applied when the field is left;
-//! * a grid of 8 columns per arch with a cell for each tooth: filled when the
-//!   tooth has a mark, crossed when it is missing, empty otherwise.
+//! * a grid with a cell for each tooth, 8 columns per arch (4 when the
+//!   inspector is too narrow for 8): filled when the tooth has a mark,
+//!   crossed when it is missing, empty otherwise.
 //!
 //! Both options are stored in the case (`Settings::find_teeth`, through the
 //! command `aligners.settings.find-teeth`, one undo step each) and are the
@@ -205,6 +206,7 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
         ui.weak(tr("aligners-find-no-scan"));
         return;
     }
+    let (cols, cell_w) = grid_layout(ui.available_width());
     for arch in arches {
         let cells = grid(arch, third, &marked, &missing);
         ui.add_space(4.0);
@@ -214,17 +216,18 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
             "aligners-find-lower"
         })));
         Grid::new(("aligners-find-grid", arch.is_upper()))
-            .num_columns(8)
-            .spacing([6.0, 4.0])
+            .num_columns(cols)
+            .min_col_width(cell_w)
+            .spacing([CELL_GAP, 4.0])
             .show(ui, |ui| {
                 for (i, c) in cells.iter().enumerate() {
                     match c {
-                        Some((f, cell)) => draw_cell(ui, *f, *cell),
+                        Some((f, cell)) => draw_cell(ui, *f, *cell, cell_w),
                         None => {
-                            ui.allocate_space(vec2(CELL_W, CELL_H));
+                            ui.allocate_space(vec2(cell_w, CELL_H));
                         }
                     }
-                    if i % 8 == 7 {
+                    if i % cols == cols - 1 {
                         ui.end_row();
                     }
                 }
@@ -236,13 +239,28 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
     ui.weak(tr("aligners-find-legend"));
 }
 
+/// Widest cell ...
 const CELL_W: f32 = 36.0;
+/// ... narrowest one (the box and two digits) ...
+const CELL_MIN_W: f32 = 26.0;
+/// ... and the space between two.
+const CELL_GAP: f32 = 6.0;
 const CELL_H: f32 = 18.0;
 
-/// One cell: a box (filled, crossed or empty) and the number of the tooth.
-fn draw_cell(ui: &mut Ui, f: Fdi, cell: Cell) {
+/// Columns of the grid and width of a cell in `width`: 8 columns (a side of
+/// the arch a row) when their cells are at least [`CELL_MIN_W`] wide, else 4
+/// (a side on two rows).
+fn grid_layout(width: f32) -> (usize, f32) {
+    let cell = |cols: usize| (width - CELL_GAP * (cols - 1) as f32) / cols as f32;
+    let cols = if cell(8) >= CELL_MIN_W { 8 } else { 4 };
+    (cols, cell(cols).clamp(CELL_MIN_W, CELL_W))
+}
+
+/// One cell `w` wide: a box (filled, crossed or empty) and the number of the
+/// tooth.
+fn draw_cell(ui: &mut Ui, f: Fdi, cell: Cell, w: f32) {
     let text = cell_text(f, cell);
-    let (rect, response) = ui.allocate_exact_size(vec2(CELL_W, CELL_H), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(w, CELL_H), Sense::hover());
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, text.clone()));
     let v = ui.visuals();
     let box_rect = egui::Rect::from_min_size(rect.left_center() - vec2(0.0, 5.0), vec2(10.0, 10.0));

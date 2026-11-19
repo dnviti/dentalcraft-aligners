@@ -11,6 +11,7 @@ use dc_case::Fdi;
 use glam::{DVec2, DVec3};
 
 use super::survey::median;
+use crate::reconstruct::TAPER_RIM_MM;
 
 /// The control points along the arch every this many mm ...
 pub const SMOOTH_STEP_MM: f64 = 0.5;
@@ -35,6 +36,9 @@ pub const SMOOTH_CAP_MARGIN_MM: f64 = 1.5;
 /// The shell reaches this (+ wall, + the gap below the margin) from the
 /// crowns covered (`case_print.SMOOTH_NEAR_MM`).
 pub const SMOOTH_NEAR_MM: f64 = 3.5;
+/// ... from the crown of the last tooth covered of each side only this (no
+/// papilla under a contact past it; `trim::smooth_near`).
+pub const SMOOTH_END_NEAR_MM: f64 = 1.0;
 
 /// `y` smoothed by a gaussian of `sigma` samples, the weights renormalised
 /// at the ends (`_gauss_rows`).
@@ -161,14 +165,64 @@ fn nearest(l: &[DVec2], p: DVec2) -> usize {
     best.1
 }
 
+/// The point of the line of the arch `l` (normals `nn`, arc length `u`) at
+/// arc length `s` and its normal: the sample at or after `s` (`searchsorted`);
+/// past the ends of the line, on its straight prolongation.
+fn along(l: &[DVec2], nn: &[DVec2], u: &[f64], s: f64) -> (DVec2, DVec2) {
+    let n = l.len();
+    if n >= 2 && s > u[n - 1] {
+        let t = (l[n - 1] - l[n - 2]).normalize_or_zero();
+        return (l[n - 1] + (s - u[n - 1]) * t, nn[n - 1]);
+    }
+    if n >= 2 && s < u[0] {
+        let t = (l[0] - l[1]).normalize_or_zero();
+        return (l[0] + (u[0] - s) * t, nn[0]);
+    }
+    let j = searchsorted(u, s).min(n - 1);
+    (l[j], nn[j])
+}
+
+/// The margin `marg` (arch order) with the distal half of the last tooth of
+/// each side kept only at the gum: within [`TAPER_RIM_MM`] of the lowest
+/// point of its margin (`reconstruct.TAPER_RIM_MM`: the gingival margin, not
+/// the cut up the side of the crown). No tooth covered follows there, so a
+/// margin higher up is the cut along what the scan has behind the crown at
+/// its height (a flange of gingiva or of the base, a tooth left out): the
+/// border taken from it would lie over the distal face, cut a notch into the
+/// cap and graze the shell over the flange into ragged tongues. `l`, `u`:
+/// the line of the arch and its arc length; `cen`: the centres of the crowns
+/// of `marg`.
+fn gum_ends(
+    marg: &[(Fdi, Vec<DVec3>)],
+    l: &[DVec2],
+    u: &[f64],
+    cen: &[DVec2],
+) -> Vec<(Fdi, Vec<DVec3>)> {
+    let mut out = marg.to_vec();
+    let last = out.len() - 1;
+    for (i, dirn) in [(0, -1.0), (last, 1.0)] {
+        let sc = u[nearest(l, cen[i])];
+        let p = &out[i].1;
+        let floor = p.iter().map(|q| q.z).fold(f64::INFINITY, f64::min) + TAPER_RIM_MM;
+        let kept: Vec<DVec3> = p
+            .iter()
+            .copied()
+            .filter(|q| q.z <= floor || (u[nearest(l, q.truncate())] - sc) * dirn <= 0.0)
+            .collect();
+        out[i].1 = kept;
+    }
+    out
+}
+
 /// Control points of the smooth border (`aligner.smooth_border`). `marg`:
 /// the gingival margin of every tooth covered with one, in arch order;
 /// `crowns`: the crown points of every tooth of the case; `covered`: the
 /// teeth the aligner covers; `outer`: clearance + wall; `gap`: the border
 /// above the margin (towards the crown; negative on the gingiva);
-/// `scallop`: the height of the scallops. Returns the border points and the
-/// high points (nothing kept under them), or `None` with fewer than two
-/// teeth with a margin.
+/// `scallop`: the height of the scallops. The distal half of the last tooth
+/// of each side counts only its margin at the gum ([`gum_ends`]). Returns
+/// the border points and the high points (nothing kept under them), or
+/// `None` with fewer than two teeth with a margin.
 #[allow(clippy::too_many_lines)]
 pub fn smooth_border(
     marg: &[(Fdi, Vec<DVec3>)],
@@ -202,6 +256,7 @@ pub fn smooth_border(
             *n = -*n; // +N: labial (out of the arch)
         }
     }
+    let marg = &gum_ends(marg, &l, &u, &cen);
     let m: Vec<DVec3> = marg.iter().flat_map(|(_, p)| p.iter().copied()).collect();
     let near_m: Vec<usize> = m.iter().map(|p| nearest(&l, p.truncate())).collect();
     let sm: Vec<f64> = near_m.iter().map(|&j| u[j]).collect();
@@ -302,13 +357,10 @@ pub fn smooth_border(
         let mut dd = vec![db[0]; ext_lo.len()];
         dd.extend_from_slice(&db);
         dd.extend(std::iter::repeat_n(db[nb - 1], ext_hi.len()));
-        let j: Vec<usize> = gg
-            .iter()
-            .map(|&x| searchsorted(&u, x).min(u.len() - 1))
-            .collect();
         for off in [0.0, SMOOTH_RING_MM] {
             for k in 0..gg.len() {
-                let xy = l[j[k]] + sign * (dd[k] + off) * nn[j[k]];
+                let (p, n) = along(&l, &nn, &u, gg[k]);
+                let xy = p + sign * (dd[k] + off) * n;
                 out.push(xy.extend(zz[k]));
             }
         }
@@ -379,13 +431,16 @@ pub fn smooth_border(
         let mut rows = arange(-SMOOTH_CAP_IN_MM, (sc - se) * dirn, step);
         rows.push((sc - se) * dirn);
         for r in rows {
-            let jr = searchsorted(&u, se + dirn * r).min(u.len() - 1);
+            let (p, n) = along(&l, &nn, &u, se + dirn * r);
             for (c, z) in cols.iter().zip(&zc) {
-                out.push((l[jr] + *c * nn[jr]).extend(*z));
+                out.push((p + *c * n).extend(*z));
             }
         }
     }
     // behind the last tooth covered and over the teeth left out: high points
+    // (past the end of the line on its prolongation: the plugin skips those
+    // rows, and behind a long last molar none was left, the shell running on
+    // over what the scan has behind it to the reach of the crowns)
     let ctop = marg
         .iter()
         .flat_map(|(f, _)| crowns[f].iter().map(|p| p.z))
@@ -397,13 +452,9 @@ pub fn smooth_border(
         (ends[1].3 + SMOOTH_END_MM, 1.0),
     ] {
         for k in 0..8 {
-            let sk = sa + dirn * f64::from(k);
-            if sk < u[0] || sk > u[u.len() - 1] {
-                continue;
-            }
-            let jk = searchsorted(&u, sk).min(u.len() - 1);
+            let (p, n) = along(&l, &nn, &u, sa + dirn * f64::from(k));
             for dd in arange(-12.0, 12.01, 1.0) {
-                high.push((l[jk] + dd * nn[jk]).extend(top));
+                high.push((p + dd * n).extend(top));
             }
         }
     }

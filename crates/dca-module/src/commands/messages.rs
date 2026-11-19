@@ -2,6 +2,7 @@
 //! on has not been done (no scans, no segmentation, no labels), in the
 //! language of the app (Fluent keys `aligners-err-*`).
 
+use dc_case::Fdi;
 use dc_command::CommandError;
 use dca_algo::anatomy::Arch;
 use dca_algo::autoseed::AutoseedError;
@@ -28,6 +29,21 @@ pub(crate) fn arch_word(arch: Arch) -> String {
             "aligners-err-arch-lower"
         },
         &[],
+    )
+}
+
+/// The aligner `stage` of `arch` would come apart: the caps of `teeth` stay
+/// on a piece of their own even with a bar over the space
+/// ([`dca_algo::trim::TrimError::Split`]).
+pub(crate) fn aligner_split(arch: Arch, stage: u32, teeth: &[Fdi]) -> String {
+    let list: Vec<String> = teeth.iter().map(ToString::to_string).collect();
+    tr(
+        "aligners-err-aligner-split",
+        &[
+            ("arch", &arch_word(arch)),
+            ("stage", &stage.to_string()),
+            ("teeth", &list.join(", ")),
+        ],
     )
 }
 

@@ -673,3 +673,48 @@ fn the_demo_arch_gets_its_stamp_on_a_molar() {
         assert!(fdi % 10 >= 5 && fdi % 10 <= 7, "{fdi}");
     }
 }
+
+#[test]
+fn a_stamp_the_caller_refuses_goes_on_the_next_tooth() {
+    let demo = demo::run(&demo::Params {
+        arch: Arch::Lower,
+        ..demo::Params::default()
+    });
+    let input = Input {
+        mesh: &demo.mesh,
+        arch: Arch::Lower,
+        teeth: demo_input(&demo),
+        covered: None,
+    };
+    let p = Params {
+        date: Some("2026-10-13".to_owned()),
+        number: 5,
+        code: "DEMO".to_owned(),
+        kind: Kind::Model,
+        ..Params::default()
+    };
+    let first = stamped(run(&input, &p).unwrap()).placed.tooth.unwrap();
+    // the first tooth refused (a text that would fold the surface there):
+    // the text goes on another tooth
+    let seen = std::cell::Cell::new(0);
+    let once = |_: &TriMesh| {
+        seen.set(seen.get() + 1);
+        if seen.get() == 1 {
+            Err("folds".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    let next = stamped(run_checked(&input, &p, &once).unwrap());
+    let other = next.placed.tooth.unwrap();
+    assert_ne!(other, first);
+    assert!(next.mesh.validate().is_watertight());
+    // every tooth refused: skipped, the refusal given for the first one
+    let never = |_: &TriMesh| Err("folds".to_owned());
+    match run_checked(&input, &p, &never).unwrap() {
+        Outcome::Skipped { reason } => {
+            assert!(reason.contains(&format!("{first}: folds")), "{reason}");
+        }
+        Outcome::Stamped(s) => panic!("stamped on {:?}", s.placed.tooth),
+    }
+}

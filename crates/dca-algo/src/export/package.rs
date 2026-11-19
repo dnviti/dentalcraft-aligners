@@ -448,13 +448,18 @@ fn run_inner(
     std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
 
     // ---- the meshes: one task per arch, stage and kind ----
+    // the aligners first: they take several times as long as a model, and the
+    // workers take the tasks in order, so the models fill the end of the run
+    // instead of one aligner built alone while the other workers wait
     let mut tasks: Vec<(Arch, u32, Kind)> = Vec::new();
-    for (&arch, &n) in &plan.active {
-        if thermo {
-            tasks.extend((0..=n).map(|k| (arch, k, Kind::Model)));
-        }
-        if direct {
+    if direct {
+        for (&arch, &n) in &plan.active {
             tasks.extend((1..=n).map(|k| (arch, k, Kind::Aligner)));
+        }
+    }
+    if thermo {
+        for (&arch, &n) in &plan.active {
+            tasks.extend((0..=n).map(|k| (arch, k, Kind::Model)));
         }
     }
     let made_count = std::sync::atomic::AtomicUsize::new(0);
