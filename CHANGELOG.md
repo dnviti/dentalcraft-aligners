@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0-alpha.10](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.9...v0.2.0-alpha.10) (2026-11-19)
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.6 ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **export:** end export-all in error when a file fails the print check ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **export:** stamp models without rounding drift and move a folding stamp to the next tooth ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **trim:** close the ends of the smooth border cleanly over a flange behind the last molar ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **trim:** join the caps over a missing tooth with a bar, never drop a segment of the aligner ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **trim:** lay the trim-line shell with the export's blockout under a smooth border ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **ui:** fit the found teeth and the study model settings in a narrow inspector ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+
+
+### Performance Improvements
+
+* **export:** build the aligners before the models ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+* **trim:** measure only the bar tops when the reach of the aligner takes them in ([394a0ea](https://github.com/dnviti-personal-org/dentalcraft-aligners/commit/394a0eac5e46ca263b67723517e5f7f976ca22ef))
+
 ## [0.2.0-alpha.9](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.8...v0.2.0-alpha.9) (2026-11-18)
 
 
