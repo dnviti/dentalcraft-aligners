@@ -382,6 +382,7 @@ aligners-err-then-measure = { $reason }: esegui prima { aligners-menu-teeth-buil
 aligners-err-no-3d-teeth = l'arcata { $arch } non ha i denti 3D: esegui prima { aligners-menu-teeth-build }
 aligners-err-none-3d-teeth = nessuna arcata ha i denti 3D: esegui prima { aligners-menu-teeth-build }
 aligners-err-aligner-split = l'allineatore { $arch } { $stage } si separerebbe: i denti { $teeth } non sono uniti al resto dell'allineatore, nemmeno da una barra sopra lo spazio tra i denti; controlla i denti assenti e i segni dei denti, poi costruiscilo di nuovo
+aligners-err-print-check-failed = i file sono in { $dir }, ma { $count } non superano il controllo di stampa e non vanno stampati così: { $files }
 aligners-err-diagnosis-edit-empty = indica almeno un valore da scrivere o da azzerare
 aligners-err-diagnosis-edit-field = { $field } non è un valore dell'analisi del caso: usa discrepancy, little, midline_offset o largest_space
 aligners-err-diagnosis-edit-range = { $field } deve essere un numero tra { $min } e { $max } mm (indicato { $value })
