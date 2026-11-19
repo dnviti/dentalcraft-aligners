@@ -176,7 +176,18 @@ fn smooth_border_matches_the_plugin() {
         .unwrap();
         let what = format!("smooth {covered:?}");
         close(&border, &points(&case["border"]), &format!("{what} border"));
-        close(&high, &points(&case["high"]), &format!("{what} high"));
+        // the plugin's high points, in order; ours also go on past the end
+        // of the line of the arch, where the plugin skips the rows (a
+        // documented deviation: `trim` module docs)
+        let want = points(&case["high"]);
+        let mut k = 0;
+        for p in &high {
+            if k < want.len() && (*p - want[k]).abs().max_element() < TOL_MM {
+                k += 1;
+            }
+        }
+        assert_eq!(k, want.len(), "{what} high: the plugin's points in order");
+        assert_eq!((high.len() - want.len()) % 25, 0, "{what} high: whole rows");
     }
 }
 

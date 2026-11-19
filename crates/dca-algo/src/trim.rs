@@ -35,10 +35,12 @@
 //!   margin of the covered teeth taken along the line of the arch, side by
 //!   side, smoothed into a line without steps with gentle scallops
 //!   (`scallop_mm`), `margin_gap_mm` above it, round the distal face of the
-//!   last covered tooth of each side, nothing kept behind it or over the
-//!   teeth left out (3 nearest). With fewer than two covered teeth with a
-//!   margin it falls back to Scalloped, as the plugin does, and
-//!   [`Output::fallback`] says so.
+//!   last covered tooth of each side at its gum (not on a flange of the scan
+//!   behind it at the height of the crown), nothing kept behind it or over
+//!   the teeth left out (3 nearest), the reach of the aligner from that
+//!   tooth only [`smooth::SMOOTH_END_NEAR_MM`] past its wall. With fewer than
+//!   two covered teeth with a margin it falls back to Scalloped, as the
+//!   plugin does, and [`Output::fallback`] says so.
 //!
 //! Rim: the shell is opened by the rim radius (the rounded rim of
 //! `_sdf_group`); when that opens a hole through a thin web of the wall the
@@ -72,7 +74,12 @@
 //! for the smooth border (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the
 //! covered crowns; here the reach is measured from [`Input::crowns`]. The
 //! plugin bars the EQUATOR border only; here every border is barred
-//! ([`bars`]).
+//! ([`bars`]). SMOOTH: the margin of the distal half of the last tooth of
+//! each side counts only at the gum, the rows of high points behind it go on
+//! past the end of the line of the arch (the plugin skips them) and the reach
+//! from its crown is [`smooth::SMOOTH_END_NEAR_MM`], not `SMOOTH_NEAR_MM`
+//! ([`smooth_near`]): on a scan with a flange behind the last molar the
+//! plugin's rules cut a notch into its cap and leave ragged tongues.
 
 pub mod bars;
 pub mod checks;
@@ -93,6 +100,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
+use dc_geom::knn::KnnIndex;
 use dc_geom::sdf::{CsgOp, SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
 use glam::{DVec2, DVec3, Vec3};
@@ -554,6 +562,87 @@ fn near_grid(crowns: &TriMesh, radius: f64, like: &SdfGrid) -> Result<SdfGrid, T
     Ok(g)
 }
 
+/// SMOOTH: the reach of the aligner ([`near_grid`]): `radius` from the
+/// crowns, only `end` from the crown of the last tooth of each side of
+/// `order`. The plugin's reach (`SMOOTH_NEAR_MM`) holds the papilla under the
+/// contact of two crowns; past the last tooth there is none, and where the
+/// scan stands at the height of the crown beside or behind it (a flange of
+/// gingiva) the shell over it was kept as far as that reach, in tongues
+/// ragged where the trim surface grazes them. Every triangle of the crowns
+/// goes to the tooth of the crown point nearest its first corner. The
+/// plugin's reach everywhere when the ends are the only teeth.
+fn smooth_near(
+    input: &Input<'_>,
+    order: &[Fdi],
+    radius: f64,
+    end: f64,
+    like: &SdfGrid,
+) -> Result<SdfGrid, TrimError> {
+    let (Some(first), Some(last)) = (order.first(), order.last()) else {
+        return near_grid(input.crowns, radius, like);
+    };
+    if order.len() <= 2 {
+        return near_grid(input.crowns, radius, like);
+    }
+    let (mut pts, mut at_end) = (Vec::new(), Vec::new());
+    for t in input.teeth {
+        let e = t.fdi == *first || t.fdi == *last;
+        pts.extend(t.crown.iter().map(|p| p.as_vec3()));
+        at_end.extend(std::iter::repeat_n(e, t.crown.len()));
+    }
+    let index = KnnIndex::build(&pts).map_err(geom)?;
+    let crowns = input.crowns;
+    let owner: Vec<bool> = index
+        .nearest_batch(&crowns.positions)
+        .into_iter()
+        .map(|n| n.is_some_and(|n| at_end[n.index as usize]))
+        .collect();
+    let (ends, rest): (Vec<[u32; 3]>, Vec<[u32; 3]>) =
+        crowns.tris.iter().partition(|t| owner[t[0] as usize]);
+    if ends.is_empty() || rest.is_empty() {
+        return near_grid(input.crowns, radius, like);
+    }
+    let mut g = near_grid(&faces_of(crowns, &rest), radius, like)?;
+    g.union(&near_grid(&faces_of(crowns, &ends), end, like)?)
+        .map_err(geom)?;
+    Ok(g)
+}
+
+/// The triangles `tris` of `mesh` as a mesh of their own corners.
+fn faces_of(mesh: &TriMesh, tris: &[[u32; 3]]) -> TriMesh {
+    let mut map = vec![u32::MAX; mesh.positions.len()];
+    let mut pos = Vec::new();
+    let tris = tris
+        .iter()
+        .map(|t| {
+            t.map(|i| {
+                let m = &mut map[i as usize];
+                if *m == u32::MAX {
+                    *m = pos.len() as u32;
+                    pos.push(mesh.positions[i as usize]);
+                }
+                *m
+            })
+        })
+        .collect();
+    TriMesh::new(pos, tris)
+}
+
+/// SMOOTH: the covered teeth with a crown and a margin of at least 3 points,
+/// in arch order: the teeth the border is made of.
+fn smooth_order(input: &Input<'_>) -> Vec<Fdi> {
+    let with_margin: Vec<Fdi> = input
+        .teeth
+        .iter()
+        .filter(|t| t.covered && t.margin.len() >= 3 && !t.crown.is_empty())
+        .map(|t| t.fdi)
+        .collect();
+    with_margin
+        .first()
+        .map(|f| anatomy::arch_sequence(&with_margin, Arch::of(*f)))
+        .unwrap_or_default()
+}
+
 /// The control points of the SMOOTH border (`smooth_trim_points`): the
 /// margin of the covered teeth in arch order made into the smooth border,
 /// kept 1 mm above the border of the scan, then the high points; with the
@@ -576,14 +665,7 @@ fn smooth_points(
         .filter(|t| !t.crown.is_empty())
         .map(|t| (t.fdi, t.crown.clone()))
         .collect();
-    let with_margin: Vec<Fdi> = input
-        .teeth
-        .iter()
-        .filter(|t| t.covered && t.margin.len() >= 3 && crowns.contains_key(&t.fdi))
-        .map(|t| t.fdi)
-        .collect();
-    let arch = Arch::of(*with_margin.first()?);
-    let marg: Vec<(Fdi, Vec<DVec3>)> = anatomy::arch_sequence(&with_margin, arch)
+    let marg: Vec<(Fdi, Vec<DVec3>)> = smooth_order(input)
         .into_iter()
         .filter_map(|f| Some((f, input.teeth.iter().find(|t| t.fdi == f)?.margin.clone())))
         .collect();
@@ -976,13 +1058,19 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     let r =
         rim_round(wall, params.round_mm).min(((wall - RIM_MIN_WALL_VOXELS * voxel) / 2.0).max(0.0));
     let mut z = surface(&[]);
+    let near = if mode == Mode::Smooth {
+        let end = near_r - smooth::SMOOTH_NEAR_MM + smooth::SMOOTH_END_NEAR_MM;
+        smooth_near(input, &smooth_order(input), near_r, end, input.shell)?
+    } else {
+        near_grid(input.crowns, near_r, input.shell)?
+    };
     let mut b = Build {
         input,
         shell: Cow::Borrowed(input.shell),
         grid: &grid,
         z_top,
         warp: warp.as_ref(),
-        near: near_grid(input.crowns, near_r, input.shell)?,
+        near,
         r,
     };
     let mut cut = b.cut(&z)?;
