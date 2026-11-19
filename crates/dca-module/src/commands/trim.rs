@@ -81,8 +81,9 @@ pub(crate) struct TrimLineParams {
     clearance_mm: Option<f64>,
     /// Detail of the shell (mm).
     voxel_mm: f64,
-    /// Crevices narrower than twice this are filled before the shell (mm).
-    blockout_mm: f64,
+    /// Crevices narrower than twice this are filled before the shell (mm;
+    /// default as the export: 0.8 under a smooth border, else 0.3).
+    blockout_mm: Option<f64>,
 }
 
 impl Default for TrimLineParams {
@@ -100,7 +101,7 @@ impl Default for TrimLineParams {
             thickness_mm: None,
             clearance_mm: None,
             voxel_mm: 0.1,
-            blockout_mm: 0.3,
+            blockout_mm: None,
         }
     }
 }
@@ -162,7 +163,7 @@ fn run_trim_line(
     if !ok(wall, 0.3, 2.0)
         || !ok(clearance, 0.0, 0.3)
         || !ok(params.voxel_mm, 0.04, 0.5)
-        || !ok(params.blockout_mm, 0.0, 1.0)
+        || params.blockout_mm.is_some_and(|b| !ok(b, 0.0, 1.0))
     {
         return Err(CommandError::Invalid(
             "thickness_mm 0.3..2, clearance_mm 0..0.3, voxel_mm 0.04..0.5 and blockout_mm 0..1"
@@ -273,14 +274,15 @@ fn trim_arch(
         vertices.iter().map(|p| p.as_vec3()).collect(),
         mesh.tris.clone(),
     );
-    let shell = model::untrimmed_shell(
-        &arch_mesh,
-        params.voxel_mm,
-        params.blockout_mm,
-        clearance,
-        wall,
-    )
-    .map_err(|e| CommandError::Failed(format!("{name} arch: {e}")))?;
+    let blockout = params
+        .blockout_mm
+        .unwrap_or(if tp.mode == trim::Mode::Smooth {
+            dca_algo::shell::SMOOTH_BLOCKOUT_MM
+        } else {
+            dca_algo::shell::BLOCKOUT_MM
+        });
+    let shell = model::untrimmed_shell(&arch_mesh, params.voxel_mm, blockout, clearance, wall)
+        .map_err(|e| CommandError::Failed(format!("{name} arch: {e}")))?;
     ctx.check_cancelled()?;
     let input = trim::Input {
         shell: &shell,

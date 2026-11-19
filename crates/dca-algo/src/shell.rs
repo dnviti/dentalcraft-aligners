@@ -89,6 +89,10 @@ use crate::teeth::Which;
 
 /// Crevices narrower than twice this are filled (`aligner.BLOCKOUT_MM`).
 pub const BLOCKOUT_MM: f64 = 0.3;
+/// ... and this under a smooth border (`case_print.SMOOTH_BLOCKOUT_MM`): the
+/// gingival embrasures under the contacts are filled, no tunnel left through
+/// the wall of the shell where the border runs under them.
+pub const SMOOTH_BLOCKOUT_MM: f64 = 0.8;
 /// Default mesh tolerance of the print files (`aligner.REDUCE_TOL_MM`, the
 /// Standard quality `mesh_tolerance`).
 pub const REDUCE_TOL_MM: f64 = 0.01;

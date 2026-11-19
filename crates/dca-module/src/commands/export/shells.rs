@@ -60,8 +60,6 @@ use glam::{DMat4, DVec3};
 use super::super::ramps::StageBite;
 use super::super::shell::{ArchPrint, StageGeometry};
 
-/// Blockout of the shell under a smooth border (`SMOOTH_BLOCKOUT_MM`).
-const SMOOTH_BLOCKOUT_MM: f64 = 0.8;
 /// Thinnest wall of an aligner the reduction may not go below (the default
 /// minimum of the print check).
 const MIN_WALL_MM: f64 = 0.3;
@@ -177,7 +175,7 @@ impl<'a> ShellProvider<'a> {
         let t = &data.trim;
         let trim = super::super::trim::case_trim_params(t);
         let shell_blockout = if t.mode == TrimMode::Smooth {
-            SMOOTH_BLOCKOUT_MM
+            shell::SMOOTH_BLOCKOUT_MM
         } else {
             shell::BLOCKOUT_MM
         };
