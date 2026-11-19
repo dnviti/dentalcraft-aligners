@@ -548,6 +548,16 @@ static TABLE: &[(&str, &str, &str)] = &[
     ),
     ("rpt-note-trim", "trim: {0}", "bordo: {0}"),
     (
+        "rpt-note-bars",
+        "joined over the space between the teeth by a bar: {0}",
+        "unito sopra lo spazio tra i denti da una barra: {0}",
+    ),
+    (
+        "rpt-note-weak",
+        "thin join between the teeth, to check before delivery: {0}",
+        "giunzione sottile tra i denti, da controllare prima della consegna: {0}",
+    ),
+    (
         "rpt-note-reduce",
         "full resolution kept: the reduction within {0} folded the surface",
         "tenuta la risoluzione piena: la riduzione entro {0} piegava la superficie",

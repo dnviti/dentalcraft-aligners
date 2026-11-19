@@ -560,30 +560,11 @@ impl MeshProvider for ShellProvider<'_> {
         let to_arch = print.to_arch();
         let from_arch = dca_algo::frame::rigid_inverse(&to_arch);
         let err = |what: &str, e: &dyn std::fmt::Display| package(what, arch, k, e);
-        // the untrimmed shell field, read from the closing field by arithmetic
-        // without the embrasure fills of the model: the trim of a shell over
-        // them left holes through its wall at the margin
-        let input = shell::Input {
-            fdis: &[],
-            ..print.input(&g)
-        };
-        let parts =
-            shell::model_parts(&input, self.params.base_height_mm).map_err(|e| err("model", &e))?;
-        let mut closed = shell::closed_grid_for(
-            &parts,
-            self.params.shell_voxel_mm,
-            self.shell_blockout,
-            self.design.clearance_mm + self.design.thickness_mm,
-        )
-        .map_err(|e| err("shell", &e))?;
-        drop(parts);
-        self.stop()?;
-        let mut field = shell::shell_grid(&closed, &self.design).map_err(|e| err("shell", &e))?;
-        self.stop()?;
         let teeth: Vec<TriMesh> = g.teeth.iter().map(|t| rigid(&to_arch, t)).collect();
 
-        // the ramps, on the field (arch coordinates of the bite → of the shell)
+        // the ramps, in the arch coordinates of the shell
         let mut ramps_bite = Vec::new();
+        let mut ramps = None;
         if let Some(bite_to_arch) = self.bite.to_arch(arch) {
             let solids = self.bite.ramps(arch, k);
             if !solids.is_empty() {
@@ -604,13 +585,48 @@ impl MeshProvider for ShellProvider<'_> {
                     .zip(&teeth)
                     .map(|(f, t)| (i64::from(f.get()), t.clone()))
                     .collect();
-                let notes = dca_algo::ramps::apply_to_grid(&mut field, &moved, &by_fdi)
+                ramps = Some((moved, by_fdi));
+            }
+        }
+        // the closed field of the model with the solids `extra` added (the
+        // boxes of the bars over a space) and the untrimmed shell field read
+        // from it by arithmetic, without the embrasure fills of the model (the
+        // trim of a shell over them left holes through its wall at the
+        // margin), the ramps united with it
+        let fields = |extra: &[TriMesh]| -> Result<(_, _), ExportError> {
+            let input = shell::Input {
+                fdis: &[],
+                ..print.input(&g)
+            };
+            let mut parts = shell::model_parts(&input, self.params.base_height_mm)
+                .map_err(|e| err("model", &e))?;
+            for e in extra {
+                let off = parts.positions.len() as u32;
+                parts.positions.extend_from_slice(&e.positions);
+                parts.tris.extend(e.tris.iter().map(|t| t.map(|v| v + off)));
+            }
+            let closed = shell::closed_grid_for(
+                &parts,
+                self.params.shell_voxel_mm,
+                self.shell_blockout,
+                self.design.clearance_mm + self.design.thickness_mm,
+            )
+            .map_err(|e| err("shell", &e))?;
+            drop(parts);
+            self.stop()?;
+            let mut field =
+                shell::shell_grid(&closed, &self.design).map_err(|e| err("shell", &e))?;
+            if let Some((moved, by_fdi)) = &ramps {
+                let notes = dca_algo::ramps::apply_to_grid(&mut field, moved, by_fdi)
                     .map_err(|e| err("ramps", &e))?;
                 for n in notes {
                     self.note(arch, k, true, "rpt-note-ramps", n);
                 }
             }
-        }
+            Ok((closed, field))
+        };
+        let (mut closed, field) = fields(&[])?;
+        self.stop()?;
 
         // the occlusal thickness and the grinding of the bite: the solid above
         // the allowed top, cut from the field after the rim is rounded (nothing
@@ -637,9 +653,13 @@ impl MeshProvider for ShellProvider<'_> {
         drop(closed);
         self.stop()?;
 
-        // the trim
+        // the trim, in one piece: a space between two caps gets a bar, its box
+        // added to the model and the shell field built again with it
         let Some(tp) = self.trim_parts(arch, &g, &to_arch, &teeth, Some(&print.covered)) else {
             return Ok(None);
+        };
+        let rebuild = |extra: &[TriMesh]| -> Result<_, String> {
+            fields(extra).map(|(_, f)| f).map_err(|e| e.to_string())
         };
         let input = trim::Input {
             shell: &field,
@@ -651,8 +671,17 @@ impl MeshProvider for ShellProvider<'_> {
             clearance_mm: self.design.clearance_mm,
             thickness_mm: self.design.thickness_mm,
             cut: cut.as_ref(),
+            rebuild: Some(trim::Rebuild(&rebuild)),
         };
-        let done = trim::run(&input, &self.trim).map_err(|e| err("trim", &e))?;
+        let done = trim::run(&input, &self.trim).map_err(|e| {
+            if self.options.cancel.is_cancelled() {
+                ExportError::Cancelled
+            } else if let trim::TrimError::Split(lost) = &e {
+                ExportError::Package(super::messages::aligner_split(arch, k, lost))
+            } else {
+                err("trim", &e)
+            }
+        })?;
         drop(field);
         self.stop()?;
         if done.fallback {
@@ -672,6 +701,22 @@ impl MeshProvider for ShellProvider<'_> {
                 "rpt-note-trim",
                 format!("{} holes through the wall left", done.genus),
             );
+        }
+        if !done.bars.is_empty() {
+            let pairs: Vec<String> = done
+                .bars
+                .iter()
+                .map(|b| format!("{}-{}", b.teeth.0, b.teeth.1))
+                .collect();
+            self.note(arch, k, true, "rpt-note-bars", pairs.join(", "));
+        }
+        if !done.weak.is_empty() {
+            let pairs: Vec<String> = done
+                .weak
+                .iter()
+                .map(|w| format!("{}-{} ({} mm²)", w.a, w.b, w.mm2))
+                .collect();
+            self.note(arch, k, true, "rpt-note-weak", pairs.join(", "));
         }
         let (mut mesh, base) =
             self.reduce_checked(done.mesh, &from_arch, (arch, k), true, Some(MIN_WALL_MM))?;

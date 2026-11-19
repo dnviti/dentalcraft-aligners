@@ -49,22 +49,32 @@
 //! border by a slot of the trim surface and the shell built again
 //! ([`holes`]: `_open_holes`, `_plug_holes`, `_window_cuts`).
 //!
+//! One piece ([`bars`], `_weak_pairs`, `_bar`): two consecutive caps (arch
+//! order, a missing tooth skipped) in different pieces of the meshed shell,
+//! or joined through a neck thinner than the section wanted, are joined by a
+//! bar over the space between them. Its box is added to the model of the
+//! shell ([`Input::rebuild`] builds the shell field again with it), the trim
+//! is lowered to its top along it and the reach of the aligner takes it in;
+//! a cap that still ends in another piece than the aligner kept is an error
+//! ([`TrimError::Split`]), never a segment of the aligner silently dropped.
+//!
 //! EQUATOR: the checks of the border built (labial cover, offsets reached,
 //! the rigid removal of the shell) are in [`Output::checks`] ([`checks`],
 //! [`removal`]).
 //!
-//! Not ported yet (documented deviations): the bars of the equator border
-//! over a space between two caps (so no weak join is checked when a slot is
-//! kept: the bars need the model of the shell, here only its field is
-//! given) and the ceilings of the embrasure fills in the equator field. The
-//! crowns are thinned for the insertion paths on cells of the arch
-//! coordinates (the plugin: of the tooth frame). The rim radius is limited
-//! so that the opening leaves at least [`RIM_MIN_WALL_VOXELS`] voxels of
-//! wall (the plugin rebuilds a shell with a hole at its print voxel
-//! instead). The shell is the caller's: the plugin blocks out 0.8 mm for
-//! the smooth border (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the
-//! covered crowns; here the reach is measured from [`Input::crowns`].
+//! Not ported yet (documented deviations): the ceilings of the embrasure
+//! fills in the equator field, and the border measured off the bars in the
+//! checks. The crowns are thinned for the insertion paths on cells of the
+//! arch coordinates (the plugin: of the tooth frame). The rim radius is
+//! limited so that the opening leaves at least [`RIM_MIN_WALL_VOXELS`]
+//! voxels of wall (the plugin rebuilds a shell with a hole at its print
+//! voxel instead). The shell is the caller's: the plugin blocks out 0.8 mm
+//! for the smooth border (`SMOOTH_BLOCKOUT_MM`) and limits its reach to the
+//! covered crowns; here the reach is measured from [`Input::crowns`]. The
+//! plugin bars the EQUATOR border only; here every border is barred
+//! ([`bars`]).
 
+pub mod bars;
 pub mod checks;
 pub mod cutter;
 pub mod grid;
@@ -79,12 +89,13 @@ pub mod warp;
 #[cfg(test)]
 mod tests;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
 use dc_geom::sdf::{CsgOp, SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
-use glam::{DVec3, Vec3};
+use glam::{DVec2, DVec3, Vec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +122,10 @@ pub const SHELL_FILL_WIDE_MM: f64 = 0.75;
 pub const SHELL_FILL_MARGIN_MM: f64 = 0.4;
 /// The rounded rim never erodes the wall below this many voxels.
 pub const RIM_MIN_WALL_VOXELS: f64 = 1.5;
+/// A shell is built again with bars over the weak joins it shows at most
+/// this many times (the plugin: its bars from the last build, then once
+/// more for the joins they missed).
+pub const BAR_ROUNDS: usize = 2;
 /// [`cut_away`] blends its crease over this many voxels.
 pub const CUT_BLEND_VOXELS: f32 = 2.0;
 /// STRAIGHT, SCALLOPED: grid of the trim surface (mm, `trim_cutter`).
@@ -130,6 +145,10 @@ pub enum TrimError {
     /// A distance field operation failed.
     #[error("distance field: {0}")]
     Geom(String),
+    /// The aligner comes apart: the caps of these teeth are on another piece
+    /// than the one kept, and no bar joins them.
+    #[error("the aligner comes apart: the caps of {0:?} are not joined to the rest")]
+    Split(Vec<Fdi>),
 }
 
 fn geom(e: impl std::fmt::Display) -> TrimError {
@@ -256,6 +275,22 @@ pub struct Input<'a> {
     /// opening of the rim, sized for the full wall, would cut through a
     /// thinner occlusal wall. Taken away by [`cut_away`]. `None`: nothing.
     pub cut: Option<&'a SdfGrid>,
+    /// Builds the untrimmed shell field again, as `shell` was built, with
+    /// these closed solids added to the model (the boxes of the bars over a
+    /// space between two caps, arch coordinates: [`bars`]). `None`: no bar can
+    /// be added, and caps left in pieces apart are an error.
+    pub rebuild: Option<Rebuild<'a>>,
+}
+
+/// The builder of [`Input::rebuild`]: the shell field of the model with the
+/// solids given added to it, or why it could not be built.
+#[derive(Clone, Copy)]
+pub struct Rebuild<'a>(pub &'a (dyn Fn(&[TriMesh]) -> Result<SdfGrid, String> + Sync));
+
+impl std::fmt::Debug for Rebuild<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Rebuild")
+    }
 }
 
 /// The trim line of one tooth, or of the whole arch.
@@ -297,10 +332,16 @@ pub struct Output {
     /// Slots that raise [`Output::surface`] where they opened holes through
     /// the wall to the border ([`holes::window_cuts`], [`holes::apply_slots`]).
     pub slots: Vec<holes::Slot>,
-    /// Pieces of the trimmed shell dropped (only the largest is kept).
+    /// Pieces of the trimmed shell dropped (only the largest is kept; none
+    /// holds a cap: [`TrimError::Split`] otherwise).
     pub dropped_pieces: usize,
     /// Holes through the wall left (genus of the surface; 0 expected).
     pub genus: i64,
+    /// The bars joining two caps over a space ([`bars`]), in arch order.
+    pub bars: Vec<bars::Bar>,
+    /// Joins of two caps still thinner than the section wanted
+    /// ([`bars::weak_pairs`]; their caps are on the aligner).
+    pub weak: Vec<bars::Weak>,
     /// EQUATOR: the checks of the border built (labial cover, offsets
     /// reached; [`checks::checks`]).
     pub checks: Option<checks::Checks>,
@@ -555,13 +596,238 @@ fn smooth_points(
     Some((ctrl, c))
 }
 
+/// What the EQUATOR border is built from, in the warped space of the
+/// insertion paths when there is a warp (`_equator_context`).
+struct EquatorParts {
+    /// The warp of the insertion paths (`None`: vertical).
+    warp: Option<warp::PathWarp>,
+    /// The trim loops of the covered teeth ...
+    loops: BTreeMap<Fdi, line::ToothLoop>,
+    /// ... and the equators of the teeth left out (no shell over them).
+    cut: BTreeMap<Fdi, line::ToothLoop>,
+    /// The teeth in arch order.
+    order: Vec<Fdi>,
+    /// The teeth, their points warped.
+    teeth: Vec<Tooth>,
+    /// The closed teeth, warped.
+    teeth_mesh: TriMesh,
+    /// The gingiva, warped.
+    gingiva: TriMesh,
+    /// The bounds of the warped model.
+    lo: DVec3,
+    /// See `lo`.
+    hi: DVec3,
+}
+
+/// `m` in the warped space of `w` (itself without a warp).
+fn warped_mesh(w: Option<&warp::PathWarp>, m: &TriMesh) -> TriMesh {
+    match w {
+        None => m.clone(),
+        Some(w) => TriMesh::new(
+            m.positions
+                .iter()
+                .map(|p| w.to_warp(p.as_dvec3()).as_vec3())
+                .collect(),
+            m.tris.clone(),
+        ),
+    }
+}
+
+impl EquatorParts {
+    /// The insertion paths (the work is done in the warped space where they
+    /// are vertical) and the trim loops of the teeth.
+    fn new(
+        input: &Input<'_>,
+        params: &Params,
+        wall: f64,
+        bounds_: (DVec3, DVec3),
+    ) -> Result<Self, TrimError> {
+        let crowns: BTreeMap<Fdi, Vec<DVec3>> = input
+            .teeth
+            .iter()
+            .map(|t| (t.fdi, t.crown.clone()))
+            .collect();
+        let fdis: Vec<Fdi> = crowns.keys().copied().collect();
+        let order = fdis
+            .first()
+            .map(|f| anatomy::arch_sequence(&fdis, Arch::of(*f)))
+            .unwrap_or_default();
+        let warp = warp::insertion_warp(&crowns, params.insertion_axis, &order);
+        let to_w = |p: &[DVec3]| -> Vec<DVec3> {
+            warp.as_ref()
+                .map_or_else(|| p.to_vec(), |w| p.iter().map(|&q| w.to_warp(q)).collect())
+        };
+        let teeth: Vec<Tooth> = input
+            .teeth
+            .iter()
+            .map(|t| Tooth {
+                crown: to_w(&t.crown),
+                closed: to_w(&t.closed),
+                margin: to_w(&t.margin),
+                ..t.clone()
+            })
+            .collect();
+        let teeth_mesh = warped_mesh(warp.as_ref(), input.teeth_mesh);
+        let gingiva = warped_mesh(warp.as_ref(), input.gingiva);
+        let (lo, hi) = bounds(&[&teeth_mesh, &gingiva]).unwrap_or(bounds_);
+        let (loops, cut) = line::equator_loops(&teeth, params.equator_offset_mm, wall);
+        if loops.is_empty() {
+            return Err(TrimError::Invalid(
+                "no covered tooth has a crown with at least 20 points".into(),
+            ));
+        }
+        Ok(Self {
+            warp,
+            loops,
+            cut,
+            order,
+            teeth,
+            teeth_mesh,
+            gingiva,
+            lo,
+            hi,
+        })
+    }
+
+    /// The heights of the trim surface on `grid` with the `bars`
+    /// (`_equator_field(ctx, bars)`).
+    fn surface(
+        &self,
+        grid: &PlanGrid,
+        design: EquatorDesign,
+        wall: f64,
+        bars: &[bars::Bar],
+    ) -> Vec<f64> {
+        let boxes: Vec<TriMesh> = bars
+            .iter()
+            .map(|b| warped_mesh(self.warp.as_ref(), &b.solid))
+            .collect();
+        let model = EquatorModel {
+            teeth: &self.teeth_mesh,
+            gingiva: &self.gingiva,
+            z0: self.hi.z + 5.0,
+            bars,
+            bar_boxes: &boxes,
+        };
+        let (lv, cv) = (
+            self.loops.values().collect::<Vec<_>>(),
+            self.cut.values().collect::<Vec<_>>(),
+        );
+        let field = |g: &PlanGrid| cutter::equator_field(g, &lv, &cv, &model, design);
+        let mut z = field(grid);
+        if cutter::equator_cell(wall) < cutter::EQUATOR_CELL_MM {
+            // the cap over the crown as on the grid of EQUATOR_CELL_MM deep inside the outlines
+            let outlines: Vec<&[DVec3]> = self
+                .loops
+                .values()
+                .filter(|l| l.points.len() >= 3)
+                .map(|l| l.points.as_slice())
+                .collect();
+            cutter::coarse_inside(grid, &mut z, &outlines, field);
+        }
+        z
+    }
+}
+
+/// What the bars of a trim are measured against ([`bars::bar`]): the teeth
+/// and the model in the space of the trim surface (warped along the
+/// insertion paths for EQUATOR), and the loop under which the top of a bar
+/// is held (EQUATOR: the trim loops; else the equator along the vertical
+/// path).
+struct BarSource<'a> {
+    teeth: &'a [Tooth],
+    loops: Option<&'a BTreeMap<Fdi, line::ToothLoop>>,
+    teeth_tree: Option<dc_geom::bvh::Bvh>,
+    gum_tree: Option<dc_geom::bvh::Bvh>,
+    gum: &'a TriMesh,
+    z_ray: f64,
+    warp: Option<&'a warp::PathWarp>,
+}
+
+impl<'a> BarSource<'a> {
+    fn new(input: &Input<'a>, eq: Option<&'a EquatorParts>, z_top: f64) -> Result<Self, TrimError> {
+        let tree = |m: &TriMesh| {
+            (!m.tris.is_empty())
+                .then(|| dc_geom::bvh::Bvh::build(m))
+                .transpose()
+                .map_err(geom)
+        };
+        Ok(match eq {
+            Some(e) => Self {
+                teeth: &e.teeth,
+                loops: Some(&e.loops),
+                teeth_tree: tree(&e.teeth_mesh)?,
+                gum_tree: tree(&e.gingiva)?,
+                gum: &e.gingiva,
+                z_ray: e.hi.z + 5.0,
+                warp: e.warp.as_ref(),
+            },
+            None => Self {
+                teeth: input.teeth,
+                loops: None,
+                teeth_tree: tree(input.teeth_mesh)?,
+                gum_tree: tree(input.gingiva)?,
+                gum: input.gingiva,
+                z_ray: z_top,
+                warp: None,
+            },
+        })
+    }
+
+    /// The bar joining the caps of `a` and `b`; `None` when a tooth is not
+    /// there.
+    fn bar(&self, (a, b): (Fdi, Fdi), clearance: f64, outer: f64, thin: bool) -> Option<bars::Bar> {
+        let find = |f: Fdi| self.teeth.iter().find(|t| t.fdi == f);
+        let (ta, tb) = (find(a)?, find(b)?);
+        let lp = |t: &Tooth| match self.loops {
+            Some(l) => l.get(&t.fdi).cloned(),
+            None => line::tooth_equator(t, line::EQUATOR_AZIMUTHS),
+        };
+        let (la, lb) = (lp(ta), lp(tb));
+        let model = bars::BarModel {
+            teeth: self.teeth_tree.as_ref(),
+            gingiva: self.gum_tree.as_ref().map(|g| (g, self.gum)),
+            z_ray: self.z_ray,
+        };
+        Some(bars::bar(
+            (a, b),
+            (bars::tooth_points(ta), bars::tooth_points(tb)),
+            (la.as_ref(), lb.as_ref()),
+            &model,
+            clearance,
+            outer,
+            thin,
+            self.warp,
+        ))
+    }
+}
+
+/// `crowns` with the tops of the `bars` added: the reach of the aligner
+/// takes them in (the points along the top of every bar, `points_solid`).
+fn with_strips(crowns: &TriMesh, bars: &[bars::Bar]) -> TriMesh {
+    let mut pos = crowns.positions.clone();
+    let mut tris = crowns.tris.clone();
+    for b in bars {
+        let s = b.top_strip();
+        let off = pos.len() as u32;
+        pos.extend(s.positions);
+        tris.extend(s.tris.iter().map(|t| t.map(|v| v + off)));
+    }
+    TriMesh::new(pos, tris)
+}
+
 /// Trims the shell of one aligner: the trim line of the mode, the trim
-/// surface, the cut of the shell along it with a rounded rim.
+/// surface, the cut of the shell along it with a rounded rim, in one piece
+/// (two caps in pieces apart, or joined too thinly, are joined by a bar over
+/// the space between them and the shell built again: [`bars`]).
 ///
 /// # Errors
 /// [`TrimError::Invalid`] for parameters out of range, a shell grid not on
 /// the world origin, empty meshes or no tooth with a line;
-/// [`TrimError::Geom`] when a distance field operation fails.
+/// [`TrimError::Geom`] when a distance field operation fails or the shell
+/// cannot be built again with the bars; [`TrimError::Split`] when the cap of
+/// a covered tooth is left on another piece than the aligner kept.
+#[allow(clippy::too_many_lines)]
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     params.check()?;
     let (cl, wall) = (input.clearance_mm, input.thickness_mm);
@@ -593,83 +859,25 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         Mode::Smooth if smooth.is_none() => (Mode::Scalloped, true),
         m => (m, false),
     };
+    let design = EquatorDesign {
+        outer,
+        clearance: cl,
+        offset: params.equator_offset_mm,
+    };
+    let eq = if mode == Mode::Equator {
+        Some(EquatorParts::new(input, params, wall, (lo, hi))?)
+    } else {
+        None
+    };
+    let warp = eq.as_ref().and_then(|e| e.warp.clone());
 
-    let mut warp: Option<warp::PathWarp> = None;
-    let (grid, mut z, lines, near_r, eq_loops) = match mode {
-        Mode::Equator => {
-            // the insertion paths: the work is done in the warped space where they are vertical
-            let crowns: BTreeMap<Fdi, Vec<DVec3>> = input
-                .teeth
-                .iter()
-                .map(|t| (t.fdi, t.crown.clone()))
-                .collect();
-            let fdis: Vec<Fdi> = crowns.keys().copied().collect();
-            let order = fdis
-                .first()
-                .map(|f| anatomy::arch_sequence(&fdis, Arch::of(*f)))
-                .unwrap_or_default();
-            warp = warp::insertion_warp(&crowns, params.insertion_axis, &order);
-            let to_w = |p: &[DVec3]| -> Vec<DVec3> {
-                warp.as_ref()
-                    .map_or_else(|| p.to_vec(), |w| p.iter().map(|&q| w.to_warp(q)).collect())
-            };
-            let warped: Vec<Tooth> = input
-                .teeth
-                .iter()
-                .map(|t| Tooth {
-                    crown: to_w(&t.crown),
-                    closed: to_w(&t.closed),
-                    margin: to_w(&t.margin),
-                    ..t.clone()
-                })
-                .collect();
-            let mesh_w = |m: &TriMesh| -> TriMesh {
-                match &warp {
-                    None => m.clone(),
-                    Some(w) => TriMesh::new(
-                        m.positions
-                            .iter()
-                            .map(|p| w.to_warp(p.as_dvec3()).as_vec3())
-                            .collect(),
-                        m.tris.clone(),
-                    ),
-                }
-            };
-            let (teeth_w, gum_w) = (mesh_w(input.teeth_mesh), mesh_w(input.gingiva));
-            let (wlo, whi) = bounds(&[&teeth_w, &gum_w]).unwrap_or((lo, hi));
-            let (loops, cut) = line::equator_loops(&warped, params.equator_offset_mm, wall);
-            if loops.is_empty() {
-                return Err(TrimError::Invalid(
-                    "no covered tooth has a crown with at least 20 points".into(),
-                ));
-            }
-            let grid = PlanGrid::around(wlo, whi, cutter::equator_cell(wall));
-            let model = EquatorModel {
-                teeth: &teeth_w,
-                gingiva: &gum_w,
-                z0: whi.z + 5.0,
-            };
-            let design = EquatorDesign {
-                outer,
-                clearance: cl,
-                offset: params.equator_offset_mm,
-            };
-            let (lv, cv) = (
-                loops.values().collect::<Vec<_>>(),
-                cut.values().collect::<Vec<_>>(),
-            );
-            let field = |g: &PlanGrid| cutter::equator_field(g, &lv, &cv, &model, design);
-            let mut z = field(&grid);
-            if cutter::equator_cell(wall) < cutter::EQUATOR_CELL_MM {
-                // the cap over the crown as on the grid of EQUATOR_CELL_MM deep inside the outlines
-                let outlines: Vec<&[DVec3]> = loops
-                    .values()
-                    .filter(|l| l.points.len() >= 3)
-                    .map(|l| l.points.as_slice())
-                    .collect();
-                cutter::coarse_inside(&grid, &mut z, &outlines, field);
-            }
-            let lines = loops
+    // the grid of the trim surface, its heights without bars (EQUATOR: the
+    // field, made with the bars), the lines and the reach of the aligner
+    let (grid, plain, lines, near_r) = match &eq {
+        Some(e) => {
+            let grid = PlanGrid::around(e.lo, e.hi, cutter::equator_cell(wall));
+            let lines = e
+                .loops
                 .iter()
                 .map(|(f, l)| ToothLine {
                     fdi: Some(*f),
@@ -679,15 +887,9 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                     ),
                 })
                 .collect();
-            (
-                grid,
-                z,
-                lines,
-                outer + NEAR_TEETH_EXTRA,
-                Some((loops, order)),
-            )
+            (grid, Vec::new(), lines, outer + NEAR_TEETH_EXTRA)
         }
-        Mode::Smooth => {
+        None if mode == Mode::Smooth => {
             let (ctrl, line) = smooth.unwrap_or_default();
             let grid = PlanGrid::around(lo, hi, MARGIN_CELL_MM);
             let z = cutter::interpolated(&grid, &ctrl, 3, MARGIN_REACH_MM, MARGIN_SLOPE, z_top);
@@ -696,9 +898,9 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                 points: line,
             }];
             let reach = outer + (-params.margin_gap_mm).max(0.0) + smooth::SMOOTH_NEAR_MM;
-            (grid, z, lines, reach, None)
+            (grid, z, lines, reach)
         }
-        _ => {
+        None => {
             let (mm, k) = if mode == Mode::Straight {
                 (MarginMode::Straight, 2)
             } else {
@@ -724,16 +926,33 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                     points,
                 })
                 .collect();
-            (grid, z, lines, ext + NEAR_TEETH_EXTRA, None)
+            (grid, z, lines, ext + NEAR_TEETH_EXTRA)
         }
     };
-    for v in &mut z {
-        *v = if v.is_finite() {
-            v.min(z_top - 1.0)
-        } else {
-            z_top - 1.0
+    // the heights with the bars: lowered to their top along them, at most
+    // 1 mm under the top of the solid of the cutter
+    let surface = |bars: &[bars::Bar]| -> Vec<f64> {
+        let mut z = match &eq {
+            Some(e) => e.surface(&grid, design, wall, bars),
+            None => {
+                let mut z = plain.clone();
+                if !bars.is_empty() {
+                    for (k, v) in z.iter_mut().enumerate() {
+                        *v = v.min(bars::ceiling(bars, grid.node(k)));
+                    }
+                }
+                z
+            }
         };
-    }
+        for v in &mut z {
+            *v = if v.is_finite() {
+                v.min(z_top - 1.0)
+            } else {
+                z_top - 1.0
+            };
+        }
+        z
+    };
 
     // the opening never erodes the wall below 1.5 voxels: at a voxel coarse
     // for the wall it would cut holes through it (the plugin builds such a
@@ -741,22 +960,83 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     let voxel = f64::from(input.shell.voxel_size);
     let r =
         rim_round(wall, params.round_mm).min(((wall - RIM_MIN_WALL_VOXELS * voxel) / 2.0).max(0.0));
-    let b = Build {
+    let mut z = surface(&[]);
+    let mut b = Build {
         input,
+        shell: Cow::Borrowed(input.shell),
         grid: &grid,
         z_top,
         warp: warp.as_ref(),
         near: near_grid(input.crowns, near_r, input.shell)?,
         r,
     };
-    let cut = b.cut(&z)?;
-    let mut grown_out = None;
-    let (mut mesh, mut dropped_pieces) = b.mesh(&cut, None, &mut grown_out)?;
+    let mut cut = b.cut(&z)?;
+    let mut full = b.full(&cut)?;
+    let mut joins = bars::weak_pairs(&full, input.teeth, wall, outer);
+
+    // one piece: the caps of two teeth in pieces apart, or joined too thinly,
+    // joined by a bar over the space between them, the shell built again with
+    // its box; the joins the bars missed are barred at the next round
+    let mut made: Vec<bars::Bar> = Vec::new();
+    if let Some(rebuild) = input.rebuild {
+        let thin = !shell_fills(wall, rim_round(wall, None)).is_empty();
+        let order = {
+            let fdis: Vec<Fdi> = input.teeth.iter().map(|t| t.fdi).collect();
+            fdis.first()
+                .map(|f| anatomy::arch_sequence(&fdis, Arch::of(*f)))
+                .unwrap_or_default()
+        };
+        let rank = |f: Fdi| order.iter().position(|x| *x == f).unwrap_or(usize::MAX);
+        let mut source = None;
+        for _ in 0..BAR_ROUNDS {
+            let new: Vec<(Fdi, Fdi)> = joins
+                .weak
+                .iter()
+                .map(|w| (w.a, w.b))
+                .filter(|p| !made.iter().any(|m| m.teeth == *p))
+                .collect();
+            if new.is_empty() {
+                break;
+            }
+            if source.is_none() {
+                source = Some(BarSource::new(input, eq.as_ref(), z_top)?);
+            }
+            let Some(src) = source.as_ref() else {
+                break;
+            };
+            made.extend(new.into_iter().filter_map(|p| src.bar(p, cl, outer, thin)));
+            made.sort_by_key(|m| (rank(m.teeth.0), rank(m.teeth.1)));
+            let boxes: Vec<TriMesh> = made.iter().map(|m| m.solid.clone()).collect();
+            drop(cut);
+            let shell = (rebuild.0)(&boxes).map_err(TrimError::Geom)?;
+            if shell.origin != Vec3::ZERO || shell.voxel_size != input.shell.voxel_size {
+                return Err(TrimError::Invalid(
+                    "the shell built again with the bars is not on the voxels of the shell".into(),
+                ));
+            }
+            z = surface(&made);
+            b = Build {
+                shell: Cow::Owned(shell),
+                near: near_grid(&with_strips(input.crowns, &made), near_r, input.shell)?,
+                ..b
+            };
+            cut = b.cut(&z)?;
+            full = b.full(&cut)?;
+            joins = bars::weak_pairs(&full, input.teeth, wall, outer);
+        }
+    }
+    // a cap on another piece than the one kept: the aligner would lose those
+    // teeth (never dropped silently)
+    if !joins.lost.is_empty() {
+        return Err(TrimError::Split(joins.lost));
+    }
+    let (mut mesh, mut dropped_pieces) = largest_piece(full);
     if mesh.is_empty() {
         return Err(TrimError::Invalid(
             "nothing of the shell is left above the trim line".into(),
         ));
     }
+    let mut grown_out = None;
     let mut genus = genus(&mesh);
     let mut fill = None;
     if genus > 0 {
@@ -780,7 +1060,10 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     // VOLUME_SHARE of the volume goes
     let (mut plugs, mut slots) = (0, Vec::new());
     if genus > 0 {
-        let model = holes::Model::new(&[input.teeth_mesh, input.gingiva]).map_err(geom)?;
+        // the model of the shell: the boxes of the bars too (`with_boxes`)
+        let mut parts = vec![input.teeth_mesh, input.gingiva];
+        parts.extend(made.iter().map(|m| &m.solid));
+        let model = holes::Model::new(&parts).map_err(geom)?;
         let design = holes::Design {
             outer,
             clearance: cl,
@@ -825,16 +1108,16 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     // EQUATOR: the checks of the border built, for the panel and the report;
     // the shell taken off in one piece (PER_TOOTH: the least locked rigid path
     // around the mean path of the teeth, else the one path of the arch)
-    let checks = match eq_loops {
+    let checks = match &eq {
         None => None,
-        Some((loops, order)) => {
-            let list: Vec<(Fdi, &line::ToothLoop)> = loops.iter().map(|(f, l)| (*f, l)).collect();
+        Some(e) => {
+            let list: Vec<(Fdi, &line::ToothLoop)> = e.loops.iter().map(|(f, l)| (*f, l)).collect();
             let axis = params.insertion_axis;
             let mut c = checks::checks(
                 &list,
                 &mesh,
                 warp.as_ref(),
-                &order,
+                &e.order,
                 params.equator_offset_mm,
                 outer,
                 axis == warp::InsertionAxis::Common,
@@ -848,7 +1131,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
             c.removal = Some(if axis == warp::InsertionAxis::PerTooth {
                 removal::rigid_lock(&mesh, &shell, teeth.as_ref(), &shears)
             } else {
-                let sh = shears.first().copied().unwrap_or(glam::DVec2::ZERO);
+                let sh = shears.first().copied().unwrap_or(DVec2::ZERO);
                 removal::path_lock(&mesh, &shell, teeth.as_ref(), sh)
             });
             Some(c)
@@ -867,15 +1150,18 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         slots,
         dropped_pieces,
         genus,
+        bars: made,
+        weak: joins.weak,
         checks,
     })
 }
 
-/// What builds the trimmed shell from a trim surface: the shell field of
-/// the input, the plan grid, the warp of the insertion paths, the reach of
-/// the aligner and the rim radius.
+/// What builds the trimmed shell from a trim surface: the shell field (of
+/// the input, or built again with the boxes of the bars), the plan grid, the
+/// warp of the insertion paths, the reach of the aligner and the rim radius.
 struct Build<'a> {
     input: &'a Input<'a>,
+    shell: Cow<'a, SdfGrid>,
     grid: &'a PlanGrid,
     z_top: f64,
     warp: Option<&'a warp::PathWarp>,
@@ -895,7 +1181,7 @@ impl Build<'_> {
     /// and with the reach of the aligner, then opened by the rim radius;
     /// the occlusal cut taken away from both.
     fn cut(&self, z: &[f64]) -> Result<Cut, TrimError> {
-        let shell = self.input.shell;
+        let shell = self.shell.as_ref();
         let mut f = shell.clone();
         f.intersect(&cutter_grid(self.grid, z, self.z_top, self.warp, shell)?)
             .map_err(geom)?;
@@ -915,6 +1201,11 @@ impl Build<'_> {
         Ok(Cut { rounded: f, sharp })
     }
 
+    /// The mesh of `cut`, every piece of it.
+    fn full(&self, cut: &Cut) -> Result<TriMesh, TrimError> {
+        cut.rounded.to_mesh().map_err(geom)
+    }
+
     /// The mesh of `cut` (its largest piece and the pieces dropped), built
     /// again with `fill` when there is one; `grown_out` keeps the shell of
     /// [`outer_grown`] for the fills that need it.
@@ -924,7 +1215,7 @@ impl Build<'_> {
         fill: Option<Fill>,
         grown_out: &mut Option<(f64, SdfGrid)>,
     ) -> Result<(TriMesh, usize), TrimError> {
-        let shell = self.input.shell;
+        let shell = self.shell.as_ref();
         match (fill, &cut.sharp) {
             (Some(fl), Some(sharp)) => {
                 let w = if fl.out > 0.0 {
@@ -937,7 +1228,7 @@ impl Build<'_> {
                 };
                 filled(&cut.rounded, sharp, w, self.input.cut, fl.rho)
             }
-            _ => Ok(largest_piece(cut.rounded.to_mesh().map_err(geom)?)),
+            _ => Ok(largest_piece(self.full(cut)?)),
         }
     }
 }

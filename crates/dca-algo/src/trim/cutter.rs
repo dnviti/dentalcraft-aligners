@@ -9,6 +9,7 @@ use dc_mesh::TriMesh;
 use glam::{DVec2, DVec3, Vec3};
 use rayon::prelude::*;
 
+use super::bars::{self, Bar};
 use super::grid::{self, PlanGrid, np_max, np_min};
 use super::line::{EQUATOR_GUM_GAP_MM, ToothLoop};
 use super::survey::{bridge_contacts, loop_nearest};
@@ -130,6 +131,12 @@ pub struct EquatorModel<'a> {
     /// Height above the model where the rays start (the top of the model +
     /// 5 mm).
     pub z0: f64,
+    /// The bars joining two caps (`_equator_field(ctx, bars)`): along them
+    /// the trim is lowered to their top.
+    pub bars: &'a [Bar],
+    /// Their boxes (the same space as the teeth): what supports a crown
+    /// from below, as the gingiva (`q_bar`).
+    pub bar_boxes: &'a [TriMesh],
 }
 
 /// The design values of the EQUATOR field.
@@ -419,10 +426,11 @@ pub fn coarse_inside(
 /// ([`gum_cell_max`]). Beyond the reach of the aligner the surface rises
 /// steeply. The lower limits are smoothed without going below them, spikes
 /// are removed and the steps between the nodes smoothed within the limits.
-/// Over a tooth left out nothing is kept.
+/// Along a bar joining two caps ([`EquatorModel::bars`]) the trim is lowered
+/// to its top outside the crown columns, and its box supports a crown above
+/// it as the gingiva does. Over a tooth left out nothing is kept.
 ///
-/// Not ported (no input for them yet): the bars over a space between two
-/// caps and the ceilings of the embrasure fills.
+/// Not ported (no input for them yet): the ceilings of the embrasure fills.
 pub fn equator_field(
     grid: &PlanGrid,
     loops: &[&ToothLoop],
@@ -528,6 +536,12 @@ pub fn equator_field(
         .flatten();
     let gnorm = face_normals(model.gingiva);
     let cols = columns(model, tb.as_ref(), gb.as_ref(), &gnorm, &p, &want, &inside);
+    let bar_trees: Vec<Bvh> = model
+        .bar_boxes
+        .iter()
+        .filter(|m| !m.tris.is_empty())
+        .filter_map(|m| Bvh::build(m).ok())
+        .collect();
     let mut l = vec![f64::NEG_INFINITY; n];
     let mut u = vec![f64::NEG_INFINITY; n];
     let mut hit = vec![false; n];
@@ -545,10 +559,17 @@ pub fn equator_field(
         top_z[k] = top;
         u[k] = top - CROWN_CAP_MM;
         if under.is_finite() {
-            // what supports the crown from below: the gingiva or another tooth; empty space = undercut
+            // what supports the crown from below: the gingiva, a bar or
+            // another tooth; empty space = undercut
             let mut sup = f64::NEG_INFINITY;
             if g_top[k].is_finite() {
                 sup = sup.max(g_top[k]);
+            }
+            let o = p[k].extend(z0).as_vec3();
+            for t in &bar_trees {
+                if let Some(h) = t.ray_cast(o, Vec3::NEG_Z, f32::INFINITY) {
+                    sup = sup.max(z0 - f64::from(h.t));
+                }
             }
             if below.is_finite() {
                 sup = sup.max(below);
@@ -704,6 +725,16 @@ pub fn equator_field(
             }
         }
         z = grid::smooth_within(&z, &lo, &hi, nx, ny, EQUATOR_RIM_SMOOTH_PASSES);
+    }
+    // along a bar the trim is lowered to its top, outside the crown columns
+    // (no undercut covered: never below the hard limits)
+    if !model.bars.is_empty() {
+        for k in 0..n {
+            let zb = bars::ceiling(model.bars, p[k]);
+            if zb.is_finite() {
+                z[k] = np_max(np_min(z[k], zb), hard[k]);
+            }
+        }
     }
     // over a tooth the aligner leaves out: nothing is kept
     for e in cut.iter().filter(|e| e.points.len() >= 3) {
