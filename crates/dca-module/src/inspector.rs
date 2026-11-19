@@ -29,6 +29,10 @@ pub fn show(ui: &mut Ui, selected: Option<&str>) {
     }
 }
 
+/// Share of the width of the inspector the labels of the study base settings
+/// take at most (they wrap within it).
+const LABEL_SHARE: f32 = 0.55;
+
 /// The study base settings being edited: the case values they started from
 /// and the edited values.
 pub type StudyEdit = Option<(StudyBaseSettings, StudyBaseSettings)>;
@@ -54,9 +58,15 @@ pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit
         *base = current.clone();
     }
     ui.strong(tr("aligners-study-settings"));
+    // the labels wrap within LABEL_SHARE of the width, the fields take the
+    // rest: nothing past the edge of a narrow inspector
+    let gap = ui.spacing().item_spacing.x;
+    let label_w = ((ui.available_width() - gap) * LABEL_SHARE).floor();
+    let field_w = ui.available_width() - gap - label_w;
     Grid::new("aligners-study-grid")
         .num_columns(2)
         .striped(true)
+        .max_col_width(label_w)
         .show(ui, |ui| {
             // every field is named by its label (screen readers)
             let label = ui.label(tr("aligners-study-style"));
@@ -65,6 +75,7 @@ pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit
                 StudyBaseStyle::Abo => "aligners-study-style-abo",
             };
             egui::ComboBox::from_id_salt("aligners-study-style")
+                .width(ui.spacing().combo_width.min(field_w))
                 .selected_text(tr(style_key(s.style)))
                 .show_ui(ui, |ui| {
                     for st in [StudyBaseStyle::European, StudyBaseStyle::Abo] {
