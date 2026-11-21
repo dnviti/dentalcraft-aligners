@@ -5,9 +5,10 @@
 //! * the box "Search also the third molars" (`include_third_molars`);
 //! * the field "Missing teeth" (`missing_teeth`): FDI numbers separated by
 //!   commas, validated while typing and applied when the field is left;
-//! * a grid with a cell for each tooth, 8 columns per arch (4 when the
-//!   inspector is too narrow for 8): filled when the tooth has a mark,
-//!   crossed when it is missing, empty otherwise.
+//! * with the advanced options on, a grid with a cell for each tooth, 8
+//!   columns per arch (4 when the inspector is too narrow for 8): filled when
+//!   the tooth has a mark, crossed when it is missing, empty otherwise; with
+//!   them off, one line with how many teeth were found and are missing.
 //!
 //! Both options are stored in the case (`Settings::find_teeth`, through the
 //! command `aligners.settings.find-teeth`, one undo step each) and are the
@@ -133,6 +134,7 @@ fn cell_text(f: Fdi, cell: Cell) -> String {
 
 /// The options and the grid, in the section "Parameters" of the leaf.
 pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
+    let advanced = dc_module_api::advanced_ui(ui.ctx());
     let state = ctx.state().clone();
     let current = settings_of(&state);
     // the case changed (undo, another case): follow it unless the text was edited
@@ -167,9 +169,10 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
                 tr_args("aligners-find-missing-error", &[("list", &bad.join(", "))]),
             );
         }
-        Ok(_) => {
+        Ok(_) if advanced => {
             ui.weak(tr("aligners-find-missing-detail"));
         }
+        Ok(_) => {}
     }
     if field.lost_focus()
         && let Ok(list) = parsed
@@ -192,8 +195,13 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
         .unwrap_or_default();
     let mut missing = current.missing.clone();
     missing.extend(missing_case);
+    missing.sort_unstable();
+    missing.dedup();
     ui.add_space(8.0);
-    ui.strong(tr("aligners-find-found"));
+    if advanced {
+        // with the advanced options off the summary line names it
+        ui.strong(tr("aligners-find-found"));
+    }
     let arches: Vec<Arch> = [
         (ScanRole::Upper, Arch::Upper),
         (ScanRole::Lower, Arch::Lower),
@@ -204,6 +212,16 @@ pub fn show(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut FindEdit) {
     .collect();
     if arches.is_empty() {
         ui.weak(tr("aligners-find-no-scan"));
+        return;
+    }
+    if !advanced {
+        ui.label(tr_args(
+            "aligners-find-summary",
+            &[
+                ("n", &marked.len().to_string()),
+                ("missing", &missing.len().to_string()),
+            ],
+        ));
         return;
     }
     let (cols, cell_w) = grid_layout(ui.available_width());

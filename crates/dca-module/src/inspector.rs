@@ -38,8 +38,12 @@ const LABEL_SHARE: f32 = 0.55;
 pub type StudyEdit = Option<(StudyBaseSettings, StudyBaseSettings)>;
 
 /// Settings of the study-model bases (B6): style and main parameters,
-/// applied to the case as one undoable command.
+/// applied to the case as one undoable command. Advanced options only: with
+/// them off the run takes the settings of the case and nothing is drawn.
 pub fn study_settings(ui: &mut Ui, ctx: &mut ModuleCtx<'_>, edit: &mut StudyEdit) {
+    if !dc_module_api::advanced_ui(ui.ctx()) {
+        return;
+    }
     let Some(current) = ctx
         .state()
         .module_data::<AlignersState>(MODULE_ID)

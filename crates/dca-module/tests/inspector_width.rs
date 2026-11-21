@@ -46,6 +46,8 @@ fn right_edge(leaf: &str, width: f32) -> f32 {
     let mut module = AlignersModule::new();
     assert!(module.select_entry(leaf), "unknown item {leaf}");
     let egui_ctx = egui::Context::default();
+    // everything the module can draw: the advanced options on
+    dc_module_api::set_advanced_ui(&egui_ctx, true);
     let input = egui::RawInput {
         screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 4000.0))),
         ..Default::default()
@@ -81,4 +83,41 @@ fn the_parameters_fit_the_narrowest_inspector_in_both_languages() {
             );
         }
     }
+}
+
+/// The texts the inspector of `leaf` draws, with the advanced options on or
+/// off.
+fn texts(leaf: &str, advanced: bool) -> Vec<String> {
+    let jobs = JobSystem::new(1).unwrap();
+    let state = Arc::new(case_with_upper_scan());
+    let mut module = AlignersModule::new();
+    assert!(module.select_entry(leaf), "unknown item {leaf}");
+    let egui_ctx = egui::Context::default();
+    dc_module_api::set_advanced_ui(&egui_ctx, advanced);
+    let mut out = egui_ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut ctx = ModuleCtx::new(&state, &jobs);
+        module.inspector(ui, &mut ctx);
+    });
+    out.textures_delta.clear();
+    out.shapes
+        .iter()
+        .filter_map(|s| match &s.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_advanced_options_off_hide_the_grid_and_the_study_settings() {
+    loader();
+    // the cells of the grid carry the number of their tooth
+    let simple = texts("aligners.teeth.find", false);
+    assert!(!simple.is_empty());
+    assert!(!simple.iter().any(|t| t == "11"), "{simple:?}");
+    let full = texts("aligners.teeth.find", true);
+    assert!(full.iter().any(|t| t == "11"), "{full:?}");
+    // the study models have nothing but their run button then
+    assert!(texts("aligners.output.study-models", false).is_empty());
+    assert!(!texts("aligners.output.study-models", true).is_empty());
 }

@@ -473,3 +473,6 @@ aligners-check-or = { $a } or { $b }
 aligners-auto-warn-ratio = Incisor / molar ratio { $ratio } unusual for the { $arch } arch: check the arch
 aligners-auto-warn-virtual-bite = Arches put in VIRTUAL occlusion before the final position: for the clinical relation, register the vestibular bite
 aligners-err-teeth-build-empty = no tooth to build again: give at least one FDI number in teeth, or leave it out to build the teeth that changed
+
+## simple mode
+aligners-find-summary = Teeth found: { $n }. Missing: { $missing }.

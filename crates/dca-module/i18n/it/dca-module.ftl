@@ -473,3 +473,6 @@ aligners-check-or = { $a } o { $b }
 aligners-auto-warn-ratio = Rapporto incisivo/molare { $ratio } insolito per l'arcata { $arch }: verificare l'arcata
 aligners-auto-warn-virtual-bite = Arcate messe in occlusione VIRTUALE prima della posizione finale: per la relazione clinica registra il morso vestibolare
 aligners-err-teeth-build-empty = nessun dente da ricostruire: indica almeno un numero FDI in teeth, oppure omettilo per ricostruire i denti cambiati
+
+## simple mode
+aligners-find-summary = Denti trovati: { $n }. Assenti: { $missing }.
