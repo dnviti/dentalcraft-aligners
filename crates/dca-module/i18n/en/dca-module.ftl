@@ -78,6 +78,8 @@ aligners-desc-production = Get the files for the printer and the study models.
 
 aligners-menu-output-export-all = Export for printing
 aligners-desc-output-export-all = Writes to a folder the models and the aligners of every stage, ready to print, with the print check, the report and the list of files.
+aligners-menu-production-print = Print
+aligners-desc-production-print = Shows which aligners are printed and which are still to print, and opens the print window with them.
 
 aligners-menu-followup = Follow-up
 aligners-desc-followup = Compare the treatment with the plan and adjust it.
@@ -231,6 +233,15 @@ aligners-cmd-print-check-doc = Checks that the models of some stages are ready t
 aligners-cmd-manifest = List of exported files
 aligners-cmd-manifest-doc = Verifies an export folder against its manifest.json (checksum and size of every file, missing and unlisted files), or with verify=false writes a manifest of the files found. Parameters: dir (required), verify.
 
+## ---- commands: print ----
+aligners-cmd-production-print-doc = The aligners to print, for the print window, without changing the case: every aligner of the series of each arch (active ones, then the passive ones up to the longer series), each with its id (SUP-03, INF-12-P for a passive one), name, arch, number, passive flag, the file of the last export for printing (null when it is not there) and its status (missing, queued, sent, printed, failed, reprint). Output: print_parts, export_dir (the folder of the last export, or null), printed, missing. In the app it opens the print window with them; an agent gives their files to print.prepare. Parameters: arch (all, upper, lower).
+aligners-cmd-print-parts = List the aligners to print
+aligners-cmd-print-parts-doc = Lists every aligner of the series with its id (SUP-03, INF-12-P for a passive one), name, arch, number, passive flag, the file in stampa_resina of the last export for printing (null when it is not there) and its print status (missing when it was never marked; record: when, by whom, job, reason). The case is not modified. Output: parts, export_dir. Parameters: arch (all, upper, lower).
+aligners-cmd-print-status = Count the printed aligners
+aligners-cmd-print-status-doc = Counts the aligners of the series: total, printed, missing (every aligner not printed yet), by_status (missing, queued, sent, printed, failed, reprint), printed_ids and missing_ids. The case is not modified. Parameters: arch (all, upper, lower).
+aligners-cmd-print-mark = Mark aligners as printed
+aligners-cmd-print-mark-doc = Marks aligners of the series as one undoable change, all or none: an aligner whose status cannot change that way refuses the whole mark. Allowed: to queued from missing, failed or reprint; to sent from anything but printed; to failed from queued or sent; to reprint from printed or failed, by the user; to printed from anything but printed by the user, or from sent by the printer, never by the app. Output: marked (the aligners as aligners.print.parts lists them), summary (as aligners.print.status). Parameters: ids (like SUP-03, INF-12-P), status (queued, sent, printed, failed, reprint), by (user, printer, app; default user), job (the plate file or the printer's job), reason.
+
 ## ---- commands: view ----
 aligners-cmd-view-aligner = Aligner in the 3D view
 aligners-cmd-view-aligner-doc = Shows or hides the aligner over the teeth in the 3D view (show true or false). Shown, every arch with aligners gets the aligner of the stage given (stage: 0 is the initial position; an arch past its last aligner takes its last one) when it has none up to date there, built as the print file is (the shell of the wall on the model of the stage, the ramps, the trim, the occlusal shape) at the detail of the view (the preview detail of the quality, at most 0.45 of the wall thickness) and reduced within the preview tolerance, without the stamp and the print check. The other stages show the nearest aligner built, moved with the teeth and the gingiva. A change of the design, the teeth or the plan leaves the aligners built before out of date: they are no longer drawn and the next build replaces them. Hidden, every aligner built for the view is dropped. Both arches are built at the same time. Output: built (arch, stage, faces, seconds), kept (the arches already up to date), the aligners kept for the view and the notes of the build.
@@ -383,6 +394,10 @@ aligners-err-no-3d-teeth = the { $arch } arch has no 3D teeth: run { aligners-me
 aligners-err-none-3d-teeth = no arch has 3D teeth: run { aligners-menu-teeth-build } first
 aligners-err-aligner-split = the { $arch } aligner { $stage } would come apart: the teeth { $teeth } are not joined to the rest of the aligner, not even by a bar over the space between the teeth; check the missing teeth and the tooth marks, then build it again
 aligners-err-print-check-failed = the files are in { $dir }, but { $count } of them fail the print check and must not be printed as they are: { $files }
+aligners-err-print-no-ids = give at least one aligner, like SUP-03 or INF-12-P
+aligners-err-print-unknown-id = { $id } is not an aligner of this case: use the ids of the list of aligners to print, like SUP-03 or INF-12-P
+aligners-err-print-transition = { $id } cannot go from “{ $from }” to “{ $to }”
+aligners-err-print-printed-by-app = { $id } is marked printed only when you confirm it or the printer reports it done
 aligners-err-diagnosis-edit-empty = give at least one value to write or to reset
 aligners-err-diagnosis-edit-field = { $field } is not a value of the case analysis: use discrepancy, little, midline_offset or largest_space
 aligners-err-diagnosis-edit-range = { $field } must be a number between { $min } and { $max } mm (got { $value })
@@ -476,3 +491,19 @@ aligners-err-teeth-build-empty = no tooth to build again: give at least one FDI 
 
 ## simple mode
 aligners-find-summary = Teeth found: { $n }. Missing: { $missing }.
+
+# Print tracking (print_ui.rs)
+aligners-print-no-aligners = There are no aligners yet: make them with { aligners-menu-planning-aligners }.
+aligners-print-count = Printed { $printed } of { $total }
+aligners-print-missing = Still to print: { $count }
+aligners-print-no-export = No files yet: export the aligners with { aligners-menu-output-export-all }.
+aligners-print-status-missing = To print
+aligners-print-status-queued = Queued
+aligners-print-status-sent = Sent
+aligners-print-status-printed = Printed
+aligners-print-status-failed = Failed
+aligners-print-status-reprint = To print again
+aligners-print-mark = Mark…
+aligners-print-mark-printed = Printed
+aligners-print-mark-failed = Failed
+aligners-print-mark-reprint = To print again

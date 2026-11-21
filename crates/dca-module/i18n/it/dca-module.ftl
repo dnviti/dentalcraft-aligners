@@ -78,6 +78,8 @@ aligners-desc-production = Ottieni i file per la stampante e i modelli da studio
 
 aligners-menu-output-export-all = Esporta per la stampa
 aligners-desc-output-export-all = Scrive in una cartella i modelli e gli allineatori di ogni stadio, pronti da stampare, con il controllo di stampa, la relazione e l'elenco dei file.
+aligners-menu-production-print = Stampa
+aligners-desc-production-print = Mostra quali allineatori sono stampati e quali restano da stampare, e apre con quelli la finestra di stampa.
 
 aligners-menu-followup = Visite
 aligners-desc-followup = Confronta il trattamento con il piano e correggilo.
@@ -231,6 +233,15 @@ aligners-cmd-print-check-doc = Verifica che i modelli di alcuni stadi siano pron
 aligners-cmd-manifest = Elenco dei file esportati
 aligners-cmd-manifest-doc = Verifica una cartella di esportazione con il suo manifest.json (codice di controllo e dimensione di ogni file, file mancanti e non elencati), oppure con verify=false scrive un manifest dei file trovati. Parametri: dir (obbligatorio), verify.
 
+## ---- commands: print ----
+aligners-cmd-production-print-doc = Gli allineatori da stampare, per la finestra di stampa, senza cambiare il caso: ogni allineatore della serie di ogni arcata (quelli attivi, poi i passivi fino alla serie più lunga), ognuno con il suo id (SUP-03, INF-12-P per un passivo), nome, arcata, numero, indicazione di passivo, il file dell'ultima esportazione per la stampa (null se non c'è) e il suo stato (missing, queued, sent, printed, failed, reprint). Risultato: print_parts, export_dir (la cartella dell'ultima esportazione, o null), printed, missing. Nell'app apre con quelli la finestra di stampa; un agente passa i loro file a print.prepare. Parametri: arch (all, upper, lower).
+aligners-cmd-print-parts = Elenca gli allineatori da stampare
+aligners-cmd-print-parts-doc = Elenca ogni allineatore della serie con il suo id (SUP-03, INF-12-P per un passivo), nome, arcata, numero, indicazione di passivo, il file in stampa_resina dell'ultima esportazione per la stampa (null se non c'è) e il suo stato di stampa (missing se non è mai stato segnato; record: quando, da chi, lavoro, motivo). Il caso non viene modificato. Risultato: parts, export_dir. Parametri: arch (all, upper, lower).
+aligners-cmd-print-status = Conta gli allineatori stampati
+aligners-cmd-print-status-doc = Conta gli allineatori della serie: total, printed, missing (ogni allineatore non ancora stampato), by_status (missing, queued, sent, printed, failed, reprint), printed_ids e missing_ids. Il caso non viene modificato. Parametri: arch (all, upper, lower).
+aligners-cmd-print-mark = Segna gli allineatori stampati
+aligners-cmd-print-mark-doc = Segna allineatori della serie come una sola modifica annullabile, tutti o nessuno: un allineatore il cui stato non può cambiare così rifiuta tutto il segno. Ammessi: a queued da missing, failed o reprint; a sent da tutto tranne printed; a failed da queued o sent; a reprint da printed o failed, dall'utente; a printed da tutto tranne printed dall'utente, o da sent dalla stampante, mai dall'app. Risultato: marked (gli allineatori come li elenca aligners.print.parts), summary (come aligners.print.status). Parametri: ids (come SUP-03, INF-12-P), status (queued, sent, printed, failed, reprint), by (user, printer, app; predefinito user), job (il file del piatto o il lavoro della stampante), reason.
+
 ## ---- commands: view ----
 aligners-cmd-view-aligner = Allineatore nella vista 3D
 aligners-cmd-view-aligner-doc = Mostra o nasconde l'allineatore sopra i denti nella vista 3D (show true o false). Mostrato, ogni arcata con allineatori riceve l'allineatore dello stadio indicato (stage: 0 è la posizione iniziale; un'arcata oltre il suo ultimo allineatore prende l'ultimo) quando non ne ha uno aggiornato lì, costruito come il file di stampa (il guscio della parete sul modello dello stadio, le rampe, la rifilatura, la forma occlusale) al dettaglio della vista (il dettaglio di anteprima della qualità, al massimo 0,45 dello spessore della parete) e ridotto entro la tolleranza di anteprima, senza timbro e senza controllo di stampa. Gli altri stadi mostrano l'allineatore costruito più vicino, spostato con i denti e la gengiva. Un cambio del disegno, dei denti o del piano rende non aggiornati gli allineatori costruiti prima: non vengono più disegnati e la costruzione successiva li sostituisce. Nascosto, ogni allineatore costruito per la vista viene eliminato. Le due arcate vengono costruite insieme. Risultato: built (arcata, stadio, facce, secondi), kept (le arcate già aggiornate), gli allineatori tenuti per la vista e le note della costruzione.
@@ -383,6 +394,10 @@ aligners-err-no-3d-teeth = l'arcata { $arch } non ha i denti 3D: esegui prima { 
 aligners-err-none-3d-teeth = nessuna arcata ha i denti 3D: esegui prima { aligners-menu-teeth-build }
 aligners-err-aligner-split = l'allineatore { $arch } { $stage } si separerebbe: i denti { $teeth } non sono uniti al resto dell'allineatore, nemmeno da una barra sopra lo spazio tra i denti; controlla i denti assenti e i segni dei denti, poi costruiscilo di nuovo
 aligners-err-print-check-failed = i file sono in { $dir }, ma { $count } non superano il controllo di stampa e non vanno stampati così: { $files }
+aligners-err-print-no-ids = indica almeno un allineatore, come SUP-03 o INF-12-P
+aligners-err-print-unknown-id = { $id } non è un allineatore di questo caso: usa gli id dell'elenco degli allineatori da stampare, come SUP-03 o INF-12-P
+aligners-err-print-transition = { $id } non può passare da «{ $from }» a «{ $to }»
+aligners-err-print-printed-by-app = { $id } risulta stampato solo quando lo confermi tu o la stampante dice che il lavoro è finito
 aligners-err-diagnosis-edit-empty = indica almeno un valore da scrivere o da azzerare
 aligners-err-diagnosis-edit-field = { $field } non è un valore dell'analisi del caso: usa discrepancy, little, midline_offset o largest_space
 aligners-err-diagnosis-edit-range = { $field } deve essere un numero tra { $min } e { $max } mm (indicato { $value })
@@ -476,3 +491,19 @@ aligners-err-teeth-build-empty = nessun dente da ricostruire: indica almeno un n
 
 ## simple mode
 aligners-find-summary = Denti trovati: { $n }. Assenti: { $missing }.
+
+# Print tracking (print_ui.rs)
+aligners-print-no-aligners = Non ci sono ancora allineatori: creali con { aligners-menu-planning-aligners }.
+aligners-print-count = Stampati { $printed } di { $total }
+aligners-print-missing = Da stampare: { $count }
+aligners-print-no-export = Nessun file ancora: esporta gli allineatori con { aligners-menu-output-export-all }.
+aligners-print-status-missing = Da stampare
+aligners-print-status-queued = In coda
+aligners-print-status-sent = Inviato
+aligners-print-status-printed = Stampato
+aligners-print-status-failed = Non riuscito
+aligners-print-status-reprint = Da ristampare
+aligners-print-mark = Segna…
+aligners-print-mark-printed = Stampato
+aligners-print-mark-failed = Non riuscito
+aligners-print-mark-reprint = Da ristampare

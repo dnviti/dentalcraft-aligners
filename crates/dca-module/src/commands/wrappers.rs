@@ -13,17 +13,20 @@
 //!   case has one, otherwise the virtual bite; then the contact map;
 //! * `aligners.planning.aligners`: the aligners and their calendar;
 //! * `aligners.output.export-all`: the full package from the shell stage,
-//!   refusing to fall back on the scans (see [`run_export_all`]).
+//!   refusing to fall back on the scans (see [`run_export_all`]); the case
+//!   records the folder, absolute (`export_dir`), where printing finds the
+//!   shells.
 
 use std::time::Instant;
 
-use dc_case::{CaseState, ScanRole};
+use dc_case::{CaseState, ModuleState, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_i18n::Lang as UiLang;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::export::provider::Quality;
 use dca_algo::schedule::{Lang, Policy};
 use dca_algo::teeth::Which;
+use dca_model::MODULE_ID;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -295,6 +298,13 @@ fn run_export_all(
             ],
         )));
     }
+    // printing finds the shells of this export: the folder, absolute
+    let mut next = next;
+    let mut data = super::occlusion::aligners_data(&next)?;
+    let dir = out["dir"].as_str().unwrap_or(&params.dir);
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.into());
+    data.export_dir = Some(dir.to_string_lossy().into_owned());
+    next.set_module(MODULE_ID, ModuleState::new(data));
     Ok((next, out))
 }
 
@@ -535,6 +545,11 @@ mod tests {
         .unwrap();
         assert_eq!(same.case.scans, s.case.scans, "the case does not change");
         assert_eq!(out["meshes"], "shells");
+        // it records the folder, where printing finds the shells
+        let recorded = same
+            .module_data::<dca_model::AlignersState>(MODULE_ID)
+            .and_then(|d| d.export_dir.clone());
+        assert_eq!(recorded, Some(dir.display().to_string()));
         eprintln!("export: {:.1} s", out["seconds"].as_f64().unwrap());
         let files = out["files"].as_array().unwrap();
         let mut names: Vec<&str> = files.iter().map(|f| f["name"].as_str().unwrap()).collect();

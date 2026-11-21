@@ -95,6 +95,7 @@ pub mod make_base;
 mod manual;
 pub(crate) mod messages;
 mod occlusion;
+pub(crate) mod print;
 mod production;
 mod ramps;
 mod reconstruct;
@@ -143,6 +144,7 @@ pub fn all() -> Vec<CommandSpec> {
         trim::specs,
         stamp::specs,
         export::specs,
+        print::specs,
         aligner_view::specs,
         study_base::specs,
         visits::specs,
