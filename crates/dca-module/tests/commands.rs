@@ -108,6 +108,10 @@ const OUT_OF_THE_MENU: &[&str] = &[
     "aligners.output.print-check",
     "aligners.output.manifest",
     "aligners.output.report",
+    // the print tracking of the Print inspector, and for the print window
+    "aligners.print.parts",
+    "aligners.print.status",
+    "aligners.print.mark",
     "aligners.settings.study-models",
     "aligners.settings.find-teeth",
     "aligners.settings.segmentation",

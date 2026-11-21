@@ -14,6 +14,7 @@ mod find_teeth;
 mod inspector;
 mod manual;
 mod open_scan;
+mod print_ui;
 mod scene;
 pub mod tree;
 mod tree_data;
@@ -157,9 +158,9 @@ impl Module for AlignersModule {
 
     /// A group, or nothing selected: its title and description (the
     /// overview). A leaf: only its parameters, if it has any (Find the teeth,
-    /// Study models); the shell lays out the rest of the inspector of a leaf
-    /// (title, description, status, run button and manual tools) and draws
-    /// this in its section "Parameters".
+    /// Study models, the tracking of Print); the shell lays out the rest of
+    /// the inspector of a leaf (title, description, status, run button and
+    /// manual tools) and draws this in its section "Parameters".
     fn inspector(&mut self, ui: &mut egui::Ui, ctx: &mut ModuleCtx<'_>) {
         loader();
         match self.selected.and_then(tree::find).filter(|n| n.is_leaf()) {
@@ -169,6 +170,7 @@ impl Module for AlignersModule {
             Some(n) if n.id == commands::wrappers::FIND_TEETH => {
                 find_teeth::show(ui, ctx, &mut self.find_ui);
             }
+            Some(n) if n.id == commands::print::PRINT => print_ui::show(ui, ctx),
             Some(_) => {}
             None => inspector::show(ui, self.selected),
         }

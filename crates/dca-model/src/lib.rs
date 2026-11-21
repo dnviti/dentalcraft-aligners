@@ -15,6 +15,7 @@ mod bite;
 mod bite_report;
 mod components;
 mod migrate;
+mod print;
 mod production;
 mod review;
 mod scan_base;
@@ -31,6 +32,9 @@ pub use bite_report::{
 };
 pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale, tooth_centre};
 pub use migrate::{ModelError, migrate};
+pub use print::{
+    BadPrintKey, MarkSource, PrintKey, PrintMark, PrintRecord, PrintStatus, print_transition,
+};
 pub use production::{AlignerEnd, AlignerEndSuggestion, Side};
 pub use review::{ReviewKind, ReviewRecord, ReviewStatus};
 pub use scan_base::{ClosedBy, ScanBase};
@@ -51,5 +55,7 @@ pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 /// Id of the Aligners module (key of its data in the case state).
 pub const MODULE_ID: &str = "aligners";
 
-/// Newest schema version of [`AlignersState`] (written on save).
-pub const SCHEMA_VERSION: u32 = 1;
+/// Newest schema version of [`AlignersState`] (written on save). Version 2
+/// added the print tracking ([`AlignersState::prints`]) and the last export
+/// folder ([`AlignersState::export_dir`]).
+pub const SCHEMA_VERSION: u32 = 2;

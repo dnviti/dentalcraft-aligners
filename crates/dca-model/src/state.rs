@@ -487,6 +487,19 @@ pub struct AlignersState {
     /// it was read (open, or closed by the scanner).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub scan_bases: BTreeMap<BlobRef, crate::ScanBase>,
+    /// The print tracking: what is known of the print of each aligner shell
+    /// ([`crate::PrintKey`]: arch, number, passive). An aligner with no
+    /// record is still to print. Changed only by `aligners.print.mark`,
+    /// along [`crate::print_transition`]. The records are facts about the
+    /// aligners made: they stay when a scan is replaced or the series is
+    /// computed again.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub prints: BTreeMap<crate::PrintKey, crate::PrintRecord>,
+    /// The folder of the last export for printing
+    /// (`aligners.output.export-all`), absolute: printing reads the shells
+    /// from its `stampa_resina` folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_dir: Option<String>,
 }
 
 /// The same tooth in the other arch, on the same side (the plugin's

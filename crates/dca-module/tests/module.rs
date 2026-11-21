@@ -194,6 +194,12 @@ const TREE: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "aligners.production",
+        "aligners.production.print",
+        "Print",
+        "Stampa",
+    ),
+    (
+        "aligners.production",
         "aligners.output.study-models",
         "Study models",
         "Modelli da studio",
@@ -335,6 +341,7 @@ fn nine_steps_count_and_nothing_else() {
         "aligners.auto",
         "aligners.output.export-all",
         "aligners.output.study-models",
+        "aligners.production.print",
         "aligners.followup.tracking",
         "aligners.followup.visits",
     ] {
@@ -567,6 +574,61 @@ fn invoking_the_import_leaf_runs_nothing_the_shell_asks_for_the_files() {
     assert!(toasts.is_empty());
 }
 
+/// The menu law: selecting "Print" (a click, Enter or a key) only shows its
+/// inspector; nothing runs and nothing opens until its button. The button
+/// runs the leaf, which only lists the aligners for the print window.
+#[test]
+fn selecting_print_runs_nothing() {
+    let jobs = JobSystem::new(1).unwrap();
+    // a case with two aligners, so the inspector lists them with their marks
+    let mut stages: Vec<dca_model::Stage> = (0..3).map(dca_model::Stage::new).collect();
+    for (k, s) in stages.iter_mut().enumerate() {
+        let pose = dc_case::Pose {
+            t: glam::DVec3::new(0.1 * k as f64, 0.0, 0.0),
+            ..dc_case::Pose::IDENTITY
+        };
+        s.poses.insert(dc_case::Fdi::new(11).unwrap(), pose);
+    }
+    let mut case = CaseState::default();
+    case.set_module(
+        MODULE_ID,
+        dc_case::ModuleState::new(dca_model::AlignersState {
+            stages,
+            ..Default::default()
+        }),
+    );
+    let state = Arc::new(case);
+    let mut m = AlignersModule::new();
+    let id = "aligners.production.print";
+    let item = m.menu().find(id).cloned().unwrap();
+    assert_eq!(item.icon, Some("printer"));
+    assert!(item.input.is_none() && item.scanner.is_none() && !item.counts_as_step);
+    Module::select(&mut m, id);
+    assert_eq!(m.selected(), Some(id));
+    // drawing its inspector queues nothing either
+    let egui_ctx = egui::Context::default();
+    let mut ctx = ModuleCtx::new(&state, &jobs);
+    let mut out = egui_ctx.run_ui(egui::RawInput::default(), |ui| m.inspector(ui, &mut ctx));
+    out.textures_delta.clear();
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|s| match &s.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "SUP-02"), "{texts:?}");
+    let (cmds, toasts) = ctx.finish();
+    assert!(cmds.is_empty() && toasts.is_empty());
+    // the button runs the leaf: one command, which leaves the case as it is
+    let mut ctx = ModuleCtx::new(&state, &jobs);
+    m.invoke(id, &mut ctx).unwrap();
+    let (cmds, _) = ctx.finish();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].id(), id);
+}
+
 #[test]
 fn codec_round_trips_the_state() {
     let m = AlignersModule::new();
@@ -579,6 +641,17 @@ fn codec_round_trips_the_state() {
         back.as_any().downcast_ref::<dca_model::AlignersState>(),
         Some(&dca_model::AlignersState::default())
     );
+    // a project saved with schema 1 (before the print tracking) opens with
+    // no aligner printed and no export folder
+    let old = codec
+        .load(serde_json::json!({ "missing": [11] }), 1)
+        .unwrap();
+    let old = old
+        .as_any()
+        .downcast_ref::<dca_model::AlignersState>()
+        .unwrap();
+    assert!(old.prints.is_empty() && old.export_dir.is_none());
+    assert_eq!(old.missing.len(), 1);
     // newer than the module understands, or no migration known
     assert!(
         codec
@@ -654,7 +727,11 @@ fn render_inspector_texts(selected: Option<&str>) -> Vec<String> {
 }
 
 /// The leaves whose parameters the module draws in the inspector.
-const WITH_PARAMETERS: [&str; 2] = ["aligners.output.study-models", "aligners.teeth.find"];
+const WITH_PARAMETERS: [&str; 3] = [
+    "aligners.output.study-models",
+    "aligners.teeth.find",
+    "aligners.production.print",
+];
 
 #[test]
 fn inspector_renders_every_item_without_panicking() {

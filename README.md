@@ -21,7 +21,7 @@ The module takes the intraoral scans of the upper and lower arch (and a bite sca
 | Plan: final position | Proposes where every tooth should end up, within safe movement limits, with the arch line and tools to move a tooth. |
 | Plan: aligners | Divides the movement into a sequence of aligners and gives their calendar. |
 | Clinical review | Classifications proposed from the evidence (difficulty, aligner pattern, attachments, each tooth), to confirm or change before production. |
-| Production | Writes to a folder the models and the aligners of every stage, ready to print, with the print check, the report and the list of files. |
+| Production | Writes to a folder the models and the aligners of every stage, ready to print, with the print check, the report and the list of files. Print tracks which aligners are printed and which are still to print, and opens the print window with them (alpha). |
 | Follow-up | Compares a new scan with the plan, and makes a new series of aligners from the last control visit. |
 | Study models | Orthodontic study models on a trimmed base (European or ABO style). |
 | Run everything automatically | A complete plan from the scans to the calendar. |
@@ -32,7 +32,7 @@ Every parameter default has a bibliographic source in `dca-algo/src/evidence.rs`
 
 | Crate | What it does |
 |---|---|
-| `dca-model` | The state of the module (seeds, teeth, settings, visits, production) and its migrations. |
+| `dca-model` | The state of the module (seeds, teeth, settings, visits, production, print tracking) and its migrations. |
 | `dca-algo` | The algorithms, one file per stage: arch, seeds, segmentation, teeth, diagnosis, bite, setup, staging, shell, trim, stamp, visits, export, plus shared parts (world frame, rotations, arch forms, tooth anatomy, evidence base). |
 | `dca-module` | The `Module` implementation: menu tree, commands, inspector, scene, project codec. |
 

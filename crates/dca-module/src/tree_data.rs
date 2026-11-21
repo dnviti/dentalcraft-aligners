@@ -120,6 +120,15 @@ pub(crate) static GROUPS: &[Node] = &[
             )
             .input(LeafInput::Folder { param: "dir" })
             .not_a_step(),
+            // its inspector shows the tracking; its button opens the print
+            // window, a click only selects it
+            Node::leaf(
+                "aligners.production.print",
+                "aligners-menu-production-print",
+                "aligners-desc-production-print",
+                "printer",
+            )
+            .not_a_step(),
             Node::leaf(
                 "aligners.output.study-models",
                 "aligners-menu-output-study-models",
