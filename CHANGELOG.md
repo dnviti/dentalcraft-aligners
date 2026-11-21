@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0-alpha.12](https://github.com/dnviti/dentalcraft-aligners/compare/v0.2.0-alpha.11...v0.2.0-alpha.12) (2026-11-21)
+
+
+### Features
+
+* **print:** print tracking and the Production → Print leaf ([#28](https://github.com/dnviti/dentalcraft-aligners/issues/28)) ([b9c4d63](https://github.com/dnviti/dentalcraft-aligners/commit/b9c4d63105146b5020d9fa3e7ca30bdfc9e90088))
+* **settings:** simple mode by default, advanced options in the Settings ([2d17162](https://github.com/dnviti/dentalcraft-aligners/commit/2d17162299c2c306518cab413bdbc5eee850deeb))
+
+
+### Bug Fixes
+
+* **deps:** move to core v0.3.0-alpha.8 ([2d17162](https://github.com/dnviti/dentalcraft-aligners/commit/2d17162299c2c306518cab413bdbc5eee850deeb))
+
 ## [0.2.0-alpha.11](https://github.com/dnviti-personal-org/dentalcraft-aligners/compare/v0.2.0-alpha.10...v0.2.0-alpha.11) (2026-11-20)
 
 
