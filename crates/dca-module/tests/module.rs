@@ -631,6 +631,8 @@ fn run_inspector(selected: Option<&str>) -> egui::FullOutput {
         assert!(module.select_entry(id), "unknown item {id}");
     }
     let egui_ctx = egui::Context::default();
+    // everything the module can draw: the advanced options on
+    dc_module_api::set_advanced_ui(&egui_ctx, true);
     let mut out = egui_ctx.run_ui(egui::RawInput::default(), |ui| {
         let mut ctx = ModuleCtx::new(&state, &jobs);
         module.inspector(ui, &mut ctx);
