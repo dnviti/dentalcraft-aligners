@@ -20,7 +20,13 @@
 //!    boundaries lie in the interproximal valleys of the cusp profile; a
 //!    tooth may be missing inside the arch (its space, when not closed, is
 //!    gingiva) and the arch may end at any molar ([`propose`]).
-//! 5. Upper / lower arch without cues in the file ([`detect_arch`]): file
+//! 5. Check of the proposal, beyond the plugin ([`propose_checked`], what
+//!    [`run`] gives): a third molar not looked for, a scale at a limit of
+//!    its range or an end tooth that is mostly gum mean that the arch ran
+//!    past the last molars (tuberosity, retromolar pad, back wall of a
+//!    model); the teeth are then looked for again without third molars and
+//!    with the arch free to end at the last crown ([`FreeEnds`]).
+//! 6. Upper / lower arch without cues in the file ([`detect_arch`]): file
 //!    name, scanner frame, palate, side of the highest cusps of the last
 //!    molars (curve of Wilson), tooth-width pattern.
 //!
@@ -49,7 +55,7 @@ use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use dp::{DpProblem, dp};
+pub use dp::{DpProblem, FreeEnds, dp};
 
 use crate::anatomy::{self, Arch};
 use crate::archform::ArchCurve;
@@ -921,7 +927,47 @@ pub struct Diagnostics {
     pub candidates: Vec<CandidateCost>,
     /// Teeth of the sequence found missing inside the arch.
     pub absent_inside: Vec<u8>,
+    /// Set when the plugin's proposal was doubtful and the teeth were
+    /// looked for again ([`propose_checked`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<Check>,
 }
+
+/// Why the plugin's proposal was doubtful ([`propose_checked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Doubt {
+    /// A third molar was proposed while the third molars are not looked
+    /// for: the gum behind the last molar taken as a tooth.
+    ThirdMolar,
+    /// The tooth widths fit the arch only at a limit of the scale range:
+    /// the sequence is stretched (or squeezed) to cover the arch.
+    ScaleLimit,
+    /// The first or the last tooth is mostly gingiva-like surface.
+    EndNotCrown,
+}
+
+/// The check of a doubtful proposal ([`Diagnostics::checked`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Check {
+    /// What made the plugin's proposal doubtful.
+    pub doubts: Vec<Doubt>,
+    /// The teeth of the plugin's proposal, replaced by the new ones.
+    pub plugin_teeth: Vec<u8>,
+}
+
+/// The checked proposal leaves out what lies beyond the end teeth when it
+/// stays [`TAIL_DROP_MM`] below their crown top (not compared on the first
+/// [`TAIL_GUARD_MM`], the distal slope of the tooth), at [`TAIL_COST`] per
+/// mm of crown-like surface beyond the plugin's slack ([`FreeEnds`]).
+pub const TAIL_COST: f64 = 2.0;
+/// See [`TAIL_COST`].
+pub const TAIL_DROP_MM: f64 = 0.5;
+/// See [`TAIL_COST`].
+pub const TAIL_GUARD_MM: f64 = 1.0;
+/// An end tooth whose mean crown score is below this is doubtful
+/// ([`Doubt::EndNotCrown`]).
+pub const END_CROWN_MIN: f64 = 0.75;
 
 /// One seed per tooth found.
 #[derive(Debug, Clone, PartialEq)]
@@ -952,6 +998,7 @@ pub struct Options {
 /// sequence (Wheeler), for every plausible number of molars on each side; a
 /// tooth inside the arch may be missing (its space, if not closed, must
 /// look like gingiva). `data`: [`arch_data`] result (computed if `None`).
+/// This is the plugin's proposal; the app takes [`propose_checked`].
 pub fn propose(
     v: &[DVec3],
     t: &[[u32; 3]],
@@ -973,6 +1020,140 @@ pub fn propose(
             &owned
         }
     };
+    propose_in(arch, opts, data, false).map(|(p, _)| p)
+}
+
+/// The scales of the typical tooth widths tried along the arch.
+fn width_scales() -> Vec<f64> {
+    linspace(0.82, 1.18, 10)
+}
+
+/// The plugin's proposal ([`propose`]), checked. The plugin's sequence must
+/// cover the profiled arch to within a few mm of both ends, and the ends
+/// come from a crown score (surface texture and height) that a noisy scan
+/// or a plaster model can fool: then the arch runs past the last molars
+/// over the tuberosity, the retromolar pad or the back wall of the model,
+/// and the plugin puts a third molar there or stretches the teeth (two
+/// crowns in one tooth, every number after it shifted). Such a proposal is
+/// doubtful ([`Doubt`]): a third molar while they are not looked for, a
+/// scale at a limit of its range, an end tooth that is mostly gum. A
+/// doubtful proposal is made again without third molars (unless looked
+/// for) and with free ends ([`FreeEnds`]): the arch may end at the last
+/// crown, leaving out what stays lower than it. A proposal with no doubt,
+/// or with forced ends, is the plugin's; so is one whose third molar the
+/// new proposal cannot leave out (an erupted third molar, a crown).
+pub fn propose_checked(
+    v: &[DVec3],
+    t: &[[u32; 3]],
+    arch: Arch,
+    opts: &Options,
+    data: Option<&ArchData>,
+) -> Result<Proposal, AutoseedError> {
+    if opts
+        .force_ends
+        .is_some_and(|e| e.iter().any(|x| !(5..=8).contains(x)))
+    {
+        return Err(AutoseedError::BadEnds);
+    }
+    let owned;
+    let data = match data {
+        Some(d) => d,
+        None => {
+            owned = arch_data(v, t)?;
+            &owned
+        }
+    };
+    let (p, segs) = propose_in(arch, opts, data, false)?;
+    if opts.force_ends.is_some() {
+        return Ok(p);
+    }
+    let doubts = doubts(&p, &segs, &data.profiles, opts);
+    if doubts.is_empty() {
+        return Ok(p);
+    }
+    let (mut q, q_segs) = propose_in(arch, opts, data, true)?;
+    if covers_a_third_molar(&p, &segs, &q, &q_segs, &data.profiles.h) {
+        return Ok(p);
+    }
+    q.diagnostics.checked = Some(Check {
+        doubts,
+        plugin_teeth: p.seeds.iter().map(|s| s.fdi.get()).collect(),
+    });
+    Ok(q)
+}
+
+/// The doubts on the plugin's proposal `p` whose teeth lie on the bins
+/// `segs` (in the order of the sequence).
+fn doubts(
+    p: &Proposal,
+    segs: &[(Fdi, (usize, usize))],
+    pr: &Profiles,
+    opts: &Options,
+) -> Vec<Doubt> {
+    let mut out = Vec::new();
+    if !opts.include_third && p.seeds.iter().any(|s| anatomy::index(s.fdi) == 8) {
+        out.push(Doubt::ThirdMolar);
+    }
+    let k = width_scales();
+    if [k[0], k[k.len() - 1]].contains(&p.diagnostics.scale) {
+        out.push(Doubt::ScaleLimit);
+    }
+    let crown = |&(_, (a, b)): &(Fdi, (usize, usize))| mean(&pr.crown[a..b.min(pr.nb)]);
+    if [segs.first(), segs.last()]
+        .into_iter()
+        .flatten()
+        .any(|s| crown(s) < END_CROWN_MIN)
+    {
+        out.push(Doubt::EndNotCrown);
+    }
+    out
+}
+
+/// A third molar of the plugin's proposal `p` was a crown, not gum: its
+/// top is as high as the crown next to it (within [`TAIL_DROP_MM`]), and
+/// the checked proposal `q` has fewer teeth and reaches over most of it
+/// (its teeth stretched to cover it, since a crown cannot be left out).
+/// Then the plugin's proposal stands. `h`: crown top height of every bin.
+fn covers_a_third_molar(
+    p: &Proposal,
+    p_segs: &[(Fdi, (usize, usize))],
+    q: &Proposal,
+    q_segs: &[(Fdi, (usize, usize))],
+    h: &[f64],
+) -> bool {
+    let (Some(&(_, (lo, _))), Some(&(_, (_, hi)))) = (q_segs.first(), q_segs.last()) else {
+        return false;
+    };
+    let top = |(a, b): (usize, usize)| {
+        h[a..b.min(h.len())]
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let n = p_segs.len();
+    let ends = [(0, 1), (n.saturating_sub(1), n.saturating_sub(2))];
+    q.seeds.len() < p.seeds.len()
+        && n >= 2
+        && ends.iter().any(|&(e, next)| {
+            let (f, (a, b)) = p_segs[e];
+            anatomy::index(f) == 8
+                && top((a, b)) >= top(p_segs[next].1) - TAIL_DROP_MM
+                && 2 * b.min(hi).saturating_sub(a.max(lo)) > b - a
+        })
+}
+
+/// The bins `[a, b)` of every tooth of a proposal, in the order of the
+/// sequence.
+type ToothBins = Vec<(Fdi, (usize, usize))>;
+
+/// The proposal and the bins of its teeth; `checked`: no third molar unless
+/// looked for, free ends ([`propose_checked`]).
+fn propose_in(
+    arch: Arch,
+    opts: &Options,
+    data: &ArchData,
+    checked: bool,
+) -> Result<(Proposal, ToothBins), AutoseedError> {
     let pr = &data.profiles;
     let nb = pr.nb;
     // the teeth are counted from the midline, like a clinician: the contact
@@ -989,8 +1170,17 @@ pub fn propose(
         acc += b / med_bl;
         c.push(acc);
     }
-    let kscales = linspace(0.82, 1.18, 10);
-    let cands = candidate_sequences(arch, opts.include_third, &opts.missing, opts.force_ends);
+    let kscales = width_scales();
+    let mut cands = candidate_sequences(arch, opts.include_third, &opts.missing, opts.force_ends);
+    if checked && !opts.include_third {
+        cands.retain(|c| !c.ends.contains(&8));
+    }
+    let free_ends = checked.then_some(FreeEnds {
+        h: &pr.h,
+        tail_cost: TAIL_COST,
+        drop_mm: TAIL_DROP_MM,
+        guard: round_even(TAIL_GUARD_MM / BIN_MM) as usize,
+    });
     // per candidate: (cost, segments, scale) of the best scale (first minimum)
     type Best = (f64, Vec<Option<(usize, usize)>>, f64);
     let results: Vec<Best> = cands
@@ -1030,6 +1220,7 @@ pub fn propose(
                         crown: &pr.crown,
                         skippable: &skippable,
                         bin_mm: BIN_MM,
+                        free_ends,
                     });
                     (cost, segs, *k)
                 })
@@ -1098,23 +1289,32 @@ pub fn propose(
         })
         .collect();
     let ends = cands[bi].ends;
-    Ok(Proposal {
-        diagnostics: Diagnostics {
-            scale: *kscale,
-            arch_length_mm: pr.s_max - pr.s_min,
-            teeth: seeds.len(),
-            cost: total,
-            cost_raw: *raw,
-            molars: Molars {
-                right: ends[0],
-                left: ends[1],
+    let present: ToothBins = seq
+        .iter()
+        .zip(segs)
+        .filter_map(|(f, s)| s.map(|s| (*f, s)))
+        .collect();
+    Ok((
+        Proposal {
+            diagnostics: Diagnostics {
+                scale: *kscale,
+                arch_length_mm: pr.s_max - pr.s_min,
+                teeth: seeds.len(),
+                cost: total,
+                cost_raw: *raw,
+                molars: Molars {
+                    right: ends[0],
+                    left: ends[1],
+                },
+                candidates: tried,
+                absent_inside: absent,
+                checked: None,
             },
-            candidates: tried,
-            absent_inside: absent,
+            seeds,
+            frame: data.frame,
         },
-        seeds,
-        frame: data.frame,
-    })
+        present,
+    ))
 }
 
 // ----------------------------------------------------------------------------
@@ -1524,11 +1724,12 @@ pub struct Output {
     pub diagnostics: Diagnostics,
 }
 
-/// Proposes the seeds of one arch scan (`case_auto.auto_seeds`): fails with
-/// [`AutoseedError::TooFewSeeds`] below [`MIN_SEEDS`] teeth.
+/// Proposes the seeds of one arch scan (`case_auto.auto_seeds`, checked:
+/// [`propose_checked`]): fails with [`AutoseedError::TooFewSeeds`] below
+/// [`MIN_SEEDS`] teeth.
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, AutoseedError> {
     let opts = params.options()?;
-    let p = propose(input.vertices, input.triangles, input.arch, &opts, None)?;
+    let p = propose_checked(input.vertices, input.triangles, input.arch, &opts, None)?;
     if p.seeds.len() < MIN_SEEDS {
         return Err(AutoseedError::TooFewSeeds(p.seeds.len()));
     }

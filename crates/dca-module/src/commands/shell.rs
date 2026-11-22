@@ -164,7 +164,11 @@ impl ArchPrint {
         )
         .map_err(failed)?;
         let to_arch = frame::rigid_inverse(&framed.arch_frame.matrix());
-        let gum = gingiva::GumSurface::from_mesh(state.blobs.require(gum_ref)?).map_err(failed)?;
+        // the print model has its own cast under the gingiva (`shell::model_parts`):
+        // the gingiva as the plugin builds it on the open scan, without its base
+        let gum = gingiva::GumSurface::from_mesh(state.blobs.require(gum_ref)?)
+            .map_err(failed)?
+            .without_base();
         let fdis: Vec<Fdi> = crowns.keys().copied().collect();
         let weights = gingiva::gum_weights(&gum, &fdis, &gingiva::Params::default());
         let prep = gingiva::deform_prep(&weights);

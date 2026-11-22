@@ -26,9 +26,21 @@
 //! 4. the lower arch stays in place: the bite scans are moved onto it, their
 //!    points on the lower arch are removed and the upper arch is registered
 //!    to the rest (both bite scans together when there are two);
-//! 5. checks: overlap, RMS, agreement of the two bite scans, one-sided bite,
-//!    facing arches, interpenetration, arches not in contact. Nothing is
+//! 5. checks: overlap, the teeth in common, facing arches, interpenetration;
+//!    reasons to review: RMS, coherence, few teeth, what the scans cover,
+//!    agreement of the two bite scans, arches not in contact. Nothing is
 //!    moved when the registration is rejected.
+//!
+//! Where this departs from the plugin, for the bite scans of real life
+//! (partial, holed, noisy, distorted, with soft tissue): when the plugin's
+//! search gives no acceptable fit, a wide search turns and shifts its
+//! starts ([`fit`]); a fit is refused only when its teeth do not match
+//! the crowns, whatever the noise and distortion of the scan
+//! ([`check_fit`]); what the scans cover comes from the teeth they fit,
+//! not from their extent; of two bite scans, one that does not fit is
+//! left out ([`register`]). On the plugin's own cases the result is the
+//! plugin's (`tests/bite_oracle.rs`); `tests/bite_robustness.rs` holds the
+//! spoiled scans.
 //!
 //! Transforms follow the plugin: a fit `T` maps the bite scan (case
 //! coordinates) into the arch coordinates of an arch.
@@ -63,14 +75,9 @@ pub const NEAR: f64 = 0.5;
 pub const OWN: f64 = 0.5;
 /// Spacing of the coarse starts along the arch (mm).
 pub const STEP: f64 = 2.5;
-/// A bite scan this wide goes round the front of the arch (mm).
+/// A bite scan this wide goes round the front of the arch (mm): its coarse
+/// search starts on the incisors.
 pub const FULL_ARCH_MM: f64 = 45.0;
-/// Largest RMS of a scan round the whole arch (mm).
-pub const FULL_RMS_MAX: f64 = 0.25;
-/// Smallest coherence of a scan round the whole arch.
-pub const FULL_COHERENCE_MIN: f64 = 0.55;
-/// Fewest teeth in common of a scan round the whole arch.
-pub const FULL_MIN_TEETH: usize = 8;
 /// Normal gate of the coarse search (degrees).
 pub const COARSE_DEG: f64 = 60.0;
 /// Normal gate of the fine alignment (degrees).
@@ -93,7 +100,8 @@ pub enum BiteError {
     /// Too little overlap between a bite scan and an arch.
     #[error(
         "too little overlap between '{bite}' and the {arch} arch: {teeth} teeth and {area:.0} mm2 \
-         in common (at least {min_teeth} teeth and {min_area:.0} mm2 needed)"
+         in common (at least {min_teeth} teeth and {min_area:.0} mm2 needed): the scan must show \
+         the outer faces of at least two teeth of both arches in contact"
     )]
     Overlap {
         /// Bite scan.
@@ -111,22 +119,37 @@ pub enum BiteError {
     },
     /// The bite scan does not match the arch.
     #[error(
-        "'{bite}' does not match the {arch} arch: RMS {rms:.2} mm (at most {rms_max:.2}), \
-         coherent surfaces {coherence:.2} (at least {coherence_min:.2})"
+        "'{bite}' does not match the {arch} arch: at its best place its teeth lie \
+         {tooth_fit:.2} mm from the crowns (at most {tooth_fit_max:.2} mm) and change by \
+         {tooth_jump:.2} mm from one tooth to the next (at most {tooth_jump_max:.2} mm): check \
+         that the bite scan is of this patient and not mirrored"
     )]
     Mismatch {
         /// Bite scan.
         bite: String,
         /// Arch name.
         arch: String,
-        /// RMS of the facing surfaces (mm).
-        rms: f64,
-        /// Largest RMS accepted (mm).
-        rms_max: f64,
-        /// Share of the facing surfaces within the inlier distance.
-        coherence: f64,
-        /// Smallest share accepted.
-        coherence_min: f64,
+        /// Median distance of the typical tooth (mm).
+        tooth_fit: f64,
+        /// Largest accepted (mm).
+        tooth_fit_max: f64,
+        /// Change of the offset from one tooth to the next (mm).
+        tooth_jump: f64,
+        /// Largest accepted (mm).
+        tooth_jump_max: f64,
+    },
+    /// Two different places of the arch fit the bite scan about as well.
+    #[error(
+        "'{bite}' fits two places of the {arch} arch about equally well ({apart_mm:.1} mm \
+         apart): use a bite scan with more teeth, or the 3-point alignment"
+    )]
+    Ambiguous {
+        /// Bite scan.
+        bite: String,
+        /// Arch name.
+        arch: String,
+        /// How far apart the two places are (mm, on the bite scan).
+        apart_mm: f64,
     },
     /// The registered relation is not plausible.
     #[error("bite registration rejected: {0}")]
@@ -559,6 +582,29 @@ fn overlap_score(surf: &Surface, src: &[DVec3], src_n: &[DVec3], t: &DMat4, tol:
     good as f64 / src.len().max(1) as f64
 }
 
+/// The middle band in height of a bite scan (its points between the 20th
+/// and the 80th percentile across its mesio-distal and buccal axes): the
+/// teeth without the lips and cheeks a scan catches above and below them.
+/// `None` when too little or all of the scan is left.
+fn core_band(b: &BiteScan) -> Option<BiteScan> {
+    let (g, a1, nb) = bite_frame(b);
+    let up = nb.cross(a1).normalize_or_zero();
+    let mut hs: Vec<f64> = b.p.iter().map(|p| (*p - g).dot(up)).collect();
+    let lo = occlusion::percentile(&mut hs, 20.0);
+    let hi = occlusion::percentile(&mut hs, 80.0);
+    let keep: Vec<usize> = (0..b.p.len())
+        .filter(|&i| (lo..=hi).contains(&(b.p[i] - g).dot(up)))
+        .collect();
+    (keep.len() >= 100 && keep.len() < b.p.len()).then(|| {
+        BiteScan::from_parts(
+            &b.name,
+            pick(&b.p, &keep),
+            pick(&b.n, &keep),
+            pick(&b.a, &keep),
+        )
+    })
+}
+
 fn pick<T: Copy>(v: &[T], idx: &[usize]) -> Vec<T> {
     idx.iter().map(|&i| v[i]).collect()
 }
@@ -617,27 +663,84 @@ fn bite_frame(b: &BiteScan) -> (DVec3, DVec3, DVec3) {
     (g, (a1 - a1.dot(nb) * nb).normalize_or_zero(), nb)
 }
 
+/// Turns tried about every start of the free search (axis: 0 the
+/// mesio-distal tangent of the arch, 1 its occlusal axis, 2 the buccal
+/// direction; degrees), the unturned start first. The frame of a bite scan
+/// (mean normal, longest extent) is only roughly the frame of its buccal
+/// surface once it carries gingiva, both arches, holes, a curve of the arch
+/// or soft tissue: measured on bite scans cut from real arches, no start of
+/// the plugin's search came within 25 degrees of the right pose for a right
+/// side or a front scan, and the scan landed on the wrong teeth.
+const TURNS: [(usize, f64); 9] = [
+    (2, 0.0),
+    (2, -30.0),
+    (2, -15.0),
+    (2, 15.0),
+    (2, 30.0),
+    (1, -20.0),
+    (1, 20.0),
+    (0, -20.0),
+    (0, 20.0),
+];
+
+/// Where the centre of the bite scan goes about a buccal start (mm, along
+/// the occlusal axis and outwards): the plugin's two places first, then
+/// higher and more buccal, where the centre of a scan carrying the upper
+/// teeth and gingiva lies (the upper teeth overlap the lower ones
+/// buccally). [`hypotheses_free`] adds the places where the most buccal
+/// part of the scan touches the start: the centre of a scan round the
+/// curve of the front teeth lies several millimetres inside the arch.
+const PLACES: [(f64, f64); 6] = [
+    (-1.5, 0.5),
+    (2.5, 0.5),
+    (5.5, 0.5),
+    (-1.5, 2.0),
+    (2.5, 2.0),
+    (5.5, 2.0),
+];
+
 /// Every orientation of the bite frame on every buccal start
-/// (`bite._hypotheses_free`): (start world -> arch, normal sign).
-fn hypotheses_free(arch: &BiteArch, b: &BiteScan) -> Vec<(DMat4, f64)> {
+/// (`bite._hypotheses_free`): (start world -> arch, normal sign). `wide`:
+/// each also at the [`PLACES`] and turned by [`TURNS`] (the plugin's starts
+/// otherwise).
+fn hypotheses_free(arch: &BiteArch, b: &BiteScan, wide: bool) -> Vec<(DMat4, f64)> {
     let w = frame::rigid_inverse(&arch.model.to_case);
     let (g, a1, nb) = bite_frame(b);
+    // how far the most buccal part of the scan lies from its centre, for
+    // either winding of its normals
+    let mut ahead: Vec<f64> = b.p.iter().map(|p| (*p - g).dot(nb)).collect();
+    let front = occlusion::percentile(&mut ahead, 95.0);
+    let back = -occlusion::percentile(&mut ahead, 5.0);
     let (g, a1, nb) = (
         w.transform_point3(g),
         w.transform_vector3(a1),
         w.transform_vector3(nb),
     );
+    let turns: &[(usize, f64)] = if wide { &TURNS } else { &TURNS[..1] };
     let mut out = Vec::new();
     for (p, t, o, _) in arch.anchors(None) {
         let u = DMat3::from_cols(t, o.cross(t), o);
+        let axes = [t, DVec3::Z, o];
         for s3 in [1.0, -1.0] {
+            let mut places = PLACES[..2].to_vec();
+            if wide {
+                places = PLACES.to_vec();
+                let reach = if s3 > 0.0 { front } else { back };
+                if reach > 1.0 {
+                    places.extend([-1.5, 2.5, 5.5].map(|h| (h, 0.5 - reach)));
+                }
+            }
             for s1 in [1.0, -1.0] {
                 let (a1s, a3s) = (a1 * s1, nb * s3);
                 let r = u * DMat3::from_cols(a1s, a3s.cross(a1s), a3s).transpose();
-                for h in [-1.5, 2.5] {
-                    let mut tm = DMat4::from_mat3(r);
-                    tm.w_axis = (p + DVec3::Z * h + 0.5 * o - r * g).extend(1.0);
-                    out.push((tm * w, s3));
+                for &(h, d) in &places {
+                    let c = p + DVec3::Z * h + d * o;
+                    for &(axis, deg) in turns {
+                        let r = DMat3::from_axis_angle(axes[axis], deg.to_radians()) * r;
+                        let mut tm = DMat4::from_mat3(r);
+                        tm.w_axis = (c - r * g).extend(1.0);
+                        out.push((tm * w, s3));
+                    }
                 }
             }
         }
@@ -817,9 +920,23 @@ fn hypotheses_prior(
     out
 }
 
-/// Multi-start trimmed ICP (`bite._coarse`): (start world -> arch, normal
-/// sign) or `None`.
-fn coarse(arch: &BiteArch, b: &BiteScan, hyps: &[(DMat4, f64)]) -> Option<(DMat4, f64)> {
+/// Multi-start trimmed ICP (`bite._coarse`): the refined starts (start world
+/// -> arch, normal sign, overlap score), best first; the plugin keeps the
+/// first one.
+fn coarse(
+    arch: &BiteArch,
+    b: &BiteScan,
+    hyps: &[(DMat4, f64)],
+    wide: bool,
+) -> Vec<(DMat4, f64, f64)> {
+    // the plugin: 8 point-to-point iterations from every start, the best 8
+    // refined; the wide search, its starts turned up to 30 degrees from
+    // the truth, converges with point-to-plane iterations
+    let (iters, plane, refined) = if wide {
+        (15, true, REFINED_WIDE)
+    } else {
+        (8, false, REFINED)
+    };
     let s1 = sub_idx(b.p.len(), 200);
     let s2 = sub_idx(b.p.len(), 1500);
     let (p1, n1) = (pick(&b.p, &s1), pick(&b.n, &s1));
@@ -829,13 +946,23 @@ fn coarse(arch: &BiteArch, b: &BiteScan, hyps: &[(DMat4, f64)]) -> Option<(DMat4
         .par_iter()
         .filter_map(|(t0, sg)| {
             let sn = signed(&n1, *sg);
-            let (t, xi) = run_icp(&p1, &sn, &arch.coarse, t0, 8, 4.0, COARSE_DEG, false, 0.2);
+            let (t, xi) = run_icp(
+                &p1,
+                &sn,
+                &arch.coarse,
+                t0,
+                iters,
+                4.0,
+                COARSE_DEG,
+                plane,
+                0.2,
+            );
             xi.map(|_| (overlap_score(&arch.coarse, &p1, &sn, &t, 0.5), t, *sg))
         })
         .collect();
     // stable: equal scores keep the order of the starts
     res.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut best: Option<(DMat4, f64, f64)> = None;
+    let mut out: Vec<(DMat4, f64, f64)> = Vec::new();
     let mut kept: Vec<DMat4> = Vec::new();
     for (_, t, sg) in res {
         let distinct = kept.iter().all(|k| {
@@ -851,16 +978,24 @@ fn coarse(arch: &BiteArch, b: &BiteScan, hyps: &[(DMat4, f64)]) -> Option<(DMat4
         let (t2, xi) = run_icp(&p2, &sn, &arch.coarse, &t, 20, 1.5, COARSE_DEG, true, 0.2);
         if xi.is_some() {
             let sc2 = overlap_score(&arch.coarse, &p2, &sn, &t2, 0.25);
-            if best.is_none_or(|b| sc2 > b.2) {
-                best = Some((t2, sg, sc2));
-            }
+            out.push((t2, sg, sc2));
         }
-        if kept.len() >= 8 {
+        if kept.len() >= refined {
             break;
         }
     }
-    best.map(|b| (b.0, b.1))
+    // stable: equal scores keep the order of the starts, the plugin's best
+    // (the first highest) comes first
+    out.sort_by(|a, b| b.2.total_cmp(&a.2));
+    out
 }
+
+/// Starts of the multi-start search refined at the second level: 8 in the
+/// plugin, 16 in the wide free search, whose starts are turned by
+/// [`TURNS`].
+const REFINED: usize = 8;
+/// See [`REFINED`].
+const REFINED_WIDE: usize = 16;
 
 fn rot_angle(r: &DMat3) -> f64 {
     let tr = r.x_axis.x + r.y_axis.y + r.z_axis.z;
@@ -900,7 +1035,28 @@ pub struct FitMetrics {
     pub bite_fraction: f64,
     /// Overlap of the last ICP iteration.
     pub icp_overlap: f64,
+    /// Area of the bite scan facing the crowns (within [`NEAR`] mm, normals
+    /// compatible; mm²).
+    pub facing_mm2: f64,
+    /// Median distance of the bite scan to each facing tooth away from the
+    /// margins (mm), for the teeth with at least [`TOOTH_SAMPLES`] points.
+    pub tooth_median_mm: BTreeMap<u16, f64>,
+    /// Median signed distance (outside the crown: positive) of the bite
+    /// scan to each of those teeth (mm).
+    pub tooth_offset_mm: BTreeMap<u16, f64>,
+    /// Median of [`FitMetrics::tooth_median_mm`] (mm, `INFINITY` without a
+    /// facing tooth): how closely the teeth themselves fit, whatever the
+    /// holes, the soft tissue or the extent of the scan around them.
+    pub tooth_fit_mm: f64,
+    /// RMS of the change of [`FitMetrics::tooth_offset_mm`] from a tooth to
+    /// the next one along the arch (mm, `None` without two neighbours): the
+    /// distortion of a scan changes it smoothly, a scan of other teeth from
+    /// tooth to tooth.
+    pub tooth_jump_mm: Option<f64>,
 }
+
+/// Fewest sampled bite points facing a tooth for its own median distance.
+pub const TOOTH_SAMPLES: usize = 20;
 
 fn round_to(x: f64, d: i32) -> f64 {
     let f = 10f64.powi(d);
@@ -921,16 +1077,20 @@ pub fn metrics(arch: &BiteArch, b: &BiteScan, t: &DMat4, sg: f64) -> FitMetrics 
     let mut area_inner_in = 0.0;
     let mut teeth: BTreeMap<u16, f64> = BTreeMap::new();
     let mut inner_d: Vec<f64> = Vec::new();
+    let mut facing = 0.0;
+    let mut per_tooth: BTreeMap<u16, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for &i in &s {
         let ab = b.a[i] * scale;
         let pp = t.transform_point3(b.p[i]);
         let nn = r * (b.n[i] * sg);
-        let Some((_, f, d)) = arch.crowns.nearest(pp, NEAR) else {
+        let Some((q, f, d)) = arch.crowns.nearest(pp, NEAR) else {
             continue;
         };
-        if nn.dot(arch.crowns.normal(f)) < cos_fine {
+        let fn_ = arch.crowns.normal(f);
+        if nn.dot(fn_) < cos_fine {
             continue;
         }
+        facing += ab;
         if d <= inl {
             area_in += ab;
             let fdi = arch.label_of_face(f);
@@ -944,6 +1104,12 @@ pub fn metrics(arch: &BiteArch, b: &BiteScan, t: &DMat4, sg: f64) -> FitMetrics 
             if d <= inl {
                 area_inner_in += ab;
             }
+            let fdi = arch.label_of_face(f);
+            if fdi != 0 {
+                let e = per_tooth.entry(fdi).or_default();
+                e.0.push(d);
+                e.1.push((pp - q).dot(fn_));
+            }
         }
     }
     teeth.retain(|_, a| *a >= tooth_area);
@@ -956,6 +1122,40 @@ pub fn metrics(arch: &BiteArch, b: &BiteScan, t: &DMat4, sg: f64) -> FitMetrics 
         (inner_d.iter().map(|d| d * d).sum::<f64>() / inner_d.len() as f64).sqrt()
     };
     let p95 = (!inner_d.is_empty()).then(|| round_to(occlusion::percentile(&mut inner_d, 95.0), 3));
+    let mut tooth_median_mm = BTreeMap::new();
+    let mut tooth_offset_mm = BTreeMap::new();
+    for (fdi, (mut d, mut s)) in per_tooth {
+        if d.len() >= TOOTH_SAMPLES {
+            tooth_median_mm.insert(fdi, round_to(occlusion::percentile(&mut d, 50.0), 3));
+            tooth_offset_mm.insert(fdi, round_to(occlusion::percentile(&mut s, 50.0), 3));
+        }
+    }
+    let tooth_fit_mm = if tooth_median_mm.is_empty() {
+        f64::INFINITY
+    } else {
+        median(&tooth_median_mm.values().copied().collect::<Vec<_>>())
+    };
+    // neighbours along the arch: the next tooth of the quadrant, and the
+    // central incisors across the midline
+    let mut jumps = Vec::new();
+    for (&f, &o) in &tooth_offset_mm {
+        let (quadrant, i) = (f / 10, f % 10);
+        let mut next = vec![quadrant * 10 + i + 1];
+        if i == 1 && quadrant % 2 == 1 {
+            next.push((quadrant + 1) * 10 + 1);
+        }
+        jumps.extend(
+            next.iter()
+                .filter_map(|n| tooth_offset_mm.get(n))
+                .map(|&o2| o2 - o),
+        );
+    }
+    let tooth_jump_mm = (!jumps.is_empty()).then(|| {
+        round_to(
+            (jumps.iter().map(|j| j * j).sum::<f64>() / jumps.len() as f64).sqrt(),
+            3,
+        )
+    });
     FitMetrics {
         area_mm2: round_to(area_in, 1),
         n_teeth: teeth.len(),
@@ -969,23 +1169,46 @@ pub fn metrics(arch: &BiteArch, b: &BiteScan, t: &DMat4, sg: f64) -> FitMetrics 
         },
         bite_fraction: round_to(area_in / b.area.max(1e-9), 3),
         icp_overlap: 0.0,
+        facing_mm2: round_to(facing, 1),
+        tooth_median_mm,
+        tooth_offset_mm,
+        tooth_fit_mm,
+        tooth_jump_mm,
     }
 }
 
-/// Rejection of a fit (`bite._check_fit`).
+/// Largest median distance of the typical tooth of a fit (mm,
+/// [`FitMetrics::tooth_fit_mm`]): beyond it the teeth of the bite scan are
+/// not the teeth of the arch.
+pub const TOOTH_FIT_MAX: f64 = 0.20;
+/// Largest [`FitMetrics::tooth_jump_mm`] of a fit (mm): beyond it the
+/// teeth of the bite scan sit on the crowns in a way no distortion of a
+/// scan explains (real scan of models: up to 0.065 mm; the same scans
+/// mirrored: 0.10-0.12 mm).
+pub const TOOTH_JUMP_MAX: f64 = 0.08;
+
+/// Refusal of a fit (`bite._check_fit`, with other limits): too little in
+/// common to place the arch, or teeth that are not the teeth of the arch.
+///
+/// The plugin also refuses an RMS above `bite_rms_max` (0.25 mm round the
+/// arch) or coherent surfaces below `bite_coherence` (0.55 round the arch)
+/// and asks 8 teeth of a scan round the arch. A real bite scan of models
+/// on a desktop scanner (MINI 2) fits the incisors within 0.04 mm and
+/// drifts to 0.2-0.3 mm on the molars (distortion between two scans of the
+/// same models): RMS 0.18, coherence 0.43, refused although the place is
+/// right. Those figures only say how good the scan is; they become reasons
+/// to review the registration ([`register`]). What refuses is how the teeth
+/// in common sit on the crowns: [`FitMetrics::tooth_fit_mm`] (that scan:
+/// 0.08-0.14 mm; its bites on another patient's real arches: 0.21-0.24 mm)
+/// and [`FitMetrics::tooth_jump_mm`] (that scan: 0.04-0.07 mm; the bite of
+/// another demo patient: 0.22 mm), whatever the quality of the scan. A
+/// mirrored bite of a symmetric dentition can fit its teeth: the
+/// interpenetration of the registered arches refuses it ([`register`]).
 ///
 /// # Errors
 /// [`BiteError::Overlap`] or [`BiteError::Mismatch`].
-pub fn check_fit(m: &FitMetrics, arch: &str, bite: &str, full: bool) -> Result<(), BiteError> {
-    let (rms_max, coh_min, min_teeth) = if full {
-        (FULL_RMS_MAX, FULL_COHERENCE_MIN, FULL_MIN_TEETH)
-    } else {
-        (
-            p("bite_rms_max", 0.15),
-            p("bite_coherence", 0.70),
-            p("bite_min_teeth", 2.0) as usize,
-        )
-    };
+pub fn check_fit(m: &FitMetrics, arch: &str, bite: &str) -> Result<(), BiteError> {
+    let min_teeth = p("bite_min_teeth", 2.0) as usize;
     let min_area = p("bite_min_area", 90.0);
     if m.n_teeth < min_teeth || m.area_mm2 < min_area {
         return Err(BiteError::Overlap {
@@ -997,14 +1220,15 @@ pub fn check_fit(m: &FitMetrics, arch: &str, bite: &str, full: bool) -> Result<(
             min_area,
         });
     }
-    if m.rms_mm > rms_max || m.coherence < coh_min {
+    let jump = m.tooth_jump_mm.unwrap_or(0.0);
+    if m.tooth_fit_mm > TOOTH_FIT_MAX || jump > TOOTH_JUMP_MAX {
         return Err(BiteError::Mismatch {
             bite: bite.to_owned(),
             arch: arch.to_owned(),
-            rms: m.rms_mm,
-            rms_max,
-            coherence: m.coherence,
-            coherence_min: coh_min,
+            tooth_fit: m.tooth_fit_mm,
+            tooth_fit_max: TOOTH_FIT_MAX,
+            tooth_jump: jump,
+            tooth_jump_max: TOOTH_JUMP_MAX,
         });
     }
     Ok(())
@@ -1100,11 +1324,37 @@ pub struct Fit {
     pub metrics: FitMetrics,
 }
 
+/// Coarse poses taken to the fine alignment (the plugin takes the best one
+/// only): the best and the next distinct ones scoring at least half of it.
+const ALTERNATIVES: usize = 3;
+/// A fit this much larger (common area) replaces an earlier one.
+const CLEARLY_BETTER: f64 = 1.2;
+/// Two fits farther apart than this (mm, on the bite scan) are different
+/// places on the arch.
+const DISTINCT_MM: f64 = 1.0;
+/// A different place with this share of the common area of the best fit
+/// makes the fit ambiguous.
+const AMBIGUOUS_SHARE: f64 = 0.85;
+
 /// Registers one bite scan to an arch (`bite.fit`). `init`: manual pairing
 /// (bite -> arch); `prior`: known orientation for the upper arch.
 ///
+/// The plugin takes the best coarse pose of one search to the fine
+/// alignment. Here the next distinct poses of that search go too; when
+/// none of them gives an acceptable fit ([`check_fit`]) the wide free
+/// search over the whole arch adds its own, then the same search on the
+/// middle band of the scan alone ([`core_band`]): a scan of the front teeth
+/// only, with holes, with soft tissue above and below the teeth, or round
+/// the arch without its lingual side does not always fit at the first pose.
+/// The acceptable fit
+/// with the most surface in common wins (an earlier one is kept unless a
+/// later one has [`CLEARLY_BETTER`] times its area); another acceptable fit
+/// at a different place with nearly as much ([`AMBIGUOUS_SHARE`]) makes the
+/// registration ambiguous.
+///
 /// # Errors
-/// [`BiteError::NoAlignment`] when no start converges.
+/// [`BiteError::NoAlignment`] when no start converges,
+/// [`BiteError::Ambiguous`] for two equally good places.
 pub fn fit(
     arch: &BiteArch,
     b: &BiteScan,
@@ -1113,7 +1363,17 @@ pub fn fit(
     right_side: Option<bool>,
     arch_name: &str,
 ) -> Result<Fit, BiteError> {
-    let (t, sg) = if let Some(init) = init {
+    let finish = |t: &DMat4, sg: f64| {
+        let (t, xi) = fine(arch, b, t, sg, 20000);
+        let mut m = metrics(arch, b, &t, sg);
+        m.icp_overlap = round_to(xi.unwrap_or(0.0), 3);
+        Fit {
+            transform: t,
+            normal_sign: sg,
+            metrics: m,
+        }
+    };
+    if let Some(init) = init {
         let sg = normal_sign_from_init(arch, b, init);
         let s2 = sub_idx(b.p.len(), 1500);
         let src = pick(&b.p, &s2);
@@ -1129,43 +1389,98 @@ pub fn fit(
             true,
             0.2,
         );
-        (if xi.is_some() { t } else { *init }, sg)
-    } else {
-        let mut best = None;
-        let full = hypotheses_full(arch, b);
-        if !full.is_empty() {
-            let mut cands = vec![coarse_full(arch, b, &full)];
-            if let Some(prior) = prior {
-                let h: Vec<_> = hypotheses_prior(arch, b, prior, right_side)
-                    .into_iter()
-                    .take(5)
-                    .collect();
-                cands.push(coarse_full(arch, b, &h));
-            }
-            best = cands
+        return Ok(finish(if xi.is_some() { &t } else { init }, sg));
+    }
+    let mut starts: Vec<(DMat4, f64, f64)> = Vec::new();
+    let full = hypotheses_full(arch, b);
+    if !full.is_empty() {
+        let mut cands = vec![coarse_full(arch, b, &full)];
+        if let Some(prior) = prior {
+            let h: Vec<_> = hypotheses_prior(arch, b, prior, right_side)
+                .into_iter()
+                .take(5)
+                .collect();
+            cands.push(coarse_full(arch, b, &h));
+        }
+        starts.extend(
+            cands
                 .into_iter()
                 .flatten()
-                .max_by(|a, b| a.2.total_cmp(&b.2))
-                .map(|c| (c.0, c.1));
-        } else if let Some(prior) = prior {
-            best = coarse(arch, b, &hypotheses_prior(arch, b, prior, right_side));
+                .max_by(|a, b| a.2.total_cmp(&b.2)),
+        );
+    } else if let Some(prior) = prior {
+        let h = hypotheses_prior(arch, b, prior, right_side);
+        starts = coarse(arch, b, &h, false);
+    }
+    if starts.is_empty() {
+        starts = coarse(arch, b, &hypotheses_free(arch, b, false), false);
+    }
+    let pts: Vec<DVec3> = occlusion::subsample(&b.p, 500);
+    let mut fits: Vec<Fit> = Vec::new();
+    let evaluate = |starts: &[(DMat4, f64, f64)], fits: &mut Vec<Fit>| {
+        let Some(top) = starts.first().map(|s| s.2) else {
+            return;
+        };
+        let mut taken: Vec<DMat4> = Vec::new();
+        for (t, sg, sc) in starts {
+            if taken.len() >= ALTERNATIVES || *sc < 0.5 * top {
+                break;
+            }
+            if taken.iter().any(|k| disagreement(k, t, &pts) < DISTINCT_MM) {
+                continue;
+            }
+            taken.push(*t);
+            fits.push(finish(t, *sg));
         }
-        if best.is_none() {
-            best = coarse(arch, b, &hypotheses_free(arch, b));
+    };
+    evaluate(&starts, &mut fits);
+    let ok = |f: &Fit| check_fit(&f.metrics, arch_name, &b.name).is_ok();
+    if !fits.iter().any(ok) {
+        let h = hypotheses_free(arch, b, true);
+        evaluate(&coarse(arch, b, &h, true), &mut fits);
+    }
+    // the soft tissue a scan catches above and below the teeth can pull its
+    // frame away from every start: the middle band of the scan alone
+    if !fits.iter().any(ok)
+        && let Some(core) = core_band(b)
+    {
+        let h = hypotheses_free(arch, &core, true);
+        evaluate(&coarse(arch, &core, &h, true), &mut fits);
+    }
+    // the first acceptable fit, unless a later one is clearly better; then
+    // the first fit (refused by the caller with its reasons)
+    let mut best: Option<usize> = None;
+    for (k, f) in fits.iter().enumerate() {
+        if !ok(f) {
+            continue;
         }
-        best.ok_or_else(|| BiteError::NoAlignment {
+        if best.is_none_or(|j| f.metrics.area_mm2 > CLEARLY_BETTER * fits[j].metrics.area_mm2) {
+            best = Some(k);
+        }
+    }
+    if let Some(j) = best {
+        let rival = fits.iter().enumerate().find(|(k, f)| {
+            *k != j
+                && ok(f)
+                && f.metrics.area_mm2 >= AMBIGUOUS_SHARE * fits[j].metrics.area_mm2
+                && disagreement(&f.transform, &fits[j].transform, &pts) >= DISTINCT_MM
+        });
+        if let Some((_, r)) = rival {
+            return Err(BiteError::Ambiguous {
+                bite: b.name.clone(),
+                arch: arch_name.to_owned(),
+                apart_mm: round_to(disagreement(&r.transform, &fits[j].transform, &pts), 1),
+            });
+        }
+        return Ok(fits.swap_remove(j));
+    }
+    if fits.is_empty() {
+        return Err(BiteError::NoAlignment {
             bite: b.name.clone(),
             arch: arch_name.to_owned(),
-        })?
-    };
-    let (t, xi) = fine(arch, b, &t, sg, 20000);
-    let mut m = metrics(arch, b, &t, sg);
-    m.icp_overlap = round_to(xi.unwrap_or(0.0), 3);
-    Ok(Fit {
-        transform: t,
-        normal_sign: sg,
-        metrics: m,
-    })
+        });
+    }
+    Ok(fits.swap_remove(0))
 }
 
 // ----------------------------------------------------------------------------
@@ -1239,6 +1554,112 @@ pub struct Registration {
     pub verdict: &'static str,
     /// Reasons to review the registration (codes).
     pub reasons: Vec<String>,
+    /// Bite scans left out because they do not fit (the other one does).
+    pub ignored: Vec<IgnoredScan>,
+}
+
+/// A bite scan the registration left out, and why.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IgnoredScan {
+    /// Bite scan.
+    pub scan: String,
+    /// Why it was left out.
+    pub why: String,
+}
+
+/// One bite scan registered to both arches.
+struct Registered {
+    lower: Fit,
+    upper: Fit,
+    /// Its points off the lower arch, on the lower arch (case coordinates).
+    rest: BiteScan,
+}
+
+/// A bite scan onto the lower arch, then the rest of it onto the upper one
+/// (`k`: its order, the manual pairing is for the first). The error comes
+/// with the move of the scan onto the lower arch when that fit holds.
+fn register_one(
+    lower: &BiteArch,
+    upper: &BiteArch,
+    b: &BiteScan,
+    k: usize,
+    init: &ManualInit,
+) -> Result<Registered, (BiteError, Option<Box<DMat4>>)> {
+    let ml = lower.model.to_case;
+    let i = if k == 0 { init.lower.as_ref() } else { None };
+    let f = fit(lower, b, i, None, None, "lower").map_err(|e| (e, None))?;
+    check_fit(&f.metrics, "lower", &b.name).map_err(|e| (e, None))?;
+    // the bite points of the lower arch are removed; the rest goes to the
+    // upper arch, which faces the lower one
+    let t = f.transform;
+    let g = ml * t; // bite scan on the lower arch (case)
+    let rg = DMat3::from_mat4(g);
+    let (mut rp, mut rn, mut ra) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..b.p.len() {
+        if lower
+            .whole
+            .nearest(t.transform_point3(b.p[i]), OWN)
+            .is_none()
+        {
+            rp.push(g.transform_point3(b.p[i]));
+            rn.push(rg * (b.n[i] * f.normal_sign));
+            ra.push(b.a[i]);
+        }
+    }
+    let rest = BiteScan::from_parts(&b.name, rp, rn, ra);
+    if rest.area < p("bite_min_area", 90.0) {
+        return Err((
+            BiteError::Invalid(format!(
+                "'{}' does not contain the upper teeth: the bite scan must include both arches \
+                 in contact",
+                b.name
+            )),
+            Some(Box::new(g)),
+        ));
+    }
+    let i = if k == 0 {
+        init.upper.map(|u| u * frame::rigid_inverse(&g))
+    } else {
+        None
+    };
+    let prior = DMat4::from_mat3(S_FLIP) * frame::rigid_inverse(&ml);
+    let fu = fit(
+        upper,
+        &rest,
+        i.as_ref(),
+        Some(&prior),
+        side(&f.metrics),
+        "upper",
+    )
+    .map_err(|e| (e, Some(Box::new(g))))?;
+    check_fit(&fu.metrics, "upper", &b.name).map_err(|e| (e, Some(Box::new(g))))?;
+    Ok(Registered {
+        lower: f,
+        upper: fu,
+        rest,
+    })
+}
+
+/// Regions of the arches the registered bite scans hold, both arches
+/// together (teeth in common, [`FitMetrics::teeth`]): (right posterior,
+/// left posterior). Premolars and molars count; the canines and incisors
+/// are the front.
+fn posterior_sides(used: &[Registered]) -> (bool, bool) {
+    let held = |right: bool| {
+        [true, false].iter().all(|&lower_arch| {
+            used.iter().any(|u| {
+                let m = if lower_arch {
+                    &u.lower.metrics
+                } else {
+                    &u.upper.metrics
+                };
+                m.teeth
+                    .keys()
+                    .any(|&f| index(f) >= 4 && index(f) <= 8 && is_right(f) == right)
+            })
+        })
+    };
+    (held(true), held(false))
 }
 
 fn side_name(m: &FitMetrics) -> Option<&'static str> {
@@ -1254,9 +1675,19 @@ fn side_name(m: &FitMetrics) -> Option<&'static str> {
 /// the lower arch stays in place, the bite scans move onto it and the upper
 /// arch moves onto the bite scans.
 ///
+/// Two bite scans are the two sides or two takes of the same teeth: a scan
+/// that does not fit while the other one does is left out
+/// ([`Registration::ignored`], reason `scan_ignored:<scan>`) and moved onto
+/// the lower arch when that fit holds. A scan of the front teeth only, of
+/// one side, with holes, noise or soft tissue registers when its teeth fit
+/// ([`check_fit`]); how good the scan is and what it covers become reasons
+/// to review (`rms_above_good`, `few_teeth`, `low_coherence`,
+/// `one_side_only`, `front_only`).
+///
 /// # Errors
 /// [`BiteError`] (nothing is to be moved) when the registration is not
-/// acceptable.
+/// acceptable: no bite scan fits, or the arches do not face each other or
+/// interpenetrate beyond `bite_penetration_max`.
 pub fn register(
     lower: &BiteArch,
     upper: &BiteArch,
@@ -1270,65 +1701,31 @@ pub fn register(
     }
     if bites.len() > 2 {
         return Err(BiteError::Invalid(
-            "at most two bite scans (right side and left side)".to_owned(),
+            "at most two bite scans (the two sides, or two takes of the same teeth)".to_owned(),
         ));
     }
     let ml = lower.model.to_case;
     let mu = upper.model.to_case;
-    // 1. every bite scan onto the lower arch
-    let mut low = Vec::new();
+    // 1-2. every bite scan onto the lower arch, its rest onto the upper arch
+    let mut used: Vec<Registered> = Vec::new();
+    let mut moves: Vec<Option<DMat4>> = Vec::new();
+    let mut failed: Vec<(usize, BiteError, bool)> = Vec::new();
     for (k, b) in bites.iter().enumerate() {
-        let i = if k == 0 { init.lower.as_ref() } else { None };
-        let f = fit(lower, b, i, None, None, "lower")?;
-        check_fit(&f.metrics, "lower", &b.name, is_full_arch(b))?;
-        low.push(f);
-    }
-    // 2. the bite points of the lower arch are removed; the rest goes to the
-    //    upper arch, which faces the lower one
-    let prior = DMat4::from_mat3(S_FLIP) * frame::rigid_inverse(&ml);
-    let min_area = p("bite_min_area", 90.0);
-    let mut up = Vec::new();
-    let mut rest = Vec::new();
-    for (k, (b, f)) in bites.iter().zip(&low).enumerate() {
-        let t = f.transform;
-        let g = ml * t; // bite scan on the lower arch (case)
-        let rg = DMat3::from_mat4(g);
-        let (mut rp, mut rn, mut ra) = (Vec::new(), Vec::new(), Vec::new());
-        for i in 0..b.p.len() {
-            if lower
-                .whole
-                .nearest(t.transform_point3(b.p[i]), OWN)
-                .is_none()
-            {
-                rp.push(g.transform_point3(b.p[i]));
-                rn.push(rg * (b.n[i] * f.normal_sign));
-                ra.push(b.a[i]);
+        match register_one(lower, upper, b, k, init) {
+            Ok(r) => {
+                moves.push(Some(ml * r.lower.transform));
+                used.push(r);
+            }
+            Err((e, on_lower)) => {
+                failed.push((k, e, on_lower.is_some()));
+                moves.push(on_lower.map(|m| *m));
             }
         }
-        let r = BiteScan::from_parts(&b.name, rp, rn, ra);
-        if r.area < min_area {
-            return Err(BiteError::Invalid(format!(
-                "'{}' does not contain the upper teeth: the bite scan must include both arches \
-                 in contact",
-                b.name
-            )));
-        }
-        let i = if k == 0 {
-            init.upper.map(|u| u * frame::rigid_inverse(&g))
-        } else {
-            None
-        };
-        let fu = fit(
-            upper,
-            &r,
-            i.as_ref(),
-            Some(&prior),
-            side(&f.metrics),
-            "upper",
-        )?;
-        check_fit(&fu.metrics, "upper", &b.name, is_full_arch(b))?;
-        up.push(fu);
-        rest.push(r);
+    }
+    if used.is_empty() {
+        // the scan that went furthest says best why
+        let j = failed.iter().position(|f| f.2).unwrap_or(0);
+        return Err(failed.swap_remove(j).1);
     }
     // 3. both bite scans together; agreement of the relations of each one
     let ci_sub = subsample_idx(&upper.ci, 4000);
@@ -1336,10 +1733,13 @@ pub fn register(
         .iter()
         .map(|&i| upper.model.vertices[i as usize])
         .collect();
-    let rels: Vec<DMat4> = up.iter().map(|u| relation_of(&ml, &u.transform)).collect();
+    let rels: Vec<DMat4> = used
+        .iter()
+        .map(|u| relation_of(&ml, &u.upper.transform))
+        .collect();
     let agree = (rels.len() == 2).then(|| disagreement(&rels[0], &rels[1], &pts));
-    let tu = if bites.len() == 2 {
-        let j = if up[1].metrics.area_mm2 > up[0].metrics.area_mm2 {
+    let tu = if used.len() == 2 {
+        let j = if used[1].upper.metrics.area_mm2 > used[0].upper.metrics.area_mm2 {
             1
         } else {
             0
@@ -1347,16 +1747,20 @@ pub fn register(
         let mut bp = Vec::new();
         let mut bn = Vec::new();
         let mut ba = Vec::new();
-        for (i, r) in rest.iter().enumerate() {
-            bp.extend(&r.p);
-            bn.extend(r.n.iter().map(|n| *n * up[i].normal_sign));
-            ba.extend(&r.a);
+        for u in &used {
+            bp.extend(&u.rest.p);
+            bn.extend(u.rest.n.iter().map(|n| *n * u.upper.normal_sign));
+            ba.extend(&u.rest.a);
         }
         let both = BiteScan::from_parts(&bites[0].name, bp, bn, ba);
-        let (t, xi) = fine(upper, &both, &up[j].transform, 1.0, 30000);
-        if xi.is_some() { t } else { up[j].transform }
+        let (t, xi) = fine(upper, &both, &used[j].upper.transform, 1.0, 30000);
+        if xi.is_some() {
+            t
+        } else {
+            used[j].upper.transform
+        }
     } else {
-        up[0].transform
+        used[0].upper.transform
     };
     // 4. the upper case onto the bite scans
     let upper_delta = frame::rigid_inverse(&tu) * frame::rigid_inverse(&mu);
@@ -1389,32 +1793,42 @@ pub fn register(
     let gap = occlusion::contact_offset(&pl, &lower_surface, &q, &lab_u).dz;
     // report
     let rms_good = p("bite_rms_good", 0.10);
+    let coherent = p("bite_coherence", 0.70);
     let good_teeth = p("bite_teeth", 4.0) as usize;
     let mut reasons = Vec::new();
     let mut scans = Vec::new();
-    for (b, (fl, fu)) in bites.iter().zip(low.iter().zip(&up)) {
-        for (m, name) in [(&fl.metrics, "lower"), (&fu.metrics, "upper")] {
+    for u in &used {
+        let name = &u.rest.name;
+        for (m, arch) in [(&u.lower.metrics, "lower"), (&u.upper.metrics, "upper")] {
             if m.rms_mm > rms_good {
-                reasons.push(format!("rms_above_good:{}:{name}", b.name));
+                reasons.push(format!("rms_above_good:{name}:{arch}"));
             }
             if m.n_teeth < good_teeth {
-                reasons.push(format!("few_teeth:{}:{name}", b.name));
+                reasons.push(format!("few_teeth:{name}:{arch}"));
+            }
+            if m.coherence < coherent {
+                reasons.push(format!("low_coherence:{name}:{arch}"));
             }
         }
         scans.push(ScanReport {
-            scan: b.name.clone(),
-            side: side_name(&fl.metrics),
-            lower: fl.metrics.clone(),
-            upper: fu.metrics.clone(),
+            scan: name.clone(),
+            side: side_name(&u.lower.metrics),
+            lower: u.lower.metrics.clone(),
+            upper: u.upper.metrics.clone(),
         });
     }
-    if bites.iter().any(is_full_arch) {
-        reasons.push("full_arch_scan".to_owned());
-    } else {
-        let sides: std::collections::BTreeSet<_> = scans.iter().map(|s| s.side).collect();
-        if sides.len() < 2 {
-            reasons.push("one_side_only".to_owned());
-        }
+    let mut ignored = Vec::new();
+    for (k, e, _) in &failed {
+        reasons.push(format!("scan_ignored:{}", bites[*k].name));
+        ignored.push(IgnoredScan {
+            scan: bites[*k].name.clone(),
+            why: e.to_string(),
+        });
+    }
+    match posterior_sides(&used) {
+        (true, true) => {}
+        (false, false) => reasons.push("front_only".to_owned()),
+        _ => reasons.push("one_side_only".to_owned()),
     }
     if agree.is_some_and(|a| a > p("bite_agreement", 0.10)) {
         reasons.push("scans_disagree".to_owned());
@@ -1425,7 +1839,10 @@ pub fn register(
     if gap < -p("bite_gap_warn", 0.10) {
         reasons.push("arches_not_in_contact".to_owned());
     }
-    let bite_deltas = low.iter().map(|f| ml * f.transform).collect();
+    let bite_deltas = moves
+        .into_iter()
+        .map(|m| m.unwrap_or(DMat4::IDENTITY))
+        .collect();
     Ok(Registration {
         upper_delta,
         bite_deltas,
@@ -1442,6 +1859,7 @@ pub fn register(
             "to_review"
         },
         reasons,
+        ignored,
     })
 }
 

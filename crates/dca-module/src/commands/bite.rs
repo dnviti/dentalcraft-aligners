@@ -91,6 +91,18 @@ fn pts(v: &[[f64; 3]]) -> Vec<DVec3> {
     v.iter().map(|p| DVec3::from_array(*p)).collect()
 }
 
+/// The name of the `k`-th bite scan in the report: its file, numbered when
+/// an earlier bite scan has the same file name (two takes saved under the
+/// same name), so that its reasons and fits are its own.
+fn scan_name(scans: &[&dc_case::Scan], k: usize) -> String {
+    let name = &scans[k].source_name;
+    if scans[..k].iter().any(|s| &s.source_name == name) {
+        format!("{name} ({})", k + 1)
+    } else {
+        name.clone()
+    }
+}
+
 fn fit_of(m: &FitMetrics) -> BiteFit {
     BiteFit {
         area_mm2: m.area_mm2,
@@ -144,15 +156,19 @@ fn run_registration(
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
     let mut data = aligners_data(state)?;
-    let bites: Vec<BiteScan> = state
+    let scans: Vec<_> = state
         .case
         .scans
         .iter()
         .filter(|s| s.role == ScanRole::Bite)
-        .map(|s| {
+        .collect();
+    let bites: Vec<BiteScan> = scans
+        .iter()
+        .enumerate()
+        .map(|(k, s)| {
             let mesh = state.blobs.require(&s.mesh)?;
             let v: Vec<DVec3> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();
-            BiteScan::new(&s.source_name, &v, &mesh.tris)
+            BiteScan::new(&scan_name(&scans, k), &v, &mesh.tris)
                 .map_err(|e| CommandError::Invalid(e.to_string()))
         })
         .collect::<Result<_, _>>()?;
@@ -475,6 +491,75 @@ mod tests {
             .unwrap()
             .bite_report
             .clone()
+    }
+
+    /// A sphere of 12 mm radius at `centre`: a mesh that is no dentition.
+    fn ball(centre: glam::Vec3) -> TriMesh {
+        let (nu, nv) = (40, 20);
+        let mut v = Vec::new();
+        for j in 0..=nv {
+            for i in 0..=nu {
+                let (th, ph) = (
+                    i as f32 / nu as f32 * std::f32::consts::TAU,
+                    (j as f32 / nv as f32 - 0.5) * std::f32::consts::PI,
+                );
+                v.push(
+                    centre
+                        + 12.0
+                            * glam::Vec3::new(ph.cos() * th.cos(), ph.cos() * th.sin(), ph.sin()),
+                );
+            }
+        }
+        let at = |i: u32, j: u32| j * (nu + 1) + i;
+        let mut t = Vec::new();
+        for j in 0..nv {
+            for i in 0..nu {
+                t.push([at(i, j), at(i + 1, j), at(i + 1, j + 1)]);
+                t.push([at(i, j), at(i + 1, j + 1), at(i, j + 1)]);
+            }
+        }
+        TriMesh::new(v, t)
+    }
+
+    #[test]
+    fn a_bite_scan_that_does_not_fit_is_left_out_and_named_apart() {
+        let x = DMat4::from_translation(DVec3::new(10.0, -4.0, 18.0))
+            * DMat4::from_axis_angle(DVec3::new(0.2, 1.0, -0.3).normalize(), 0.7);
+        let y = DMat4::from_translation(DVec3::new(2.0, -3.0, 5.0))
+            * DMat4::from_axis_angle(DVec3::new(1.0, 0.0, 0.3).normalize(), 0.2);
+        let (closed, mut moved) = bite_case(x, y);
+        // the second take is no dentition, saved under the file name of the
+        // first
+        let k: Vec<usize> = (0..moved.case.scans.len())
+            .filter(|&i| moved.case.scans[i].role == ScanRole::Bite)
+            .collect();
+        let name = moved.case.scans[k[0]].source_name.clone();
+        let r = moved.blobs.insert(ball(glam::Vec3::new(5.0, 40.0, -3.0)));
+        moved.case.scans[k[1]].mesh = r;
+        moved.case.scans[k[1]].source_name = name.clone();
+        let (next, out) = exec(
+            "aligners.occlusion.bite-registration.icp",
+            &moved,
+            Value::Null,
+        );
+        // registered on the first take alone
+        let gap = max_gap(&upper_positions(&closed), &upper_positions(&next));
+        assert!(gap < 0.05, "{gap}");
+        let second = format!("{name} (2)");
+        assert_eq!(out["scans"].as_array().unwrap().len(), 1, "{out}");
+        assert_eq!(out["scans"][0]["scan"], name.as_str());
+        assert_eq!(out["ignored"][0]["scan"], second.as_str());
+        let r = report(&next).unwrap().registration.unwrap();
+        assert!(
+            r.reasons.contains(&format!("scan_ignored:{second}")),
+            "{:?}",
+            r.reasons
+        );
+        assert_eq!(r.verdict, BiteVerdict::ToReview);
+        // the left-out take stays where it was
+        let before = moved.mesh(&moved.case.scans[k[1]].mesh).unwrap();
+        let after = next.mesh(&next.case.scans[k[1]].mesh).unwrap();
+        assert_eq!(before.positions, after.positions);
     }
 
     #[test]

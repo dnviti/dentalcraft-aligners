@@ -542,6 +542,62 @@ mod tests {
         assert!(out["arches"].get("upper").is_none(), "{out}");
     }
 
+    #[test]
+    fn the_gingiva_of_both_arches_is_closed_with_a_flat_base() {
+        use super::super::make_base::tests::opened_under_gum;
+        let mut open = super::super::occlusion::tests::two_demo_arches();
+        for role in [ScanRole::Upper, ScanRole::Lower] {
+            open = opened_under_gum(open, role);
+        }
+        // as read (open), and closed with a base as the import closes it
+        let mut based = open.clone();
+        for arch in ["upper", "lower"] {
+            based = exec("aligners.case.make-base", &based, json!({ "arch": arch }))
+                .unwrap()
+                .0;
+        }
+        for state in [&open, &based] {
+            let (next, out) = exec(BUILD, state, Value::Null).unwrap();
+            let d = aligners_data(&next).unwrap();
+            let gum_step = out["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == GINGIVA)
+                .unwrap();
+            for (arch, role) in [("upper", ScanRole::Upper), ("lower", ScanRole::Lower)] {
+                let scan = next.mesh(&next.case.scan(role).unwrap().mesh).unwrap();
+                let open_scan =
+                    crate::open_scan::open_part(&d, &next.case.scan(role).unwrap().mesh, scan)
+                        .unwrap();
+                assert!(open_scan.validate().boundary_edges > 0, "{arch}");
+                let mesh = next.mesh(&d.gingiva[&role]).unwrap();
+                let report = mesh.validate();
+                assert_eq!(report.boundary_edges, 0, "{arch}: {report:?}");
+                assert_eq!(report.non_manifold_edges, 0, "{arch}: {report:?}");
+                assert!(report.is_watertight(), "{arch}: {report:?}");
+                let g = dca_algo::gingiva::GumSurface::from_mesh(mesh).unwrap();
+                let base = g.base.iter().filter(|&&b| b).count();
+                assert!(base > 0, "{arch}");
+                assert_eq!(gum_step["output"][arch]["base_vertices"], base, "{arch}");
+                assert!(
+                    gum_step["output"][arch]["base_edges"].as_u64().unwrap() > 0,
+                    "{arch}"
+                );
+                // without the base: the gingiva of the open scan, its margin cut after it
+                let gum = g.without_base();
+                let margin = gum.margin.iter().filter(|&&m| m).count();
+                assert_eq!(
+                    gum.vertices.len(),
+                    open_scan.vertex_count() + margin,
+                    "{arch}"
+                );
+                assert!(gum.tris.len() < mesh.face_count(), "{arch}");
+                assert!(!gum.to_mesh().validate().is_watertight(), "{arch}");
+            }
+        }
+    }
+
     /// `p` moved by the rest pose of `frame` into the world (the plan's
     /// convention: centre of resistance origin).
     fn world(frame: &ToothFrame, p: &Pose) -> Pose {
