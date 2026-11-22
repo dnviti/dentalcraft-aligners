@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0-alpha.13](https://github.com/dnviti/dentalcraft-aligners/compare/v0.2.0-alpha.12...v0.2.0-alpha.13) (2026-11-22)
+
+
+### Features
+
+* **case:** forget what was computed from a removed scan ([e7186f5](https://github.com/dnviti/dentalcraft-aligners/commit/e7186f5eb6b0ff835ad30f9ec83ca5afa89c5b25))
+* **teeth:** close the gingiva of the 3D teeth with a flat base ([e7186f5](https://github.com/dnviti/dentalcraft-aligners/commit/e7186f5eb6b0ff835ad30f9ec83ca5afa89c5b25))
+
+
+### Bug Fixes
+
+* **bite:** register partial and low-quality bite scans ([e7186f5](https://github.com/dnviti/dentalcraft-aligners/commit/e7186f5eb6b0ff835ad30f9ec83ca5afa89c5b25))
+* **deps:** move to core v0.3.0-alpha.9 ([e7186f5](https://github.com/dnviti/dentalcraft-aligners/commit/e7186f5eb6b0ff835ad30f9ec83ca5afa89c5b25))
+* **teeth:** no phantom teeth behind the last molars and no merged teeth ([e7186f5](https://github.com/dnviti/dentalcraft-aligners/commit/e7186f5eb6b0ff835ad30f9ec83ca5afa89c5b25))
+
 ## [0.2.0-alpha.12](https://github.com/dnviti/dentalcraft-aligners/compare/v0.2.0-alpha.11...v0.2.0-alpha.12) (2026-11-21)
 
 
