@@ -50,7 +50,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use dc_case::{Fdi, Pose};
-use dca_model::{PerioStage, StagingPattern, StagingSettings};
+use dca_model::{PerioStage, StagingPattern, StagingSettings, TOOTH_SPEED};
 use glam::{DMat3, DMat4, DVec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -293,7 +293,8 @@ pub struct ToothMove {
     pub pts: Vec<DVec3>,
     /// `+1` when the local x axis points mesially, `-1` distally.
     pub md_sign: i8,
-    /// Velocity factor (below 1 slows a tooth that did not track).
+    /// Velocity factor (below 1 slows a tooth that did not track), inside
+    /// [`TOOTH_SPEED`]: the planning refuses any other value.
     pub speed: f64,
 }
 
@@ -420,7 +421,52 @@ pub enum StagingError {
     /// The progress callback asked to stop.
     #[error("cancelled")]
     Cancelled,
+    /// A step limit or the crown cap is not a positive finite number (a
+    /// cap of 0 is not "no cap"), or the contact tolerance is negative or
+    /// not finite.
+    #[error("the staging parameter {name} is out of its range (got {value})")]
+    InvalidLimit {
+        /// Name of the parameter (a field of [`Params`]).
+        name: &'static str,
+        /// Its value.
+        value: f64,
+    },
+    /// The speed factor of a tooth is outside [`TOOTH_SPEED`] or not finite.
+    #[error("tooth {fdi}: the speed {value} is outside {min}-{max}")]
+    InvalidSpeed {
+        /// The tooth.
+        fdi: Fdi,
+        /// Its speed factor.
+        value: f64,
+        /// Smallest speed.
+        min: f64,
+        /// Largest speed.
+        max: f64,
+    },
+    /// A movement, the rest frame or a crown point of a tooth is not finite
+    /// (the plugin raises here).
+    #[error("tooth {fdi}: the {what} is not a finite number")]
+    NotFinite {
+        /// The tooth.
+        fdi: Fdi,
+        /// What is not finite.
+        what: &'static str,
+    },
+    /// A tooth needs more than [`MAX_ALIGNERS`] aligners.
+    #[error("tooth {fdi} needs more than {max} aligners: check its step limits and speed")]
+    TooManyAligners {
+        /// The tooth.
+        fdi: Fdi,
+        /// The largest number of aligners of a tooth.
+        max: i64,
+    },
 }
+
+/// Most aligners a tooth may need: the plugin numbers the aligners up to 999
+/// (`props.py`, `visit_last_aligner` and `replan_stage`). A count above it
+/// comes from limits or a speed far outside their ranges, and would hang the
+/// collision scan or exhaust the memory.
+pub const MAX_ALIGNERS: i64 = 999;
 
 /// A phase of the movement of a tooth: the components in `mask` go from 0 to
 /// their final value in `n` aligners starting after aligner `start`.
@@ -484,6 +530,22 @@ pub struct ToothStats {
     pub moving_stages: u32,
 }
 
+/// A step of a plan over its limit per aligner: what the post-condition of
+/// the planning reports (the limits hold by construction; this catches what
+/// would break them).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OverLimit {
+    /// The tooth.
+    pub fdi: Fdi,
+    /// The component (a name of [`COMPONENTS`]), or `crown` for the cap of
+    /// a crown point.
+    pub what: &'static str,
+    /// The largest step (mm, or rad for torque, tip and rotation).
+    pub step: f64,
+    /// Its limit per aligner.
+    pub limit: f64,
+}
+
 /// Result of the staging.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Plan {
@@ -507,6 +569,9 @@ pub struct Plan {
     pub stats: BTreeMap<Fdi, ToothStats>,
     /// Final movement of each tooth (after overcorrection, if any).
     pub q_final: BTreeMap<Fdi, Q6>,
+    /// Steps over their limit per aligner (empty in a sound plan; each one
+    /// is also a note of `log`).
+    pub over_limit: Vec<OverLimit>,
     /// Notes for the clinician.
     pub log: Vec<String>,
 }
@@ -612,14 +677,11 @@ pub fn limits(fdi: Fdi, p: &Params) -> (Q6, f64) {
     ([lin, lin, vert, ang, ang, (rot * scale).to_radians()], cap)
 }
 
+/// The limits of a tooth times its speed factor ([`check_input`] keeps it
+/// inside [`TOOTH_SPEED`]).
 fn tooth_limits(m: &ToothMove, p: &Params) -> (Q6, f64) {
     let (lim, cap) = limits(m.fdi, p);
-    let sp = if m.speed == 0.0 || !m.speed.is_finite() {
-        1.0
-    } else {
-        m.speed
-    };
-    (lim.map(|l| l * sp), cap * sp)
+    (lim.map(|l| l * m.speed), cap * m.speed)
 }
 
 fn apply_overcorrection(q: &Q6, oc: &Overcorrection) -> Q6 {
@@ -637,19 +699,35 @@ fn apply_overcorrection(q: &Q6, oc: &Overcorrection) -> Q6 {
 }
 
 /// Smallest number of aligners for the movement `q` (only the components in
-/// `mask`).
-pub fn stages_needed(q: &Q6, pts: &[DVec3], lim: &Q6, cap: f64, mask: Option<&[bool; 6]>) -> i64 {
+/// `mask`). `None` when a limit or the cap is not a positive finite number,
+/// the movement is not finite, or the count is above [`MAX_ALIGNERS`].
+pub fn stages_needed(
+    q: &Q6,
+    pts: &[DVec3],
+    lim: &Q6,
+    cap: f64,
+    mask: Option<&[bool; 6]>,
+) -> Option<i64> {
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if !positive(cap) || !lim.iter().all(|&l| positive(l)) || !q.iter().all(|v| v.is_finite()) {
+        return None;
+    }
     let qq: Q6 = std::array::from_fn(|i| match mask {
         Some(m) if !m[i] => 0.0,
         _ => q[i],
     });
     if max_abs(&qq) < 1e-9 {
-        return 0;
+        return Some(0);
     }
-    let n_comp = (0..6)
-        .map(|i| (qq[i].abs() / lim[i] - 1e-9).ceil() as i64)
-        .max()
-        .unwrap_or(0);
+    // checked: a huge or infinite ratio is no count (`as i64` would saturate)
+    let count = |ratio: f64| {
+        let n = (ratio - 1e-9).ceil();
+        (n <= MAX_ALIGNERS as f64).then_some(n as i64)
+    };
+    let mut n = 1;
+    for i in 0..6 {
+        n = n.max(count(qq[i].abs() / lim[i])?);
+    }
     let t = DVec3::new(qq[0], qq[1], qq[2]).length();
     let th = DVec3::new(qq[3], qq[4], qq[5]).length();
     let mut r = 0.0_f64;
@@ -660,12 +738,7 @@ pub fn stages_needed(q: &Q6, pts: &[DVec3], lim: &Q6, cap: f64, mask: Option<&[b
             .map(|&p| (p - ax * p.dot(ax)).length())
             .fold(0.0, f64::max);
     }
-    let n_cap = if cap > 0.0 {
-        ((t + r * th) / cap - 1e-9).ceil() as i64
-    } else {
-        0
-    };
-    n_comp.max(n_cap).max(1)
+    Some(n.max(count((t + r * th) / cap)?))
 }
 
 /// Components of a movement that create space in the arch (Martinez-Lozano
@@ -820,7 +893,7 @@ fn build_schedule(
     moves: &BTreeMap<Fdi, ToothMove>,
     p: &Params,
     pattern: Pattern,
-) -> (Schedule, BTreeMap<Fdi, i64>) {
+) -> Result<(Schedule, BTreeMap<Fdi, i64>), StagingError> {
     let mut sch = Schedule::new(moves);
     let lim: BTreeMap<Fdi, (Q6, f64)> = moves
         .iter()
@@ -830,8 +903,16 @@ fn build_schedule(
         let m = &moves[&f];
         let (l, c) = &lim[&f];
         stages_needed(&m.delta(), &m.pts, l, *c, mask)
+            .map(|n| (f, n))
+            .ok_or(StagingError::TooManyAligners {
+                fdi: f,
+                max: MAX_ALIGNERS,
+            })
     };
-    let need: BTreeMap<Fdi, i64> = moves.keys().map(|&f| (f, needed(f, None))).collect();
+    let need: BTreeMap<Fdi, i64> = moves
+        .keys()
+        .map(|&f| needed(f, None))
+        .collect::<Result<_, _>>()?;
     let phase = |mask: [bool; 6], start: i64, n: i64| Phase { mask, start, n };
     match pattern {
         Pattern::MaxVelocity => {
@@ -851,24 +932,21 @@ fn build_schedule(
             let na: BTreeMap<Fdi, i64> = moves
                 .keys()
                 .map(|&f| {
-                    (
-                        f,
-                        if ma[&f].iter().any(|&x| x) {
-                            needed(f, Some(&ma[&f]))
-                        } else {
-                            0
-                        },
-                    )
+                    if ma[&f].iter().any(|&x| x) {
+                        needed(f, Some(&ma[&f]))
+                    } else {
+                        Ok((f, 0))
+                    }
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             let nb: BTreeMap<Fdi, i64> = moves
                 .keys()
-                .map(|&f| (f, needed(f, Some(&mb[&f]))))
-                .collect();
+                .map(|&f| needed(f, Some(&mb[&f])))
+                .collect::<Result<_, _>>()?;
             let nv: BTreeMap<Fdi, i64> = moves
                 .keys()
-                .map(|&f| (f, needed(f, Some(&V_MASK))))
-                .collect();
+                .map(|&f| needed(f, Some(&V_MASK)))
+                .collect::<Result<_, _>>()?;
             let big_a = na.values().copied().max().unwrap_or(0);
             let big_b = nb.values().copied().max().unwrap_or(0);
             let sb = (p.seq_overlap * big_a as f64).ceil() as i64;
@@ -931,7 +1009,7 @@ fn build_schedule(
             }
         }
     }
-    (sch, need)
+    Ok((sch, need))
 }
 
 fn set_phases(sch: &mut Schedule, f: Fdi, phases: Vec<Phase>) {
@@ -1091,6 +1169,7 @@ pub fn run_with_progress(
     p: &Params,
     progress: &mut dyn FnMut(f64) -> bool,
 ) -> Result<Plan, StagingError> {
+    check_input(input, p)?;
     let seq: Vec<Fdi> = input.moves.iter().map(|m| m.fdi).collect();
     let pairs = adjacent_pairs(&seq);
     let mut moves: BTreeMap<Fdi, ToothMove> =
@@ -1112,7 +1191,7 @@ pub fn run_with_progress(
             m.q = std::array::from_fn(|i| s[i] + d[i]);
         }
     }
-    let (mut sch, need) = build_schedule(&moves, p, pattern);
+    let (mut sch, need) = build_schedule(&moves, p, pattern)?;
     enforce_cap(&mut sch, &moves, p);
     let mut log = vec![format!("Staging pattern: {}", pattern_name(pattern))];
     let mut unresolved = Vec::new();
@@ -1256,11 +1335,33 @@ pub fn run_with_progress(
     }
 
     let n = sch.n_stages();
+    // the plugin keeps the stage of such an IPR (0, or 1 of a plan without
+    // aligners): no aligner carries it, so it is reported
+    for r in &ipr_stage {
+        if r.stage == 0 || i64::from(r.stage) > n {
+            log.push(format!(
+                "IPR {}|{} is in no aligner (stage {} of a plan of {n} aligners): do it by hand",
+                r.a, r.b, r.stage
+            ));
+        }
+    }
     let q: BTreeMap<Fdi, Vec<Q6>> = moves
         .keys()
         .map(|&f| (f, (0..=n).map(|k| sch.q_at(f, k)).collect()))
         .collect();
     let stats = stage_stats(&moves, &q, p);
+    let over_limit = over_limits(&stats);
+    for o in &over_limit {
+        let (step, limit, unit) = if o.what == "crown" || COMPONENTS[..3].contains(&o.what) {
+            (o.step, o.limit, "mm")
+        } else {
+            (o.step.to_degrees(), o.limit.to_degrees(), "deg")
+        };
+        log.push(format!(
+            "Over the limit: tooth {} moves {step:.4} {unit} ({}) in one aligner, the limit is {limit:.4} {unit}",
+            o.fdi, o.what
+        ));
+    }
     Ok(Plan {
         pattern,
         n_stages: n as u32,
@@ -1276,8 +1377,91 @@ pub fn run_with_progress(
         final_overlap,
         stats,
         q_final: moves.iter().map(|(&f, m)| (f, m.q)).collect(),
+        over_limit,
         log,
     })
+}
+
+/// Refuses what would be planned without limits or as NaN poses: a step
+/// limit or crown cap that is not a positive finite number (a cap of 0 is
+/// not "no cap"), a negative or non-finite contact tolerance, a speed factor
+/// outside [`TOOTH_SPEED`], a movement, rest frame or crown point that is not
+/// finite (the plugin raises on a NaN movement). The command checks the
+/// ranges of the settings too; this guards every other caller.
+fn check_input(input: &Input<'_>, p: &Params) -> Result<(), StagingError> {
+    for (name, value) in [
+        ("step_linear_mm", p.step_linear_mm),
+        ("step_vertical_mm", p.step_vertical_mm),
+        ("step_rotation_deg", p.step_rotation_deg),
+        ("step_rotation_round_deg", p.step_rotation_round_deg),
+        ("step_angular_deg", p.step_angular_deg),
+        ("max_crown_step_mm", p.max_crown_step_mm),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(StagingError::InvalidLimit { name, value });
+        }
+    }
+    if !(p.collision_tol_mm.is_finite() && p.collision_tol_mm >= 0.0) {
+        return Err(StagingError::InvalidLimit {
+            name: "collision_tol_mm",
+            value: p.collision_tol_mm,
+        });
+    }
+    let (min, max) = TOOTH_SPEED;
+    let finite = |v: &Q6| v.iter().all(|x| x.is_finite());
+    for m in input.moves {
+        let fdi = m.fdi;
+        if !(m.speed.is_finite() && (min - 1e-9..=max + 1e-9).contains(&m.speed)) {
+            return Err(StagingError::InvalidSpeed {
+                fdi,
+                value: m.speed,
+                min,
+                max,
+            });
+        }
+        let what = if !finite(&m.q) {
+            "final movement"
+        } else if m.q0.is_some_and(|q0| !finite(&q0)) {
+            "starting movement"
+        } else if !m.frame.is_finite() {
+            "rest frame"
+        } else if !m.pts.iter().all(|p| p.is_finite()) {
+            "crown points"
+        } else {
+            continue;
+        };
+        return Err(StagingError::NotFinite { fdi, what });
+    }
+    Ok(())
+}
+
+/// The post-condition of the planning: every step of a component within
+/// its limit and every step of a crown point within the cap, with the
+/// tolerance of [`stages_needed`] (`1e-9` relative, `1e-12` absolute).
+fn over_limits(stats: &BTreeMap<Fdi, ToothStats>) -> Vec<OverLimit> {
+    let over = |step: f64, limit: f64| step.is_nan() || step > limit * (1.0 + 1e-9) + 1e-12;
+    let mut out = Vec::new();
+    for (&fdi, st) in stats {
+        for (i, &what) in COMPONENTS.iter().enumerate() {
+            if over(st.max_step[i], st.limits[i]) {
+                out.push(OverLimit {
+                    fdi,
+                    what,
+                    step: st.max_step[i],
+                    limit: st.limits[i],
+                });
+            }
+        }
+        if over(st.max_crown_step, st.cap) {
+            out.push(OverLimit {
+                fdi,
+                what: "crown",
+                step: st.max_crown_step,
+                limit: st.cap,
+            });
+        }
+    }
+    out
 }
 
 fn pattern_name(p: Pattern) -> &'static str {
@@ -1469,22 +1653,22 @@ mod tests {
         let (lim, cap) = limits(fdi(11), &Params::default());
         // 1 mm mesial at 0.25 mm per aligner: 4 aligners
         let q = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        assert_eq!(stages_needed(&q, &[], &lim, cap, None), 4);
+        assert_eq!(stages_needed(&q, &[], &lim, cap, None), Some(4));
         // masked out: nothing to do
         let mask = [false, true, false, false, false, false];
-        assert_eq!(stages_needed(&q, &[], &lim, cap, Some(&mask)), 0);
+        assert_eq!(stages_needed(&q, &[], &lim, cap, Some(&mask)), Some(0));
         // 10 degrees of rotation at 2 deg: 5 aligners; a canine is limited to 1.5 deg: 7
         let r = [0.0, 0.0, 0.0, 0.0, 0.0, 10.0_f64.to_radians()];
-        assert_eq!(stages_needed(&r, &[], &lim, cap, None), 5);
+        assert_eq!(stages_needed(&r, &[], &lim, cap, None), Some(5));
         let (lim13, cap13) = limits(fdi(13), &Params::default());
-        assert_eq!(stages_needed(&r, &[], &lim13, cap13, None), 7);
+        assert_eq!(stages_needed(&r, &[], &lim13, cap13, None), Some(7));
         // periodontal stage III: 0.10 mm per aligner
         let p = Params {
             perio: Perio::Stage3,
             ..Params::default()
         };
         let (lim3, cap3) = limits(fdi(11), &p);
-        assert_eq!(stages_needed(&q, &[], &lim3, cap3, None), 10);
+        assert_eq!(stages_needed(&q, &[], &lim3, cap3, None), Some(10));
     }
 
     #[test]
@@ -1493,8 +1677,8 @@ mod tests {
         // 2 degrees of tip on a crown point 20 mm from the axis: 0.7 mm of travel
         let q = [0.0, 0.0, 0.0, 0.0, 2.0_f64.to_radians(), 0.0];
         let pts = [DVec3::new(0.0, 0.0, 20.0)];
-        assert_eq!(stages_needed(&q, &[], &lim, cap, None), 2);
-        assert_eq!(stages_needed(&q, &pts, &lim, cap, None), 3);
+        assert_eq!(stages_needed(&q, &[], &lim, cap, None), Some(2));
+        assert_eq!(stages_needed(&q, &pts, &lim, cap, None), Some(3));
     }
 
     #[test]
@@ -1678,5 +1862,315 @@ mod tests {
         assert!(
             (d[3] + 1.0).abs() < 1e-9 && (d[4] + 2.0).abs() < 1e-9 && (d[5] + 3.0).abs() < 1e-9
         );
+    }
+
+    fn plan_of(moves: &[ToothMove], p: &Params) -> Result<Plan, StagingError> {
+        let input = Input {
+            moves,
+            ipr: &[],
+            complexity: Complexity::default(),
+        };
+        run(&input, p)
+    }
+
+    #[test]
+    fn limits_that_are_not_positive_are_refused_and_a_cap_of_zero_is_not_no_cap() {
+        let moves = [tooth(11, 0.0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.1])];
+        type Set = fn(&mut Params, f64);
+        let fields: [(&str, Set); 6] = [
+            ("step_linear_mm", |p, v| p.step_linear_mm = v),
+            ("step_vertical_mm", |p, v| p.step_vertical_mm = v),
+            ("step_rotation_deg", |p, v| p.step_rotation_deg = v),
+            ("step_rotation_round_deg", |p, v| {
+                p.step_rotation_round_deg = v
+            }),
+            ("step_angular_deg", |p, v| p.step_angular_deg = v),
+            ("max_crown_step_mm", |p, v| p.max_crown_step_mm = v),
+        ];
+        for (field, set) in fields {
+            for v in [0.0, -0.25, f64::NAN, f64::INFINITY] {
+                let mut p = Params::default();
+                set(&mut p, v);
+                match plan_of(&moves, &p) {
+                    Err(StagingError::InvalidLimit { name, .. }) => assert_eq!(name, field),
+                    other => panic!("{field} = {v}: {other:?}"),
+                }
+            }
+        }
+        let p = Params {
+            collision_tol_mm: -0.1,
+            ..Params::default()
+        };
+        assert!(matches!(
+            plan_of(&moves, &p),
+            Err(StagingError::InvalidLimit {
+                name: "collision_tol_mm",
+                ..
+            })
+        ));
+        // the count itself refuses a cap or a limit of 0 instead of ignoring it
+        let (lim, cap) = limits(fdi(11), &Params::default());
+        let q = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert_eq!(stages_needed(&q, &[], &lim, 0.0, None), None);
+        let mut zero = lim;
+        zero[0] = 0.0;
+        assert_eq!(stages_needed(&q, &[], &zero, cap, None), None);
+        // up to MAX_ALIGNERS a count, above it none (`as i64` saturated to i64::MAX)
+        let most = [249.75, 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert_eq!(
+            stages_needed(&most, &[], &lim, 1e9, None),
+            Some(MAX_ALIGNERS)
+        );
+        let more = [250.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert_eq!(stages_needed(&more, &[], &lim, 1e9, None), None);
+        let huge = [tooth(11, 0.0, [1e6, 0.0, 0.0, 0.0, 0.0, 0.0])];
+        assert_eq!(
+            plan_of(&huge, &Params::default()).unwrap_err(),
+            StagingError::TooManyAligners {
+                fdi: fdi(11),
+                max: MAX_ALIGNERS
+            }
+        );
+    }
+
+    #[test]
+    fn a_speed_outside_its_range_is_refused() {
+        for speed in [-0.5, 1e-300, 1e-6, 0.0, 0.19, 1.01, f64::NAN, f64::INFINITY] {
+            let mut m = tooth(11, 0.0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            m.speed = speed;
+            let r = plan_of(&[m], &Params::default());
+            assert!(
+                matches!(r, Err(StagingError::InvalidSpeed { value, .. }) if value.to_bits() == speed.to_bits()),
+                "{speed}: {r:?}"
+            );
+        }
+        // the ends of the range plan: 1 mm at 0.25 mm times the speed per aligner
+        for (speed, n) in [(0.2, 20), (1.0, 4)] {
+            let mut m = tooth(11, 0.0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            m.speed = speed;
+            assert_eq!(plan_of(&[m], &Params::default()).unwrap().n_stages, n);
+        }
+    }
+
+    #[test]
+    fn movements_that_are_not_finite_are_refused() {
+        let base = || tooth(11, 0.0, [0.5, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut a = base();
+        a.q[3] = f64::NAN;
+        let mut b = base();
+        b.q0 = Some([0.0, f64::INFINITY, 0.0, 0.0, 0.0, 0.0]);
+        let mut c = base();
+        c.frame.w_axis.x = f64::NAN;
+        let mut d = base();
+        d.pts[7].z = f64::NAN;
+        for (m, what) in [
+            (a, "final movement"),
+            (b, "starting movement"),
+            (c, "rest frame"),
+            (d, "crown points"),
+        ] {
+            assert_eq!(
+                plan_of(&[m], &Params::default()).unwrap_err(),
+                StagingError::NotFinite { fdi: fdi(11), what }
+            );
+        }
+        // a NaN quaternion of a stored pose is refused, not planned as NaN poses
+        let nan = Pose {
+            t: DVec3::ZERO,
+            q: DQuat::from_xyzw(f64::NAN, 0.0, 0.0, 1.0),
+        };
+        assert_eq!(
+            plan_of(&[tooth(11, 0.0, q_from_pose(&nan))], &Params::default()).unwrap_err(),
+            StagingError::NotFinite {
+                fdi: fdi(11),
+                what: "final movement"
+            }
+        );
+        // the zero quaternion is no rotation
+        let zero = Pose {
+            t: DVec3::new(0.5, 0.0, 0.0),
+            q: DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+        };
+        assert_eq!(q_from_pose(&zero), [0.5, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn ipr_that_no_aligner_carries_is_reported() {
+        // no movement: no aligner, and the IPR keeps the plugin's stage (0, or 1)
+        let moves = [tooth(15, -7.0, [0.0; 6]), tooth(14, 0.0, [0.0; 6])];
+        let ipr = [IprPlan {
+            a: fdi(15),
+            b: fdi(14),
+            mm: 0.3,
+        }];
+        let input = Input {
+            moves: &moves,
+            ipr: &ipr,
+            complexity: Complexity::default(),
+        };
+        for (collision, stage) in [(false, 1), (true, 0)] {
+            let p = Params {
+                collision,
+                ..Params::default()
+            };
+            let plan = run(&input, &p).unwrap();
+            assert_eq!(plan.n_stages, 0);
+            assert_eq!(plan.ipr_stage[0].stage, stage);
+            assert!(
+                plan.log
+                    .iter()
+                    .any(|l| l.starts_with("IPR 15|14 is in no aligner")),
+                "{:?}",
+                plan.log
+            );
+        }
+    }
+
+    /// A deterministic xorshift generator: a value in `[-1, 1)`.
+    struct Rng(u64);
+
+    impl Rng {
+        fn uniform(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1_u64 << 53) as f64 * 2.0 - 1.0
+        }
+    }
+
+    #[test]
+    fn random_plans_keep_every_step_within_its_limit() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let patterns = [
+            Pattern::Proportional,
+            Pattern::MaxVelocity,
+            Pattern::SequentialDistal,
+            Pattern::Structured,
+        ];
+        let mut plans = 0;
+        for case in 0..12 {
+            // a premolar, a premolar and a canine 8 mm apart: up to 1.5 mm and 12 degrees
+            let mut moves: Vec<ToothMove> = [15_u8, 14, 13]
+                .iter()
+                .enumerate()
+                .map(|(i, &n)| {
+                    let q: Q6 = std::array::from_fn(|c| {
+                        if c < 3 {
+                            1.5 * rng.uniform()
+                        } else {
+                            12f64.to_radians() * rng.uniform()
+                        }
+                    });
+                    tooth(n, 8.0 * i as f64, q)
+                })
+                .collect();
+            // a slowed tooth, and every fourth case re-planned from a delivered aligner
+            moves[case % 3].speed = 0.5 + 0.5 * rng.uniform().abs();
+            if case % 4 == 1 {
+                moves[0].q0 = Some(moves[0].q.map(|v| 0.3 * v));
+            }
+            for pattern in patterns {
+                let p = Params {
+                    pattern,
+                    collision: case % 2 == 0,
+                    ..Params::default()
+                };
+                let plan = plan_of(&moves, &p).unwrap();
+                assert!(
+                    plan.over_limit.is_empty(),
+                    "{case} {pattern:?}: {:?}",
+                    plan.over_limit
+                );
+                // checked again here, on every crown point, apart from the stats
+                for m in &moves {
+                    let (lim, cap) = tooth_limits(m, &p);
+                    let qs = &plan.q[&m.fdi];
+                    for w in qs.windows(2) {
+                        for c in 0..6 {
+                            let step = (w[1][c] - w[0][c]).abs();
+                            assert!(
+                                step <= lim[c] * (1.0 + 1e-9) + 1e-12,
+                                "{case} {pattern:?} {c}"
+                            );
+                        }
+                        let (a, b) = (local_pose(&w[0]), local_pose(&w[1]));
+                        let crown = m
+                            .pts
+                            .iter()
+                            .map(|&x| a.transform_point3(x).distance(b.transform_point3(x)))
+                            .fold(0.0, f64::max);
+                        assert!(crown <= cap + 1e-9, "{case} {pattern:?}: {crown} > {cap}");
+                    }
+                    // the last aligner reaches the target
+                    let last = qs.last().unwrap();
+                    assert!(
+                        (0..6).all(|c| (last[c] - m.q[c]).abs() < 1e-12),
+                        "{case} {pattern:?}"
+                    );
+                }
+                plans += 1;
+            }
+        }
+        assert_eq!(plans, 48);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A component from {-2, -0.6, -0.25, 0, 1e-10, 0.25, 0.6, 2}: no movement, one below
+    /// the threshold, exact multiples of the limits and values between them.
+    fn any_component() -> f64 {
+        match kani::any::<u8>() % 8 {
+            0 => -2.0,
+            1 => -0.6,
+            2 => -0.25,
+            3 => 0.0,
+            4 => 1e-10,
+            5 => 0.25,
+            6 => 0.6,
+            _ => 2.0,
+        }
+    }
+
+    /// A limit from {0.05, 0.25, 0.5}.
+    fn any_limit() -> f64 {
+        match kani::any::<u8>() % 3 {
+            0 => 0.05,
+            1 => 0.25,
+            _ => 0.5,
+        }
+    }
+
+    // Dividing a movement into the aligners `stages_needed` counts keeps every component within
+    // its limit per aligner, with the tolerance of the post-condition of the planning:
+    // |q_i| / n <= lim_i (1 + 1e-9) + 1e-12. The count is never above MAX_ALIGNERS, and it is
+    // 0 only when the movement is below 1e-9 in every component. Positive limits and cap, finite
+    // movement from the sets above, with or without a mask; no crown points (the crown cap only
+    // adds aligners, and the square roots of arbitrary points keep the solver busy).
+    #[kani::proof]
+    fn stages_needed_keeps_every_component_within_its_limit() {
+        let q: Q6 = std::array::from_fn(|_| any_component());
+        let lim: Q6 = std::array::from_fn(|_| any_limit());
+        let cap = any_limit();
+        let mask: [bool; 6] = kani::any();
+        let masked: bool = kani::any();
+        let mask = if masked { Some(&mask) } else { None };
+        let n = stages_needed(&q, &[], &lim, cap, mask);
+        assert!(n.is_some());
+        let n = n.unwrap_or(0);
+        assert!((0..=MAX_ALIGNERS).contains(&n));
+        for i in 0..6 {
+            let qi = match mask {
+                Some(m) if !m[i] => 0.0,
+                _ => q[i],
+            };
+            if n == 0 {
+                assert!(qi.abs() < 1e-9);
+            } else {
+                assert!(qi.abs() / n as f64 <= lim[i] * (1.0 + 1e-9) + 1e-12);
+            }
+        }
     }
 }

@@ -94,7 +94,7 @@ pub struct Params {
     /// (evidence `tracking_angular`).
     pub angular_deg: f64,
     /// Velocity factor of the teeth that are behind, in the new aligners
-    /// (evidence `lag_speed`).
+    /// (evidence `lag_speed`), inside [`LAG_SPEED`].
     pub lag_speed: f64,
     /// Repeat the registration of every tooth on the scan points that are
     /// closer to it than to its neighbours.
@@ -111,6 +111,10 @@ impl Default for Params {
         }
     }
 }
+
+/// Range of the velocity factor of the teeth that are behind (the plugin's
+/// `lag_speed` slider, `props.py:814`): smallest and largest value.
+pub const LAG_SPEED: (f64, f64) = (0.3, 1.0);
 
 // ---- numeric helpers ------------------------------------------------------------------------------------
 

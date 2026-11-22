@@ -4,10 +4,14 @@
 //! from its rest position to the setup into aligners, within the velocity
 //! limits of the evidence (or the case's settings, or the overrides of the
 //! command), with collision-free delays and the timing of the IPR. The
-//! aligners are stored in `AlignersState::stages`, and what the plan gave
+//! settings in force (the case's, with the overrides) must be inside the
+//! ranges of the plugin's sliders, like `aligners.settings.staging` asks:
+//! an override or a stored value outside them is refused before planning.
+//! The aligners are stored in `AlignersState::stages`, and what the plan gave
 //! for each arch (aligners, pattern, slowed teeth, collisions left,
 //! overcorrection) in `AlignersState::staging_results`; the result of the
-//! planning (pattern, aligners per tooth, collisions, notes) is returned.
+//! planning (pattern, aligners per tooth, collisions, notes, steps over a
+//! limit, IPR no aligner carries) is returned.
 //!
 //! Inputs from the case: the tooth frames (`aligners.teeth.frames`), the
 //! setup (`Setup::poses`, the final local pose of each tooth in its rest
@@ -46,7 +50,7 @@ use dca_algo::staging::{self, Complexity, IprPlan, Level, Pattern, Perio, ToothM
 use dca_algo::teeth::{self, Which};
 use dca_model::{
     AlignersState, INTERVAL_DAYS, IntervalPolicy, IprStep, MODULE_ID, PerioStage, Stage,
-    StagingPattern, StagingSummary, TOOTH_SPEED,
+    StagingPattern, StagingSettings, StagingSummary, TOOTH_SPEED,
 };
 use glam::{DMat4, DVec3};
 use schemars::JsonSchema;
@@ -137,7 +141,8 @@ pub(crate) struct ToothSpeedParams {
 }
 
 /// Parameters of the command: which arches, and overrides of the staging
-/// parameters (what is not given comes from the settings of the case).
+/// parameters (what is not given comes from the settings of the case). The
+/// numbers must be inside the ranges of `aligners.settings.staging`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Params {
@@ -149,38 +154,39 @@ pub(crate) struct Params {
     perio: Option<Perio>,
     /// Delay teeth that would collide with a neighbour.
     collision: Option<bool>,
-    /// Interpenetration of adjacent crowns tolerated at a stage (mm).
+    /// Interpenetration of adjacent crowns tolerated at a stage (0-0.5 mm).
     collision_tol_mm: Option<f64>,
     /// Increase the final movement by the overcorrection fractions.
     overcorrection: Option<bool>,
-    /// Largest translation per aligner (mm).
+    /// Largest translation per aligner (0.05-0.5 mm).
     step_linear_mm: Option<f64>,
-    /// Largest intrusion or extrusion per aligner (mm).
+    /// Largest intrusion or extrusion per aligner (0.05-0.5 mm).
     step_vertical_mm: Option<f64>,
-    /// Largest rotation per aligner (deg).
+    /// Largest rotation per aligner (0.25-4 degrees).
     step_rotation_deg: Option<f64>,
-    /// Largest rotation per aligner for canines and premolars (deg).
+    /// Largest rotation per aligner for canines and premolars (0.25-4
+    /// degrees).
     step_rotation_round_deg: Option<f64>,
-    /// Largest torque and tip per aligner (deg).
+    /// Largest torque and tip per aligner (0.1-3 degrees).
     step_angular_deg: Option<f64>,
-    /// Largest move of any crown point per aligner (mm).
+    /// Largest move of any crown point per aligner (0.05-0.6 mm).
     max_crown_step_mm: Option<f64>,
 }
 
 impl Params {
-    fn staging(&self, data: &AlignersState) -> staging::Params {
-        let mut p = staging::Params::from_settings(&data.settings.staging);
+    /// The staging parameters in force: the case's settings with the
+    /// overrides, refused when a number is outside its slider's range (an
+    /// override, or a value stored in the project file).
+    fn staging(&self, data: &AlignersState) -> Result<staging::Params, CommandError> {
+        let mut s = data.settings.staging;
         macro_rules! set {
             ($($field:ident),*) => {$(
-                if let Some(v) = self.$field { p.$field = v; }
+                if let Some(v) = self.$field { s.$field = v; }
             )*};
         }
         set!(
-            pattern,
-            perio,
-            collision,
-            collision_tol_mm,
             overcorrection,
+            collision_tol_mm,
             step_linear_mm,
             step_vertical_mm,
             step_rotation_deg,
@@ -188,7 +194,45 @@ impl Params {
             step_angular_deg,
             max_crown_step_mm
         );
-        p
+        if let Some(v) = self.collision {
+            s.collision_check = v;
+        }
+        check_staging_settings(&s)?;
+        let mut p = staging::Params::from_settings(&s);
+        if let Some(v) = self.pattern {
+            p.pattern = v;
+        }
+        if let Some(v) = self.perio {
+            p.perio = v;
+        }
+        Ok(p)
+    }
+}
+
+/// The error of the first numeric staging setting outside the range of its
+/// slider ([`StagingSettings::out_of_range`]); the same error for the
+/// settings command, the overrides of a run and the stored settings.
+pub(crate) fn check_staging_settings(s: &StagingSettings) -> Result<(), CommandError> {
+    match s.out_of_range() {
+        None => Ok(()),
+        Some((name, value, lo, hi)) => Err(messages::invalid(
+            "aligners-err-staging-settings-range",
+            &[
+                ("name", name),
+                ("value", &value.to_string()),
+                ("min", &lo.to_string()),
+                ("max", &hi.to_string()),
+            ],
+        )),
+    }
+}
+
+/// The command error of a staging error: stopped by the user, or input the
+/// planning refuses (a limit, a speed or a movement it cannot plan).
+pub(crate) fn staging_error(e: staging::StagingError) -> CommandError {
+    match e {
+        staging::StagingError::Cancelled => CommandError::Cancelled,
+        other => CommandError::Invalid(other.to_string()),
     }
 }
 
@@ -304,7 +348,7 @@ fn run_automatic(
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
     let mut data = aligners_data(state)?;
-    let sp = params.staging(&data);
+    let sp = params.staging(&data)?;
     let explicit = params.arch != Which::All;
     let mut report = serde_json::Map::new();
 
@@ -442,7 +486,7 @@ fn run_automatic(
             &sp,
             &mut progress,
         )
-        .map_err(|_| CommandError::Cancelled)?;
+        .map_err(staging_error)?;
 
         let new_stages = stages_of_plan(&plan, &ipr);
         merge_arch(&mut data.stages, arch, &new_stages, &seq);
@@ -488,8 +532,11 @@ fn run_automatic(
                 "speed": slowed.iter().map(|(f, s)| (f.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
                 "overcorrection": sp.overcorrection,
                 "ipr_stage": plan.ipr_stage.iter().map(|r| json!({"between": [r.a, r.b], "stage": r.stage})).collect::<Vec<_>>(),
+                // the plugin's stage of an IPR no aligner carries (0, or 1 of no aligners)
+                "ipr_unscheduled": plan.ipr_stage.iter().filter(|r| r.stage == 0 || r.stage > plan.n_stages).map(|r| json!({"between": [r.a, r.b], "stage": r.stage})).collect::<Vec<_>>(),
                 "unresolved": plan.unresolved,
                 "final_overlap": plan.final_overlap,
+                "over_limit": plan.over_limit,
                 "notes": plan.log,
             }),
         );
@@ -550,26 +597,8 @@ fn run_settings(
         collision_tol_mm,
         overcorrection,
     );
-    let range = |name: &str, value: String, lo: String, hi: String| {
-        messages::invalid(
-            "aligners-err-staging-settings-range",
-            &[
-                ("name", name),
-                ("value", &value),
-                ("min", &lo),
-                ("max", &hi),
-            ],
-        )
-    };
     // the sliders' ranges: a value outside them changes nothing
-    if let Some((name, value, lo, hi)) = new.out_of_range() {
-        return Err(range(
-            name,
-            value.to_string(),
-            lo.to_string(),
-            hi.to_string(),
-        ));
-    }
+    check_staging_settings(&new)?;
     let days = check_interval_days(patch.interval_days.unwrap_or(data.settings.interval_days))?;
     let start_date = match patch.start_date.as_deref().map(str::trim) {
         None => data.settings.start_date.clone(),
@@ -912,6 +941,85 @@ pub(crate) mod tests {
                 .len()
                 > n
         );
+    }
+
+    #[test]
+    fn overrides_outside_the_ranges_of_the_settings_are_refused() {
+        let s = staged_input("lower", &CaseState::default());
+        let refused = |state: &CaseState, params: Value| match exec(STAGING, state, params.clone())
+        {
+            Err(CommandError::Invalid(msg)) => msg,
+            other => panic!("{params}: {:?}", other.err()),
+        };
+        // a cap of 0 (read as no cap) and 40 times the limits: the whole movement in one aligner
+        let msg = refused(
+            &s,
+            json!({
+                "max_crown_step_mm": 0,
+                "step_linear_mm": 10,
+                "step_vertical_mm": 10,
+                "step_rotation_deg": 90,
+                "step_rotation_round_deg": 90,
+                "step_angular_deg": 90
+            }),
+        );
+        assert!(
+            msg.contains("step_linear_mm") && msg.contains("0.5"),
+            "{msg}"
+        );
+        // a limit of 0 was an infinite count of aligners and a panic
+        let msg = refused(&s, json!({ "step_linear_mm": 0 }));
+        assert!(
+            msg.contains("step_linear_mm") && msg.contains("0.05"),
+            "{msg}"
+        );
+        for (name, v) in [
+            ("max_crown_step_mm", 0.0),
+            ("collision_tol_mm", -0.1),
+            ("step_rotation_deg", 4.5),
+            ("step_angular_deg", 0.05),
+        ] {
+            let msg = refused(&s, json!({ name: v }));
+            assert!(msg.contains(name), "{msg}");
+        }
+        // the settings stored in the project file are checked as well
+        let mut data = data_of(&s);
+        data.settings.staging.max_crown_step_mm = 0.0;
+        let mut stored = s.clone();
+        stored.set_module(MODULE_ID, ModuleState::new(data));
+        let msg = refused(&stored, Value::Null);
+        assert!(msg.contains("max_crown_step_mm"), "{msg}");
+        // inside the ranges the overrides plan, with no step over its limit
+        let (_, out) = exec(
+            STAGING,
+            &s,
+            json!({ "step_linear_mm": 0.5, "max_crown_step_mm": 0.6, "step_rotation_deg": 4, "collision": false }),
+        )
+        .unwrap();
+        assert!(out["lower"]["aligners"].as_u64().unwrap() >= 1);
+        assert_eq!(out["lower"]["over_limit"], json!([]));
+        assert_eq!(out["lower"]["ipr_unscheduled"], json!([]));
+    }
+
+    #[test]
+    fn a_stored_speed_outside_its_range_is_refused() {
+        let s = staged_input("lower", &CaseState::default());
+        let mut data = data_of(&s);
+        let f = *data.setup.poses.keys().next().unwrap();
+        for speed in [-0.5, 1e-300, 1e-6] {
+            data.tooth_speed.insert(f, speed);
+            let mut stored = s.clone();
+            stored.set_module(MODULE_ID, ModuleState::new(data.clone()));
+            match exec(STAGING, &stored, Value::Null) {
+                Err(CommandError::Invalid(msg)) => {
+                    assert!(
+                        msg.contains(&f.to_string()) && msg.contains("speed"),
+                        "{msg}"
+                    )
+                }
+                other => panic!("{speed}: {:?}", other.err()),
+            }
+        }
     }
 
     #[test]

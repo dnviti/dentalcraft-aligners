@@ -110,6 +110,12 @@ pub fn arch_of(fdi: Fdi) -> Arch {
     Arch::of(fdi)
 }
 
+/// A permanent tooth (quadrants 1–4): the arch tables hold only these, a
+/// deciduous tooth (51–85) has no place in them.
+pub fn is_permanent(fdi: Fdi) -> bool {
+    quadrant(fdi) <= 4
+}
+
 /// Patient's right side (quadrants 1 and 4).
 pub fn is_right(fdi: Fdi) -> bool {
     fdi.is_right()

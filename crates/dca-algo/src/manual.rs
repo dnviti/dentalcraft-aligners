@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub use clean::{CleanReport, clean_labels};
 pub use fill::{FillParams, fill_region};
 pub use margin::{MarginLine, Polyline, margin_line};
-pub use region::{RegionReport, check_region};
+pub use region::{RegionIssue, RegionReport, check_region};
 
 /// A vertex is painted when `cos(normal, view)` is below this: the surface
 /// faces the viewer (`manual.FRONT_LIMIT`).

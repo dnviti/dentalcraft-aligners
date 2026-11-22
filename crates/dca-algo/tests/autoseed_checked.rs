@@ -80,7 +80,12 @@ fn teeth(seeds: &[dca_model::Seed]) -> Vec<Fdi> {
 /// The seeds that are not on their own crown (the nearest vertex carries
 /// another label).
 fn off_crown(d: &demo::Demo, v: &[DVec3], seeds: &[dca_model::Seed]) -> Vec<Fdi> {
-    let labels = d.mesh.vertex_labels.as_ref().unwrap();
+    off_crown_in(d.mesh.vertex_labels.as_ref().unwrap(), v, seeds)
+}
+
+/// [`off_crown`] with the label of each of the first `labels.len()`
+/// vertices of `v`.
+fn off_crown_in(labels: &[u16], v: &[DVec3], seeds: &[dca_model::Seed]) -> Vec<Fdi> {
     seeds
         .iter()
         .filter(|s| {
@@ -97,12 +102,71 @@ fn off_crown(d: &demo::Demo, v: &[DVec3], seeds: &[dca_model::Seed]) -> Vec<Fdi>
         .collect()
 }
 
+/// A demo arch with erupted third molars, one of them (the first tooth of
+/// the arch order when `first`, else the last) taken out and replaced by a
+/// bulge of gum behind the second molar, its top `below` mm under the
+/// molar's top. The true teeth, the label of each demo vertex left, the
+/// mesh.
+fn arch_with_one_third_molar(
+    arch: Arch,
+    seed: u64,
+    first: bool,
+    below: f64,
+) -> (Vec<Fdi>, Vec<u16>, Vec<DVec3>, Vec<[u32; 3]>) {
+    let d = demo::run(&demo::Params {
+        arch,
+        severity: Severity::Mild,
+        seed,
+        third_molars: true,
+    });
+    let labels = d.mesh.vertex_labels.as_ref().unwrap();
+    let n = d.seeds.len();
+    let (gone, last, next) = if first {
+        (0, 1, 2)
+    } else {
+        (n - 1, n - 2, n - 3)
+    };
+    let fdi = u16::from(d.seeds[gone].fdi.get());
+    let mut index = vec![u32::MAX; labels.len()];
+    let mut v = Vec::new();
+    let mut kept = Vec::new();
+    for (i, (p, &l)) in d.mesh.positions.iter().zip(labels).enumerate() {
+        if l != fdi {
+            index[i] = v.len() as u32;
+            v.push(p.as_dvec3());
+            kept.push(l);
+        }
+    }
+    let mut t: Vec<[u32; 3]> = d
+        .mesh
+        .tris
+        .iter()
+        .filter(|f| f.iter().all(|&i| index[i as usize] != u32::MAX))
+        .map(|f| f.map(|i| index[i as usize]))
+        .collect();
+    let (p, q) = (d.seeds[last].position, d.seeds[next].position);
+    let u = (p - q).truncate().normalize();
+    let c = p + (u * 10.0).extend(-below - 3.0);
+    let (bv, bt) = ellipsoid(c, u, 4.5, 4.0, 3.0);
+    let base = v.len() as u32;
+    v.extend(bv);
+    t.extend(bt.iter().map(|f| f.map(|i| i + base)));
+    let truth = d
+        .seeds
+        .iter()
+        .map(|s| s.fdi)
+        .filter(|f| u16::from(f.get()) != fdi)
+        .collect();
+    (truth, kept, v, t)
+}
+
 fn checked(arch: Arch, v: &[DVec3], t: &[[u32; 3]], missing: &[u8]) -> autoseed::Output {
     autoseed::run(
         &Input {
             arch,
             vertices: v,
             triangles: t,
+            occlusal_flipped: false,
         },
         &Params {
             missing: missing.to_vec(),
@@ -182,6 +246,40 @@ fn erupted_third_molars_are_kept() {
         assert_eq!(teeth(&out.seeds), teeth(&d.seeds), "{name}");
         assert_eq!(off_crown(&d, &v, &out.seeds), Vec::<Fdi>::new(), "{name}");
         assert!(out.diagnostics.checked.is_none(), "{name}");
+    }
+}
+
+/// An erupted third molar on one side and a bulge of gum behind the last
+/// molar on the other, upper and lower, either side: the plugin numbers
+/// the bulge as a third molar; the checked proposal keeps the erupted
+/// third molar (a crown) and leaves the bulge out.
+#[test]
+fn one_erupted_third_molar_keeps_only_its_side() {
+    for (arch, seed) in [(Arch::Lower, 3), (Arch::Upper, 5)] {
+        for first in [true, false] {
+            let name = format!("{arch:?} seed {seed} bulge first {first}");
+            let (truth, labels, v, t) = arch_with_one_third_molar(arch, seed, first, 1.0);
+            let plugin = autoseed::propose(&v, &t, arch, &Options::default(), None).unwrap();
+            assert_eq!(
+                plugin
+                    .seeds
+                    .iter()
+                    .filter(|s| s.fdi.get() % 10 == 8)
+                    .count(),
+                2,
+                "{name}: the plugin numbers the bulge as a third molar"
+            );
+            let out = checked(arch, &v, &t, &[]);
+            assert_eq!(teeth(&out.seeds), truth, "{name}");
+            assert_eq!(
+                off_crown_in(&labels, &v, &out.seeds),
+                Vec::<Fdi>::new(),
+                "{name}"
+            );
+            let check = out.diagnostics.checked.as_ref().expect("checked");
+            assert!(check.doubts.contains(&Doubt::ThirdMolar), "{name}");
+            assert_eq!(check.plugin_teeth.len(), truth.len() + 1, "{name}");
+        }
     }
 }
 

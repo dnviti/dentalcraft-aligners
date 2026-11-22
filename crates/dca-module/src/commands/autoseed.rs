@@ -160,6 +160,10 @@ fn run_numbering(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    // deciduous teeth are not supported: refused by name, never ignored
+    for &n in &params.missing {
+        crate::manual::common::fdi_of(n)?;
+    }
     // the teeth marked missing by hand (the manual tools) stay missing
     let mut missing = params.missing.clone();
     missing.extend(aligners_data(state)?.missing.iter().map(|f| f.get()));
@@ -210,6 +214,7 @@ fn run_numbering(
             arch,
             vertices: &vertices,
             triangles: &mesh.tris,
+            occlusal_flipped: data.occlusal_flipped.contains(&arch.role()),
         };
         let out = match autoseed::run(&input, &algo) {
             Ok(out) => out,
@@ -340,6 +345,18 @@ pub(crate) mod tests {
             .unwrap()
             .seeds
             .clone()
+    }
+
+    /// A deciduous tooth among the missing ones is refused by name, before
+    /// any work.
+    #[test]
+    fn numbering_refuses_a_deciduous_missing_tooth() {
+        let s = demo_state("lower", 3);
+        let e = numbering(&s, json!({ "arch": "lower", "missing": [75] })).unwrap_err();
+        assert!(
+            matches!(&e, CommandError::Invalid(m) if m.contains("75") && m.contains("deciduous")),
+            "{e}"
+        );
     }
 
     #[test]

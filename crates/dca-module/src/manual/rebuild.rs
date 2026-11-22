@@ -129,7 +129,7 @@ pub(crate) fn run_rebuild(
         .collect();
     let report = manual::check_region(&scan, &labels, f, &arch_vertices);
     if !report.errors.is_empty() {
-        return Err(invalid(report.message(f)));
+        return Err(invalid(super::region::region_message(&report, f)));
     }
 
     // labels first, then the measures of the arch and the solid of the tooth
@@ -180,7 +180,7 @@ pub(crate) fn run_rebuild(
             "arch": arch_name(arch),
             "labels_changed": changed,
             "region": report,
-            "message": report.message(f),
+            "message": super::region::region_message(&report, f),
             "setup_outdated": moved,
             "solid": closed,
         }),

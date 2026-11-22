@@ -12,12 +12,12 @@
 //! check and report commands): this is the data of the "Show the region" view
 //! of the 3D teeth, which the window draws without running the command.
 
-use dc_case::CaseState;
+use dc_case::{CaseState, Fdi};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::CommandOutput;
 use dca_algo::anatomy::Arch;
 use dca_algo::frame;
-use dca_algo::manual::{self, Scan};
+use dca_algo::manual::{self, RegionIssue, RegionReport, Scan};
 use glam::DVec3;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -25,6 +25,93 @@ use serde_json::{Map, Value, json};
 
 use super::common::{arch_labels, arch_name, arch_to_case, data_of, fdi_of};
 use crate::commands::messages;
+
+/// The check of a region in one line for the user: the errors, or the size
+/// of the region and its warnings.
+pub(crate) fn region_message(r: &RegionReport, f: Fdi) -> String {
+    let fdi = f.to_string();
+    let list = |issues: &[RegionIssue]| {
+        issues
+            .iter()
+            .map(|i| issue_text(i, f))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    if !r.errors.is_empty() {
+        return messages::tr(
+            "aligners-region-refused",
+            &[("fdi", &fdi), ("issues", &list(&r.errors))],
+        );
+    }
+    let summary = messages::tr(
+        "aligners-region-summary",
+        &[
+            ("fdi", &fdi),
+            ("vertices", &r.vertices.to_string()),
+            ("area", &format!("{:.0}", r.area_mm2)),
+            ("width", &format!("{:.1}", r.width_mm)),
+        ],
+    );
+    if r.warnings.is_empty() {
+        return summary;
+    }
+    messages::tr(
+        "aligners-region-warned",
+        &[("summary", &summary), ("issues", &list(&r.warnings))],
+    )
+}
+
+/// One issue of the check of the region of tooth `f`, in words.
+fn issue_text(i: &RegionIssue, f: Fdi) -> String {
+    let mm = |x: f64| format!("{x:.1}");
+    let pct = |x: f64| format!("{x:.0}");
+    match *i {
+        RegionIssue::NoRegion => {
+            messages::tr("aligners-region-no-region", &[("fdi", &f.to_string())])
+        }
+        RegionIssue::TooSmall {
+            area_mm2,
+            width_mm,
+            typical_mm,
+        } => messages::tr(
+            "aligners-region-too-small",
+            &[
+                ("fdi", &f.to_string()),
+                ("area", &pct(area_mm2)),
+                ("width", &mm(width_mm)),
+                ("typical", &mm(typical_mm)),
+            ],
+        ),
+        RegionIssue::TooLow { height_mm } => {
+            messages::tr("aligners-region-too-low", &[("height", &mm(height_mm))])
+        }
+        RegionIssue::TooWide {
+            width_mm,
+            typical_mm,
+        } => messages::tr(
+            "aligners-region-too-wide",
+            &[("width", &mm(width_mm)), ("typical", &mm(typical_mm))],
+        ),
+        RegionIssue::Split { parts, share_pct } => messages::tr(
+            "aligners-region-split",
+            &[("parts", &parts.to_string()), ("share", &pct(share_pct))],
+        ),
+        RegionIssue::OnBorder { share_pct } => {
+            messages::tr("aligners-region-on-border", &[("share", &pct(share_pct))])
+        }
+        RegionIssue::TouchesBorder { vertices } => messages::tr(
+            "aligners-region-touches-border",
+            &[("vertices", &vertices.to_string())],
+        ),
+        RegionIssue::BigHole { outline_mm } => {
+            messages::tr("aligners-region-big-hole", &[("outline", &mm(outline_mm))])
+        }
+        RegionIssue::Holes { count, outline_mm } => messages::tr(
+            "aligners-region-holes",
+            &[("count", &count.to_string()), ("outline", &mm(outline_mm))],
+        ),
+    }
+}
 
 /// Parameters of the query of the region of one tooth.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -97,8 +184,14 @@ pub(crate) fn run_region(
         .collect();
     margin.insert("loops".to_owned(), Value::Array(summary));
     let message = match &region {
-        Some(r) => r.message(f),
-        None => format!("Tooth {f}: {} vertices", inside.len()),
+        Some(r) => region_message(r, f),
+        None => messages::tr(
+            "aligners-region-vertices",
+            &[
+                ("fdi", &f.to_string()),
+                ("vertices", &inside.len().to_string()),
+            ],
+        ),
     };
     let mut out = Map::new();
     out.insert("fdi".to_owned(), json!(f.get()));

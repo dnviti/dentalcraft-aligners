@@ -120,6 +120,10 @@ pub enum ReconstructError {
     /// Every closing of the tooth gave vertices that are not finite numbers.
     #[error("tooth {0} could not be closed: every closing gives non-finite vertices")]
     NotFinite(u16),
+    /// Every closing of the tooth left a hole or an edge of more than two
+    /// faces: no closed solid.
+    #[error("tooth {0} could not be closed: every closing leaves a hole or a non-manifold edge")]
+    NotClosed(u16),
     /// The caller asked to stop; nothing was produced.
     #[error("cancelled")]
     Cancelled,
@@ -349,15 +353,12 @@ fn closed_tooth_with(
     // the long axis first; when that solid folds, the other axes together
     // (each attempt is independent, the choice below is the sequential one)
     let first = attempt(0);
-    let rest: Vec<_> = if first.folds == Some(0) {
+    let rest: Vec<_> = if first.folds == Some(0) && first.closed {
         Vec::new()
     } else {
         (1..axes.len()).into_par_iter().map(attempt).collect()
     };
-    let (best, last) = choose(std::iter::once(first).chain(rest));
-    let Some((k, best)) = best else {
-        return Err(ReconstructError::NotFinite(f));
-    };
+    let (k, best, last) = pick(std::iter::once(first).chain(rest).collect(), f)?;
     Ok(ClosedTooth {
         info: ClosedInfo {
             crown_vertices: patch.vertices.len(),
@@ -388,6 +389,41 @@ struct Attempt {
     /// Faces crossing another face; `None` when a vertex is not finite (the
     /// solid is unusable and its crossings cannot be counted).
     folds: Option<usize>,
+    /// Every edge is shared by exactly two faces ([`is_closed`]).
+    closed: bool,
+}
+
+/// Every edge of the faces `t` is shared by exactly two of them: the solid
+/// is watertight (no hole) and every edge is manifold. One pass over the
+/// sorted edges.
+fn is_closed(t: &[[u32; 3]]) -> bool {
+    let mut edges: Vec<(u32, u32)> = t
+        .iter()
+        .flat_map(|f| [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])].map(|(a, b)| (a.min(b), a.max(b))))
+        .collect();
+    edges.sort_unstable();
+    !edges.is_empty() && edges.chunk_by(|a, b| a == b).all(|c| c.len() == 2)
+}
+
+/// The attempt kept for tooth `f` ([`choose`]), its axis index and the
+/// counters of the last attempt looked at. A solid that is not closed (a
+/// hole left by a boundary chain that did not close, an edge of more than
+/// two faces) is never kept: the next axis is taken, and when no attempt
+/// is closed the tooth fails with [`ReconstructError::NotClosed`] (with
+/// [`ReconstructError::NotFinite`] when none was even finite), never an
+/// open tooth.
+fn pick(attempts: Vec<Attempt>, f: u16) -> Result<(usize, Attempt, Stats), ReconstructError> {
+    let open = attempts.iter().any(|a| a.folds.is_some() && !a.closed);
+    let keep = |a: &Attempt| a.closed || a.folds.is_none();
+    let axis: Vec<usize> = (0..attempts.len())
+        .filter(|&i| keep(&attempts[i]))
+        .collect();
+    let (best, last) = choose(attempts.into_iter().filter(keep));
+    match best {
+        Some((j, a)) => Ok((axis[j], a, last)),
+        None if open => Err(ReconstructError::NotClosed(f)),
+        None => Err(ReconstructError::NotFinite(f)),
+    }
 }
 
 impl Attempt {
@@ -396,12 +432,14 @@ impl Attempt {
             .iter()
             .all(|p| p.is_finite())
             .then(|| geom::self_intersections(&vertices, &tris));
+        let closed = is_closed(&tris);
         Self {
             vertices,
             tris,
             filled,
             stats,
             folds,
+            closed,
         }
     }
 }
@@ -1187,6 +1225,54 @@ mod tests {
         assert_eq!(last.despiked, 2);
         let (best, _) = choose([attempt("folded", 9, 0), attempt("folded", 3, 1)]);
         assert_eq!(best.map(|(k, b)| (k, b.filled)), Some((1, 3)));
+    }
+
+    /// The closed-solid gate: every edge shared by exactly two faces.
+    #[test]
+    fn only_a_solid_whose_edges_have_two_faces_is_closed() {
+        let tetra = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
+        assert!(is_closed(&tetra));
+        // a hole: one face gone
+        assert!(!is_closed(&tetra[..3]));
+        // a bowtie patch: two triangles touching at one vertex, all border
+        assert!(!is_closed(&[[0, 1, 2], [0, 3, 4]]));
+        // a non-manifold edge: a third face on the edge 0-1
+        let mut fin = tetra.to_vec();
+        fin.push([0, 1, 4]);
+        assert!(!is_closed(&fin));
+        assert!(!is_closed(&[]));
+    }
+
+    /// An open solid is never kept, even without crossings and with the
+    /// fewest added vertices: the next closed axis is; none closed, the
+    /// tooth fails by name instead of coming out open.
+    #[test]
+    fn an_open_solid_is_never_kept() {
+        let open = |filled: usize, tag: usize| {
+            let mut a = attempt("closed", filled, tag);
+            a.tris.pop();
+            Attempt::new(a.vertices, a.tris, filled, a.stats)
+        };
+        let hole = open(1, 0);
+        assert_eq!((hole.folds, hole.closed), (Some(0), false));
+        let (k, best, last) = pick(vec![hole, attempt("closed", 5, 1)], 36).unwrap();
+        assert_eq!((k, best.filled, best.closed), (1, 5, true));
+        assert_eq!(last.despiked, 1);
+        // the axis index stays the one of the attempt, past the skipped ones
+        let (k, ..) = pick(
+            vec![attempt("nan", 0, 0), open(1, 1), attempt("closed", 5, 2)],
+            36,
+        )
+        .unwrap();
+        assert_eq!(k, 2);
+        assert!(matches!(
+            pick(vec![open(1, 0), attempt("folded", 0, 1)], 36),
+            Err(ReconstructError::NotClosed(36))
+        ));
+        assert!(matches!(
+            pick(vec![attempt("nan", 0, 0)], 36),
+            Err(ReconstructError::NotFinite(36))
+        ));
     }
 
     /// Three teeth asked on a scan that has none of them: every tooth fails

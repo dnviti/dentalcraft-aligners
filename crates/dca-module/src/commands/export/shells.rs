@@ -108,6 +108,18 @@ pub(crate) struct ShellProvider<'a> {
     notes: Mutex<Vec<Note>>,
     /// The reach of every aligner made (EQUATOR border), for its print check.
     reaches: Mutex<BTreeMap<(Arch, u32), printcheck::Reach>>,
+    /// The shell of the last stage of an arch without its stamp, for the
+    /// passive aligners (stamped on it one by one).
+    passive_base: Mutex<BTreeMap<(Arch, u32), PassiveBase>>,
+}
+
+/// The last shell of an arch, before its stamp (arch coordinates).
+struct PassiveBase {
+    mesh: TriMesh,
+    /// The defects of its file, when known.
+    base: Option<Defects>,
+    /// The teeth where the stamp can go.
+    sites: Vec<ToothSite>,
 }
 
 fn rigid(m: &DMat4, mesh: &TriMesh) -> TriMesh {
@@ -204,7 +216,17 @@ impl<'a> ShellProvider<'a> {
             n_upper,
             notes: Mutex::new(notes),
             reaches: Mutex::new(BTreeMap::new()),
+            passive_base: Mutex::new(BTreeMap::new()),
         }))
+    }
+
+    /// The last active stage of an arch.
+    fn last(&self, arch: Arch) -> u32 {
+        if arch.is_upper() {
+            self.n_upper
+        } else {
+            self.n_lower
+        }
     }
 
     fn note(&self, arch: Arch, k: u32, aligner: bool, key: &'static str, detail: String) {
@@ -344,17 +366,18 @@ impl<'a> ShellProvider<'a> {
     }
 
     /// The stamp on `mesh` (arch coordinates), on one of the `covered`
-    /// teeth of `sites`: the mesh stamped and the file it makes (`land`: the
-    /// mesh in case coordinates), or `None` with a note (no room). A text
-    /// that would fold the surface (more self-intersections or triangles of
-    /// no area in the file than `base`, those of the file of `mesh` when
-    /// known) is not kept: the next tooth is tried.
+    /// teeth of `sites`, for aligner `k` (`passive`: a passive aligner, its
+    /// own number with the `P`): the mesh stamped and the file it makes
+    /// (`land`: the mesh in case coordinates), or `None` with a note (no
+    /// room). A text that would fold the surface (more self-intersections or
+    /// triangles of no area in the file than `base`, those of the file of
+    /// `mesh` when known) is not kept: the next tooth is tried.
     fn stamped(
         &self,
         mesh: &TriMesh,
         base_known: Option<Defects>,
         land: &dyn Fn(&TriMesh) -> TriMesh,
-        (arch, k): (Arch, u32),
+        (arch, k, passive): (Arch, u32, bool),
         kind: stamp::Kind,
         (sites, covered): (Vec<ToothSite>, &std::collections::BTreeSet<Fdi>),
     ) -> Option<(TriMesh, TriMesh)> {
@@ -370,23 +393,12 @@ impl<'a> ShellProvider<'a> {
                 return None;
             }
         };
-        let date = self
-            .options
-            .stamp_dates
-            .get(&(arch, k))
-            .unwrap_or(&self.options.date);
-        let params = stamp::Params {
-            number: k,
-            code: stamp::clean_code(&self.options.stamp_code),
-            date: Some(date.to_iso()),
-            clearance: if aligner {
-                self.design.clearance_mm
-            } else {
-                0.0
-            },
-            kind,
-            ..case
+        let clearance = if aligner {
+            self.design.clearance_mm
+        } else {
+            0.0
         };
+        let params = stamp_params(case, &self.options, (arch, k, passive), kind, clearance);
         let input = stamp::Input {
             mesh,
             arch,
@@ -459,6 +471,29 @@ fn check(mesh: &TriMesh, min_wall: Option<f64>) -> printcheck::PrintCheck {
             ..printcheck::CheckOptions::default()
         },
     )
+}
+
+/// The stamp of aligner `k` from the stamp of the case settings `case`: its
+/// own number, the passive mark (`P`) of a passive aligner, its own date (the
+/// first day of the aligner when the case asks for it, else the day of the
+/// export), the case code (the plugin's `case_stamp.stamp_mesh`).
+fn stamp_params(
+    case: stamp::Params,
+    options: &Options,
+    (arch, k, passive): (Arch, u32, bool),
+    kind: stamp::Kind,
+    clearance: f64,
+) -> stamp::Params {
+    let date = options.stamp_dates.get(&(arch, k)).unwrap_or(&options.date);
+    stamp::Params {
+        number: k,
+        passive,
+        code: stamp::clean_code(&options.stamp_code),
+        date: Some(date.to_iso()),
+        clearance,
+        kind,
+        ..case
+    }
 }
 
 /// The plan boxes of the ramps (their coordinates), grown by `reach`: the
@@ -544,7 +579,7 @@ impl MeshProvider for ShellProvider<'_> {
             &local,
             Some(base),
             &land,
-            (arch, k),
+            (arch, k, false),
             stamp::Kind::Model,
             (sites, &print.covered),
         );
@@ -734,11 +769,26 @@ impl MeshProvider for ShellProvider<'_> {
                     .map(|all| self.stamp_sites(&all, &g, &to_arch))
                     .unwrap_or_default()
             };
+            // the last stage without its stamp: the passive aligners are
+            // stamped on it, each with its own number and date
+            if k == self.last(arch) {
+                self.passive_base
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        (arch, k),
+                        PassiveBase {
+                            mesh: mesh.clone(),
+                            base,
+                            sites: sites.clone(),
+                        },
+                    );
+            }
             if let Some((done, landed)) = self.stamped(
                 &mesh,
                 base,
                 &land,
-                (arch, k),
+                (arch, k, false),
                 stamp::Kind::Shell,
                 (sites, &print.covered),
             ) {
@@ -763,6 +813,45 @@ impl MeshProvider for ShellProvider<'_> {
         Ok(Some(file.unwrap_or_else(|| land(&mesh))))
     }
 
+    fn passive(&self, arch: Arch, last: u32, number: u32) -> Result<Option<TriMesh>, ExportError> {
+        // no stamp: the file of the last stage, copied (the plugin)
+        if !self.options.stamp {
+            return Ok(None);
+        }
+        let Some(print) = self.prints.get(&arch) else {
+            return Ok(None);
+        };
+        self.stop()?;
+        let cached = |s: &Self| {
+            s.passive_base
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(arch, last))
+        };
+        // the last shell was not built by this provider: built once now
+        if !cached(self) {
+            self.aligner(arch, last)?;
+            if !cached(self) {
+                return Ok(None);
+            }
+        }
+        let bases = self.passive_base.lock().unwrap_or_else(|e| e.into_inner());
+        let b = &bases[&(arch, last)];
+        let from_arch = dca_algo::frame::rigid_inverse(&print.to_arch());
+        let land = |s: &TriMesh| rigid(&from_arch, s);
+        let file = self
+            .stamped(
+                &b.mesh,
+                b.base,
+                &land,
+                (arch, number, true),
+                stamp::Kind::Shell,
+                (b.sites.clone(), &print.covered),
+            )
+            .map_or_else(|| land(&b.mesh), |(_, file)| file);
+        Ok(Some(file))
+    }
+
     fn reach(&self, arch: Arch, k: u32) -> Option<printcheck::Reach> {
         self.reaches
             .lock()
@@ -783,5 +872,61 @@ impl MeshProvider for ShellProvider<'_> {
         // (a narrow band around the surfaces): about 3 GB at 0.1 mm
         let v = self.params.shell_voxel_mm;
         Some(((v / 0.1).powi(2) * 4.0).floor().clamp(2.0, 64.0) as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_passive_aligner_is_stamped_with_its_own_number_mark_and_date() {
+        let day = |s: &str| Date::parse(s).unwrap();
+        let options = Options {
+            voxel_mm: 0.2,
+            tolerance_mm: 0.02,
+            stamp: true,
+            stamp_code: "ab-12".to_owned(),
+            date: day("2026-03-01"),
+            stamp_dates: [
+                ((Arch::Upper, 5), day("2026-03-29")),
+                ((Arch::Upper, 6), day("2026-04-05")),
+                ((Arch::Upper, 7), day("2026-04-12")),
+            ]
+            .into_iter()
+            .collect(),
+            cancel: dc_command::CancelToken::new(),
+            checked: true,
+        };
+        let case = stamp::Params::default();
+        let at = |k, passive| {
+            stamp_params(
+                case.clone(),
+                &options,
+                (Arch::Upper, k, passive),
+                stamp::Kind::Shell,
+                0.1,
+            )
+        };
+        let last = at(5, false);
+        let p6 = at(6, true);
+        let p7 = at(7, true);
+        assert_eq!((last.number, last.passive), (5, false));
+        assert_eq!((p6.number, p6.passive), (6, true));
+        assert_eq!((p7.number, p7.passive), (7, true));
+        assert_eq!(last.date.as_deref(), Some("2026-03-29"));
+        assert_eq!(p6.date.as_deref(), Some("2026-04-05"));
+        assert_eq!(p7.date.as_deref(), Some("2026-04-12"));
+        assert_eq!(p6.code, "AB-12");
+        // the first line of the text: the plugin's `label_lines` ('SUP 21 P')
+        let first = |p: &stamp::Params| {
+            stamp::label_lines(&p.text, Arch::Upper, p.number, p.passive, "", &p.code).unwrap()[0]
+                .clone()
+        };
+        assert_eq!(first(&last), "SUP 05");
+        assert_eq!(first(&p6), "SUP 06 P");
+        assert_eq!(first(&p7), "SUP 07 P");
+        // no date of its own: the day of the export
+        assert_eq!(at(9, true).date.as_deref(), Some("2026-03-01"));
     }
 }

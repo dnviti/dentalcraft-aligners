@@ -69,8 +69,19 @@ impl Default for CheckOptions {
     }
 }
 
-/// Build volume of the default printer (Formlabs Form 3: 145 x 145 x 185 mm).
-pub const DEFAULT_PLATE_MM: [f64; 3] = [145.0, 145.0, 185.0];
+/// Build plate of the default printer, the one the print popup prepares
+/// (Elegoo Saturn 4 Ultra 16K, `dc-print` `PrinterProfile::saturn_4_ultra_16k`:
+/// 211.68 x 118.37 x 220 mm), less the margin its nesting keeps from every
+/// edge (`dc-print` `LayoutParams::default`, 4 mm) in X and Y: the room a
+/// part has on the plate. dca-algo does not depend on dc-print (core): keep
+/// these figures in step with the profile.
+pub const PLATE_MARGIN_MM: f64 = 4.0;
+/// See [`PLATE_MARGIN_MM`].
+pub const DEFAULT_PLATE_MM: [f64; 3] = [
+    211.68 - 2.0 * PLATE_MARGIN_MM,
+    118.37 - 2.0 * PLATE_MARGIN_MM,
+    220.0,
+];
 
 /// Something that makes a file unfit to print.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1070,6 +1081,22 @@ pub(crate) mod tests {
                 .iter()
                 .any(|p| matches!(p, Problem::TooThin { .. }))
         );
+    }
+
+    #[test]
+    fn the_default_plate_is_the_saturn_inside_its_margin() {
+        let p = DEFAULT_PLATE_MM;
+        assert!(
+            (p[0] - 203.68).abs() < 1e-9 && (p[1] - 110.37).abs() < 1e-9,
+            "{p:?}"
+        );
+        assert_eq!(p[2], 220.0);
+        // 115 mm fits a 145 mm Form 3 plate but not the 118.37 mm Saturn side
+        // less its margins, in either turn
+        let c = check(&cube(Vec3::ZERO, 115.0), &opts());
+        assert_eq!(c.fits_plate, Some(false));
+        let c = check(&cube(Vec3::ZERO, 105.0), &opts());
+        assert_eq!(c.fits_plate, Some(true));
     }
 
     #[test]

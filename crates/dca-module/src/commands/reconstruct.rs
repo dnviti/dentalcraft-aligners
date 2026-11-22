@@ -217,6 +217,13 @@ fn run_automatic(
         )
         .map_err(|e| match e {
             reconstruct::ReconstructError::Cancelled => CommandError::Cancelled,
+            reconstruct::ReconstructError::NotClosed(f) => CommandError::Failed(messages::tr(
+                "aligners-err-tooth-not-closed",
+                &[
+                    ("fdi", &f.to_string()),
+                    ("arch", &messages::arch_word(arch)),
+                ],
+            )),
             e => CommandError::Failed(format!("{} arch: {e}", arch_name(arch))),
         })?;
         ctx.check_cancelled()?;

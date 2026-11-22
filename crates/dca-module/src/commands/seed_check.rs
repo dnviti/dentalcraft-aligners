@@ -229,6 +229,21 @@ fn describe_note(n: &NumberNote) -> String {
     }
 }
 
+/// The teeth the renumbering leaves out: those of the parameters and the
+/// ones marked missing by hand (the manual tools), as the numbering does.
+fn missing_of(state: &CaseState, params: &CheckParams) -> Result<Vec<u16>, CommandError> {
+    let mut missing: Vec<u16> = params.missing.iter().map(|&m| u16::from(m)).collect();
+    missing.extend(
+        aligners_data(state)?
+            .missing
+            .iter()
+            .map(|f| u16::from(f.get())),
+    );
+    missing.sort_unstable();
+    missing.dedup();
+    Ok(missing)
+}
+
 fn check(scan: &Scan, arch: Arch, data: &autoseed::ArchData) -> Report {
     seed_check::check_teeth(&scan.vertices, &scan.tris, &scan.labels, arch, data)
 }
@@ -245,9 +260,15 @@ fn check_arch(
     let Some(scan) = scan_of(state, arch)? else {
         return Ok(None);
     };
-    // the arch curve of the scan (as the numbering computes it): the same
-    // scan for every round, only the labels change
-    let Ok(data) = autoseed::arch_data(&scan.vertices, &scan.tris) else {
+    // the arch curve of the scan (as the numbering computes it, the occlusal
+    // side turned over by hand included): the same scan for every round,
+    // only the labels change
+    let flipped = aligners_data(state)?
+        .occlusal_flipped
+        .contains(&arch.role());
+    let Ok(data) = autoseed::arch_data_oriented(&scan.vertices, &scan.tris, flipped) else {
+        // nothing checked: what an earlier check left is no longer known
+        keep_doubts(state, arch, Vec::new())?;
         return Ok(Some(json!({ "skipped": true })));
     };
     let mut rep = check(&scan, arch, &data);
@@ -281,7 +302,7 @@ fn check_arch(
             // the numbers of the proposal are kept, to be checked
             notes.push(tr("aligners-check-note-not-renumbered", &[]));
         } else if !done.is_empty() {
-            let missing: Vec<u16> = params.missing.iter().map(|&m| u16::from(m)).collect();
+            let missing = missing_of(state, params)?;
             let (new, more) =
                 seed_check::renumber_spans(&rep.spans, arch, params.third_molars, &missing);
             notes.extend(more.iter().map(describe_note));
@@ -346,6 +367,9 @@ fn run_check(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    for &n in &params.missing {
+        crate::manual::common::fdi_of(n)?;
+    }
     let mut next = state.clone();
     let mut out = Map::new();
     let mut skipped = Vec::new();
@@ -476,6 +500,60 @@ mod tests {
             .clone()
             .unwrap();
         assert!(labels.iter().all(|&l| l != 48), "segmented again");
+    }
+
+    /// A tooth marked missing by hand stays missing when the check
+    /// renumbers the teeth after a correction: no seed carries its number.
+    #[test]
+    fn a_tooth_marked_missing_is_never_renumbered_back() {
+        let mut s = with_fragment();
+        let mut d = aligners_data(&s).unwrap();
+        d.seeds.retain(|x| x.fdi.get() != 35);
+        d.missing.insert(Fdi::new(35).unwrap());
+        s.set_module(MODULE_ID, ModuleState::new(d));
+        let params: CheckParams = serde_json::from_value(json!({ "arch": "lower" })).unwrap();
+        assert_eq!(missing_of(&s, &params).unwrap(), vec![35]);
+        let (next, out) = exec(CHECK, &s, json!({ "arch": "lower", "correct": true })).unwrap();
+        let lower = &out["lower"];
+        assert!(lower["rounds"].as_u64().unwrap() >= 1, "{lower}");
+        let d = aligners_data(&next).unwrap();
+        assert!(
+            d.seeds.iter().all(|x| !d.missing.contains(&x.fdi)),
+            "{lower}"
+        );
+    }
+
+    /// A check that cannot run (no arch curve on the scan) says so and
+    /// leaves no doubt of an earlier check in the case.
+    #[test]
+    fn a_skipped_check_clears_the_doubts_of_an_earlier_one() {
+        let mut s = lower_demo();
+        let i = s
+            .case
+            .scans
+            .iter()
+            .position(|x| x.role == ScanRole::Lower)
+            .unwrap();
+        let mut mesh = dc_mesh::TriMesh::clone(s.blobs.require(&s.case.scans[i].mesh).unwrap());
+        mesh.positions.fill(glam::Vec3::ZERO);
+        s.case.scans[i].mesh = s.blobs.insert(mesh);
+        let mut d = aligners_data(&s).unwrap();
+        d.segmentation_doubts
+            .insert(ScanRole::Lower, vec!["stale".to_owned()]);
+        s.set_module(MODULE_ID, ModuleState::new(d));
+        let (next, out) = exec(CHECK, &s, json!({ "arch": "lower" })).unwrap();
+        assert_eq!(out["skipped"], json!(["lower"]), "{out}");
+        let d = aligners_data(&next).unwrap();
+        assert!(!d.segmentation_doubts.contains_key(&ScanRole::Lower));
+    }
+
+    /// A deciduous tooth among the missing ones is refused by name.
+    #[test]
+    fn a_deciduous_missing_tooth_is_refused() {
+        let s = lower_demo();
+        let e = exec(CHECK, &s, json!({ "arch": "lower", "missing": [75] })).unwrap_err();
+        assert!(e.to_string().contains("75"), "{e}");
+        assert!(e.to_string().contains("deciduous"), "{e}");
     }
 
     #[test]

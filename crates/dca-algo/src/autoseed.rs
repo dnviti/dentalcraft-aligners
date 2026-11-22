@@ -799,7 +799,22 @@ pub struct ArchData {
 
 /// [`ArchData`] of a scan (vertices in scan coordinates).
 pub fn arch_data(v: &[DVec3], t: &[[u32; 3]]) -> Result<ArchData, AutoseedError> {
+    arch_data_oriented(v, t, false)
+}
+
+/// [`arch_data`] with the arch frame turned over when the occlusal side was
+/// turned over by hand (`occlusal_flipped`, [`ArchFrame::turned_over`]).
+pub fn arch_data_oriented(
+    v: &[DVec3],
+    t: &[[u32; 3]],
+    occlusal_flipped: bool,
+) -> Result<ArchData, AutoseedError> {
     let m = arch_frame(v, t, BAND_DEPTH)?;
+    let m = if occlusal_flipped {
+        ArchFrame::from_matrix(&m).turned_over().matrix()
+    } else {
+        m
+    };
     let mi = frame::rigid_inverse(&m);
     let va: Vec<DVec3> = v.iter().map(|p| transform(&mi, *p)).collect();
     let mut na = vertex_normals(&va, t);
@@ -965,6 +980,10 @@ pub const TAIL_COST: f64 = 2.0;
 pub const TAIL_DROP_MM: f64 = 0.5;
 /// See [`TAIL_COST`].
 pub const TAIL_GUARD_MM: f64 = 1.0;
+/// A third molar whose partner on the other side is a crown is taken as a
+/// crown too when its top is at most this below the crown next to it
+/// ([`propose_checked`]).
+pub const PAIRED_DROP_MM: f64 = 1.0;
 /// An end tooth whose mean crown score is below this is doubtful
 /// ([`Doubt::EndNotCrown`]).
 pub const END_CROWN_MIN: f64 = 0.75;
@@ -1040,8 +1059,10 @@ fn width_scales() -> Vec<f64> {
 /// doubtful proposal is made again without third molars (unless looked
 /// for) and with free ends ([`FreeEnds`]): the arch may end at the last
 /// crown, leaving out what stays lower than it. A proposal with no doubt,
-/// or with forced ends, is the plugin's; so is one whose third molar the
-/// new proposal cannot leave out (an erupted third molar, a crown).
+/// or with forced ends, is the plugin's; so is one whose third molars the
+/// new proposal cannot leave out on both sides (erupted third molars,
+/// crowns). When only one side has such a crown, the plugin's proposal
+/// stands without the third molar of the other side, which lies on gum.
 pub fn propose_checked(
     v: &[DVec3],
     t: &[[u32; 3]],
@@ -1071,15 +1092,54 @@ pub fn propose_checked(
     if doubts.is_empty() {
         return Ok(p);
     }
-    let (mut q, q_segs) = propose_in(arch, opts, data, true)?;
-    if covers_a_third_molar(&p, &segs, &q, &q_segs, &data.profiles.h) {
-        return Ok(p);
-    }
+    let plugin_teeth = p.seeds.iter().map(|s| s.fdi.get()).collect();
+    let (q, q_segs) = propose_in(arch, opts, data, true)?;
+    let kept = third_molar_crowns(&p, &segs, &q, &q_segs, &data.profiles.h);
+    // a third molar of the plugin's proposal on a side whose third molar
+    // is not a crown: gum, left out
+    let on_gum = p
+        .seeds
+        .iter()
+        .any(|s| anatomy::index(s.fdi) == 8 && !kept[side(s.fdi)]);
+    let mut q = match kept {
+        [false, false] => q,
+        // both crowns, or nothing to leave out: the plugin's proposal
+        _ if !on_gum => return Ok(p),
+        _ => without_third_molar(p, kept),
+    };
     q.diagnostics.checked = Some(Check {
         doubts,
-        plugin_teeth: p.seeds.iter().map(|s| s.fdi.get()).collect(),
+        plugin_teeth,
     });
     Ok(q)
+}
+
+/// The side of a tooth: 0 right, 1 left (the order of [`Candidate::ends`]).
+fn side(f: Fdi) -> usize {
+    usize::from(!anatomy::is_right(f))
+}
+
+/// The plugin's proposal `p` whose third molar is a crown on one side
+/// only ([`third_molar_crowns`]): the third molar of the other side lies on
+/// gum, its seed goes; the teeth before it are on their crowns (the gum
+/// took the place of the third molar, the teeth were not stretched).
+fn without_third_molar(mut p: Proposal, kept: [bool; 2]) -> Proposal {
+    p.seeds
+        .retain(|s| anatomy::index(s.fdi) != 8 || kept[side(s.fdi)]);
+    let end = |s: usize| {
+        p.seeds
+            .iter()
+            .filter(|x| side(x.fdi) == s)
+            .map(|x| anatomy::index(x.fdi))
+            .max()
+            .unwrap_or(0)
+    };
+    p.diagnostics.molars = Molars {
+        right: end(0),
+        left: end(1),
+    };
+    p.diagnostics.teeth = p.seeds.len();
+    p
 }
 
 /// The doubts on the plugin's proposal `p` whose teeth lie on the bins
@@ -1109,37 +1169,47 @@ fn doubts(
     out
 }
 
-/// A third molar of the plugin's proposal `p` was a crown, not gum: its
-/// top is as high as the crown next to it (within [`TAIL_DROP_MM`]), and
-/// the checked proposal `q` has fewer teeth and reaches over most of it
-/// (its teeth stretched to cover it, since a crown cannot be left out).
-/// Then the plugin's proposal stands. `h`: crown top height of every bin.
-fn covers_a_third_molar(
+/// The sides (right, left) whose third molar of the plugin's proposal `p`
+/// was a crown, not gum: the checked proposal `q` has fewer teeth and
+/// reaches over most of it (its teeth stretched to cover it, since a crown
+/// cannot be left out), and its top is as high as the crown next to it
+/// (within [`TAIL_DROP_MM`]). Once one side has such a crown, the third
+/// molar of the other side is one too when its top is within
+/// [`PAIRED_DROP_MM`] (third molars erupt in pairs more often than alone).
+/// There the plugin's third molar stands. `h`: crown top height of every
+/// bin.
+fn third_molar_crowns(
     p: &Proposal,
     p_segs: &[(Fdi, (usize, usize))],
     q: &Proposal,
     q_segs: &[(Fdi, (usize, usize))],
     h: &[f64],
-) -> bool {
+) -> [bool; 2] {
     let (Some(&(_, (lo, _))), Some(&(_, (_, hi)))) = (q_segs.first(), q_segs.last()) else {
-        return false;
+        return [false; 2];
     };
+    let n = p_segs.len();
+    if q.seeds.len() >= p.seeds.len() || n < 2 {
+        return [false; 2];
+    }
     let top = |(a, b): (usize, usize)| {
         h[a..b.min(h.len())]
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max)
     };
-    let n = p_segs.len();
-    let ends = [(0, 1), (n.saturating_sub(1), n.saturating_sub(2))];
-    q.seeds.len() < p.seeds.len()
-        && n >= 2
-        && ends.iter().any(|&(e, next)| {
-            let (f, (a, b)) = p_segs[e];
-            anatomy::index(f) == 8
-                && top((a, b)) >= top(p_segs[next].1) - TAIL_DROP_MM
-                && 2 * b.min(hi).saturating_sub(a.max(lo)) > b - a
-        })
+    // per side: the drop of the third molar's top under its neighbour's
+    let mut drop = [f64::INFINITY; 2];
+    for (e, next) in [(0, 1), (n - 1, n - 2)] {
+        let (f, (a, b)) = p_segs[e];
+        if anatomy::index(f) == 8 && 2 * b.min(hi).saturating_sub(a.max(lo)) > b - a {
+            drop[side(f)] = top(p_segs[next].1) - top((a, b));
+        }
+    }
+    if drop.iter().all(|&d| d > TAIL_DROP_MM) {
+        return [false; 2];
+    }
+    drop.map(|d| d <= PAIRED_DROP_MM)
 }
 
 /// The bins `[a, b)` of every tooth of a proposal, in the order of the
@@ -1709,6 +1779,11 @@ pub struct Input<'a> {
     pub vertices: &'a [DVec3],
     /// Triangles.
     pub triangles: &'a [[u32; 3]],
+    /// The occlusal side of the arch was turned over by hand
+    /// (`AlignersState::occlusal_flipped`): the arch frame found is turned
+    /// over before the teeth are looked for ([`arch_data_oriented`]), as
+    /// [`orient`] does.
+    pub occlusal_flipped: bool,
 }
 
 /// Result of the automatic seeds of one arch.
@@ -1729,7 +1804,14 @@ pub struct Output {
 /// [`MIN_SEEDS`] teeth.
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, AutoseedError> {
     let opts = params.options()?;
-    let p = propose_checked(input.vertices, input.triangles, input.arch, &opts, None)?;
+    let data = arch_data_oriented(input.vertices, input.triangles, input.occlusal_flipped)?;
+    let p = propose_checked(
+        input.vertices,
+        input.triangles,
+        input.arch,
+        &opts,
+        Some(&data),
+    )?;
     if p.seeds.len() < MIN_SEEDS {
         return Err(AutoseedError::TooFewSeeds(p.seeds.len()));
     }
@@ -1831,6 +1913,26 @@ mod tests {
 
     fn fdi(n: u8) -> Fdi {
         Fdi::new(n).unwrap()
+    }
+
+    /// The occlusal side turned over by hand reaches the numbering: its
+    /// arch frame is the automatic one turned over.
+    #[test]
+    fn the_hand_flip_turns_the_numbering_frame_over() {
+        let d = crate::demo::run(&crate::demo::Params {
+            arch: Arch::Lower,
+            ..Default::default()
+        });
+        let v: Vec<DVec3> = d.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+        let auto = arch_data(&v, &d.mesh.tris).unwrap();
+        let flipped = arch_data_oriented(&v, &d.mesh.tris, true).unwrap();
+        let want = ArchFrame::from_matrix(&auto.frame).turned_over().matrix();
+        assert!(flipped.frame.abs_diff_eq(want, 1e-12));
+        assert!(!flipped.frame.abs_diff_eq(auto.frame, 1e-6));
+        assert_eq!(
+            arch_data_oriented(&v, &d.mesh.tris, false).unwrap().frame,
+            auto.frame
+        );
     }
 
     #[test]

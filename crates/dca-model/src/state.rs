@@ -1188,6 +1188,11 @@ impl dc_case::ModuleData for AlignersState {
     fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
     }
+    /// Every serialized number is checked: saving refuses a NaN or an
+    /// infinity instead of writing it as `null`.
+    fn find_non_finite(&self) -> Option<String> {
+        dc_case::find_non_finite(self)
+    }
     /// The label, closed crown, gingiva, control-visit scan, study model and
     /// view aligner blobs are the blob references in the state (the other
     /// fields are plain numbers and poses).
@@ -1310,6 +1315,23 @@ mod tests {
         });
         st.stages.push(stage);
         st
+    }
+
+    #[test]
+    fn a_nan_in_the_data_is_reported_before_saving() {
+        use dc_case::ModuleData;
+        let mut st = sample();
+        assert_eq!(st.find_non_finite(), None);
+        st.stages[0].poses.insert(
+            Fdi::new(21).unwrap(),
+            Pose::from_translation(DVec3::new(f64::NAN, 0.0, 0.0)),
+        );
+        let path = st.find_non_finite().expect("a NaN pose is found");
+        assert!(path.contains("stages"), "{path}");
+        let mut st = sample();
+        st.tooth_speed.insert(Fdi::new(11).unwrap(), f64::INFINITY);
+        let path = st.find_non_finite().expect("an infinite speed is found");
+        assert!(path.contains("tooth_speed"), "{path}");
     }
 
     #[test]

@@ -291,6 +291,8 @@ pub(crate) struct StageGeometry {
 pub(crate) fn shell_error(e: shell::ShellError) -> CommandError {
     match e {
         shell::ShellError::Invalid(m) => CommandError::Invalid(m),
+        e @ (shell::ShellError::VoxelOutOfRange { .. }
+        | shell::ShellError::WallThinnerThanVoxel { .. }) => CommandError::Invalid(e.to_string()),
         other => failed(other),
     }
 }
@@ -464,6 +466,26 @@ mod tests {
             .unwrap()
             .schema();
         assert!(schema["properties"]["thickness_mm"].is_object(), "{schema}");
+    }
+
+    #[test]
+    fn bad_voxels_and_thin_walls_are_invalid_params() {
+        for e in [
+            shell::ShellError::VoxelOutOfRange {
+                what: "shell_voxel_mm",
+                value: 0.001,
+            },
+            shell::ShellError::WallThinnerThanVoxel {
+                thickness_mm: 0.5,
+                voxel_mm: 0.3,
+            },
+        ] {
+            assert!(matches!(shell_error(e), CommandError::Invalid(_)));
+        }
+        assert!(!matches!(
+            shell_error(shell::ShellError::Geometry("x".into())),
+            CommandError::Invalid(_)
+        ));
     }
 
     #[test]

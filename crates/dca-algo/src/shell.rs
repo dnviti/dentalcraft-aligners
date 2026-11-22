@@ -100,6 +100,15 @@ pub const REDUCE_TOL_MM: f64 = 0.01;
 pub const MODEL_VOXEL_MM: f64 = 0.1;
 /// Voxel of the shells (`shell_voxel`, Standard quality).
 pub const SHELL_VOXEL_MM: f64 = 0.1;
+/// Finest voxel of the fields (mm): the plugin's `shell_voxel` minimum; a
+/// finer one makes a band of billions of voxels.
+pub const VOXEL_MIN_MM: f64 = 0.04;
+/// Coarsest voxel of the fields (mm): the plugin's `export_voxel` maximum.
+pub const VOXEL_MAX_MM: f64 = 0.5;
+/// The wall is at least this many voxels thick: a thinner one comes out of
+/// the field with holes through it (the plugin keeps the preview voxel
+/// within 0.45 of the wall, `PREVIEW_WALL_SHARE`).
+pub const WALL_MIN_VOXELS: f64 = 2.0;
 /// Height of the flat base below the lowest gingiva (`base_height`).
 pub const BASE_HEIGHT_MM: f64 = 3.0;
 /// Voxels of the band beyond the levels read (`SDF_BAND_EXTRA`).
@@ -144,6 +153,26 @@ pub enum ShellError {
     /// The inputs or parameters are not usable.
     #[error("{0}")]
     Invalid(String),
+    /// A voxel outside [`VOXEL_MIN_MM`]..=[`VOXEL_MAX_MM`].
+    #[error("{what} must be between {VOXEL_MIN_MM} and {VOXEL_MAX_MM} mm, got {value}")]
+    VoxelOutOfRange {
+        /// The parameter.
+        what: &'static str,
+        /// Its value (mm).
+        value: f64,
+    },
+    /// A wall thinner than [`WALL_MIN_VOXELS`] voxels: the field would leave
+    /// holes through it.
+    #[error(
+        "the wall ({thickness_mm} mm) must be at least {WALL_MIN_VOXELS} times the shell voxel \
+         ({voxel_mm} mm): use a finer voxel or a thicker wall"
+    )]
+    WallThinnerThanVoxel {
+        /// Wall thickness (mm).
+        thickness_mm: f64,
+        /// Voxel of the shell field (mm).
+        voxel_mm: f64,
+    },
     /// A distance-field or mesh operation failed.
     #[error("geometry: {0}")]
     Geometry(String),
@@ -151,6 +180,29 @@ pub enum ShellError {
 
 fn geom(e: impl std::fmt::Display) -> ShellError {
     ShellError::Geometry(e.to_string())
+}
+
+/// `Err` for a voxel outside [`VOXEL_MIN_MM`]..=[`VOXEL_MAX_MM`] (or not a
+/// number).
+fn check_voxel(what: &'static str, value: f64) -> Result<(), ShellError> {
+    if (VOXEL_MIN_MM..=VOXEL_MAX_MM).contains(&value) {
+        Ok(())
+    } else {
+        Err(ShellError::VoxelOutOfRange { what, value })
+    }
+}
+
+/// `Err` for a wall thinner than [`WALL_MIN_VOXELS`] shell voxels.
+fn check_wall(thickness_mm: f64, voxel_mm: f64) -> Result<(), ShellError> {
+    // the f32 voxel of a field read back as f64 is a hair larger
+    if thickness_mm + 1e-6 >= WALL_MIN_VOXELS * voxel_mm {
+        Ok(())
+    } else {
+        Err(ShellError::WallThinnerThanVoxel {
+            thickness_mm,
+            voxel_mm,
+        })
+    }
 }
 
 /// Parameters of the print geometry. Thickness and clearance default to the
@@ -232,6 +284,13 @@ impl Params {
                 return Err(bad(what, v));
             }
         }
+        for (what, v) in [
+            ("model_voxel_mm", self.model_voxel_mm),
+            ("shell_voxel_mm", self.shell_voxel_mm),
+        ] {
+            check_voxel(what, v)?;
+        }
+        check_wall(design.thickness_mm, self.shell_voxel_mm)?;
         for (what, v) in [
             ("blockout_mm", self.blockout_mm),
             ("tolerance_mm", self.tolerance_mm),
@@ -676,6 +735,7 @@ pub fn closed_grid_for(
     blockout: f64,
     reach: f64,
 ) -> Result<SdfGrid, ShellError> {
+    check_voxel("voxel_mm", voxel)?;
     let params = SdfParams {
         voxel_size: voxel as f32,
         band: band_for(voxel, blockout.max(reach)),
@@ -693,6 +753,7 @@ pub fn shell_grid(closed: &SdfGrid, design: &Design) -> Result<SdfGrid, ShellErr
     let inner = design.clearance_mm as f32;
     let outer = (design.clearance_mm + design.thickness_mm) as f32;
     let vs = closed.voxel_size;
+    check_wall(design.thickness_mm, f64::from(vs))?;
     let margin = 1.5 * vs;
     if outer + margin <= closed.band() && margin - inner <= closed.band() {
         return closed.shell(inner, outer).map_err(geom);
@@ -1840,5 +1901,68 @@ mod tests {
         assert!(Params::default().check(&design).is_ok());
         let p: Params = serde_json::from_str(r#"{"thickness_mm": 0.75}"#).unwrap();
         assert_eq!(p.design(&Settings::default()).thickness_mm, 0.75);
+    }
+
+    #[test]
+    fn the_voxel_is_bounded_and_the_wall_spans_two_voxels() {
+        let design = Params::default().design(&Settings::default());
+        // a voxel that would make billions of voxels, or a coarse one
+        for (model, shell, what) in [
+            (0.001, 0.1, "model_voxel_mm"),
+            (0.1, 0.001, "shell_voxel_mm"),
+            (0.1, 0.6, "shell_voxel_mm"),
+            (f64::NAN, 0.1, "model_voxel_mm"),
+        ] {
+            let p = Params {
+                model_voxel_mm: model,
+                shell_voxel_mm: shell,
+                ..Params::default()
+            };
+            match p.check(&design) {
+                Err(ShellError::VoxelOutOfRange { what: w, .. }) => assert_eq!(w, what),
+                Err(ShellError::Invalid(_)) if model.is_nan() => {}
+                other => panic!("{model} {shell}: {other:?}"),
+            }
+        }
+        // the bounds themselves are allowed
+        for v in [VOXEL_MIN_MM, VOXEL_MAX_MM] {
+            let p = Params {
+                model_voxel_mm: v,
+                shell_voxel_mm: v,
+                ..Params::default()
+            };
+            assert!(p.check(&design).is_ok(), "{v}");
+        }
+        // a wall thinner than two shell voxels would come out perforated
+        let p = Params {
+            shell_voxel_mm: 0.3,
+            ..Params::default()
+        };
+        let thin = Design {
+            thickness_mm: 0.5,
+            clearance_mm: 0.0,
+        };
+        assert_eq!(
+            p.check(&thin),
+            Err(ShellError::WallThinnerThanVoxel {
+                thickness_mm: 0.5,
+                voxel_mm: 0.3
+            })
+        );
+        let just = Design {
+            thickness_mm: 0.6,
+            ..thin
+        };
+        assert!(p.check(&just).is_ok());
+        // the field functions refuse them too
+        assert!(matches!(
+            closed_grid_for(&mushroom(), 0.001, 0.0, 0.0),
+            Err(ShellError::VoxelOutOfRange { .. })
+        ));
+        let g = closed_grid(&mushroom(), 0.3, 0.0).unwrap();
+        assert!(matches!(
+            shell_grid(&g, &thin),
+            Err(ShellError::WallThinnerThanVoxel { .. })
+        ));
     }
 }

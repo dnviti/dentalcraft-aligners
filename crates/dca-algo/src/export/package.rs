@@ -82,7 +82,9 @@ pub struct FullParams {
     pub self_intersections: bool,
     /// Thinnest wall allowed in an aligner (mm); `null` skips the thickness.
     pub min_thickness_mm: Option<f64>,
-    /// Build volume of the printer `[x, y, z]` (mm); `null` skips the fit.
+    /// Room on the build plate of the printer `[x, y, z]` (mm); default the
+    /// Elegoo Saturn 4 Ultra 16K inside its 4 mm nesting margin
+    /// (203.68 x 110.37 x 220); `null` skips the fit.
     pub build_plate_mm: Option<[f64; 3]>,
     /// Write the report.
     pub report: bool,
@@ -464,6 +466,41 @@ fn run_inner(
     }
     let made_count = std::sync::atomic::AtomicUsize::new(0);
     let total_tasks = tasks.len().max(1);
+    // the print check of a file; the reach is that of the shell of `shell`
+    // (the last active stage for a passive aligner)
+    let file_check =
+        |mesh: &dc_mesh::TriMesh, name: &str, (arch, k): (Arch, u32), kind: Kind, shell: u32| {
+            params.print_check.then(|| {
+                let options = CheckOptions {
+                    self_intersections: params.self_intersections,
+                    min_thickness_mm: if kind == Kind::Aligner {
+                        params.min_thickness_mm
+                    } else {
+                        None
+                    },
+                    build_plate_mm: params.build_plate_mm,
+                    ..CheckOptions::default()
+                };
+                let mut check = printcheck::check(mesh, &options);
+                // no fin, no flap far from the teeth (the check passes them)
+                if kind == Kind::Aligner
+                    && let Some(reach) = provider.reach(arch, shell)
+                {
+                    printcheck::add_reach(&mut check, reach);
+                }
+                FileCheck {
+                    name: name.to_owned(),
+                    arch,
+                    stage: k,
+                    kind: if kind == Kind::Model {
+                        "model"
+                    } else {
+                        "aligner"
+                    },
+                    check,
+                }
+            })
+        };
     let make = |&(arch, k, kind): &(Arch, u32, Kind)| -> Result<Option<Made>, ExportError> {
         if cancelled() {
             return Err(ExportError::Cancelled);
@@ -490,36 +527,7 @@ fn run_inner(
         if cancelled() {
             return Err(ExportError::Cancelled);
         }
-        let check = params.print_check.then(|| {
-            let options = CheckOptions {
-                self_intersections: params.self_intersections,
-                min_thickness_mm: if kind == Kind::Aligner {
-                    params.min_thickness_mm
-                } else {
-                    None
-                },
-                build_plate_mm: params.build_plate_mm,
-                ..CheckOptions::default()
-            };
-            let mut check = printcheck::check(&mesh, &options);
-            // no fin, no flap far from the teeth (the check passes them)
-            if kind == Kind::Aligner
-                && let Some(reach) = provider.reach(arch, k)
-            {
-                printcheck::add_reach(&mut check, reach);
-            }
-            FileCheck {
-                name: name.clone(),
-                arch,
-                stage: k,
-                kind: if kind == Kind::Model {
-                    "model"
-                } else {
-                    "aligner"
-                },
-                check,
-            }
-        });
+        let check = file_check(&mesh, &name, (arch, k), kind, k);
         entry.printable = check.as_ref().map(|c| c.check.ok);
         let keep = (kind == Kind::Aligner && k == plan.active[&arch]).then_some(bytes);
         // the meshes are nearly all the work: the rest is the last tenth
@@ -538,14 +546,10 @@ fn run_inner(
         .into_iter()
         .flatten()
         .collect();
-    let notes: Vec<String> = case
-        .notes
-        .iter()
-        .chain(&provider.notes())
-        .map(|n| super::text::note(n, lang))
-        .collect();
 
-    // the passive aligners repeat the shell of the last stage of the arch
+    // the passive aligners repeat the shell of the last stage of the arch,
+    // each with its own stamp (number, `P`, date) when the provider stamps
+    // them, else as a copy of the file of the last stage
     if direct {
         let mut passives = Vec::new();
         for (&arch, &n) in &plan.active {
@@ -557,20 +561,37 @@ fn run_inner(
             });
             if let Some(last) = last {
                 for k in n + 1..=total {
+                    if cancelled() {
+                        return Err(ExportError::Cancelled);
+                    }
                     let name = aligner_name(arch, k, true);
-                    let bytes = last.keep.as_deref().unwrap_or_default();
-                    write_in(dir, &name, bytes)?;
-                    let mut entry = Entry::of(&name, "stl", bytes);
+                    let (mut entry, check) = match provider.passive(arch, n, k)? {
+                        Some(mesh) => {
+                            let bytes = stl_bytes(&mesh)?;
+                            write_in(dir, &name, &bytes)?;
+                            let mut entry = Entry::of(&name, "stl", &bytes);
+                            let check = file_check(&mesh, &name, (arch, k), Kind::Aligner, n);
+                            entry.printable = check.as_ref().map(|c| c.check.ok);
+                            (entry, check)
+                        }
+                        None => {
+                            let bytes = last.keep.as_deref().unwrap_or_default();
+                            write_in(dir, &name, bytes)?;
+                            let mut entry = Entry::of(&name, "stl", bytes);
+                            entry.printable = last.entry.printable;
+                            let check = last.check.as_ref().map(|c| FileCheck {
+                                name: name.clone(),
+                                stage: k,
+                                ..c.clone()
+                            });
+                            (entry, check)
+                        }
+                    };
                     entry.arch = Some(arch_name(arch).to_owned());
                     entry.stage = Some(k);
-                    entry.printable = last.entry.printable;
                     passives.push(Made {
                         entry,
-                        check: last.check.as_ref().map(|c| FileCheck {
-                            name: name.clone(),
-                            stage: k,
-                            ..c.clone()
-                        }),
+                        check,
                         keep: None,
                     });
                 }
@@ -578,6 +599,13 @@ fn run_inner(
         }
         made.extend(passives);
     }
+    // after the passive aligners: their stamps add notes too
+    let notes: Vec<String> = case
+        .notes
+        .iter()
+        .chain(&provider.notes())
+        .map(|n| super::text::note(n, lang))
+        .collect();
     for m in &mut made {
         m.keep = None;
     }
@@ -1135,7 +1163,8 @@ mod tests {
             assert!(dir.join(n).is_file(), "{n} not on disk");
         }
         assert!(dir.join(MANIFEST_NAME).is_file());
-        // the passive aligner is a copy of the last one
+        // a provider that does not stamp the passive aligners: each is a copy
+        // of the file of the last one (the plugin without the stamp)
         assert_eq!(
             std::fs::read(dir.join("stampa_resina/SUP_allineatore_05_passivo.stl")).unwrap(),
             std::fs::read(dir.join("stampa_resina/SUP_allineatore_03.stl")).unwrap()
@@ -1162,6 +1191,79 @@ mod tests {
                 .iter()
                 .all(|n| !n.ends_with(".tmp"))
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// [`Cubes`] whose passive aligners are the last shell moved by their
+    /// number (a stand-in for the stamp), recording what was asked.
+    struct StampedCubes {
+        asked: std::sync::Mutex<Vec<(Arch, u32, u32)>>,
+    }
+
+    impl MeshProvider for StampedCubes {
+        fn model(&self, arch: Arch, stage: u32) -> Result<Option<TriMesh>, ExportError> {
+            Cubes { broken: None }.model(arch, stage)
+        }
+
+        fn aligner(&self, arch: Arch, stage: u32) -> Result<Option<TriMesh>, ExportError> {
+            Cubes { broken: None }.aligner(arch, stage)
+        }
+
+        fn passive(
+            &self,
+            arch: Arch,
+            last: u32,
+            number: u32,
+        ) -> Result<Option<TriMesh>, ExportError> {
+            self.asked.lock().unwrap().push((arch, last, number));
+            let mut m = Cubes { broken: None }.aligner(arch, last)?.unwrap();
+            for p in &mut m.positions {
+                p.z += 0.01 * number as f32;
+            }
+            Ok(Some(m))
+        }
+    }
+
+    #[test]
+    fn every_passive_aligner_gets_its_own_file_from_the_provider() {
+        let f = fixture();
+        let dir = temp("passive");
+        let provider = StampedCubes {
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let report = run(&f.input(), &f.case(), &provider, &params(&dir)).unwrap();
+        // upper: 3 active, passive 4 and 5 from the shell of 3; lower: none
+        assert_eq!(
+            *provider.asked.lock().unwrap(),
+            [(Arch::Upper, 3, 4), (Arch::Upper, 3, 5)]
+        );
+        let read = |n: &str| std::fs::read(dir.join("stampa_resina").join(n)).unwrap();
+        let last = read("SUP_allineatore_03.stl");
+        let p4 = read("SUP_allineatore_04_passivo.stl");
+        let p5 = read("SUP_allineatore_05_passivo.stl");
+        assert_ne!(p4, last);
+        assert_ne!(p5, last);
+        assert_ne!(p4, p5);
+        // each passive file has its own entry, hash and print check
+        for (k, name) in [
+            (4, "stampa_resina/SUP_allineatore_04_passivo.stl"),
+            (5, "stampa_resina/SUP_allineatore_05_passivo.stl"),
+        ] {
+            let e = report.files.iter().find(|e| e.name == name).unwrap();
+            assert_eq!(e.stage, Some(k));
+            assert_eq!(e.arch.as_deref(), Some("upper"));
+            assert!(e.printable.is_some(), "{name}");
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("print_check.json")).unwrap()).unwrap();
+        let checked: Vec<&str> = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(checked.contains(&"stampa_resina/SUP_allineatore_05_passivo.stl"));
+        assert!(manifest::verify(&dir).unwrap().ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
