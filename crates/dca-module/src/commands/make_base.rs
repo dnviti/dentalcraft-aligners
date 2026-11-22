@@ -206,7 +206,7 @@ fn height_error(h: f64) -> CommandError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use dc_case::ScanRole;
     use dc_command::UndoStack;
@@ -234,10 +234,9 @@ mod tests {
         )
     }
 
-    /// The demo arch opened under the gum: the faces within 4 mm of its
-    /// lowest point along the occlusal axis removed (the demo scan is closed).
+    /// The demo arch opened under the gum (see [`opened_under_gum`]).
     fn open_demo(arch: &str) -> CaseState {
-        let mut state = exec(
+        let state = exec(
             "aligners.demo",
             &CaseState::default(),
             json!({ "arch": arch }),
@@ -249,6 +248,13 @@ mod tests {
         } else {
             ScanRole::Lower
         };
+        opened_under_gum(state, role)
+    }
+
+    /// The scan of `role` opened under the gum: the faces within 4 mm of its
+    /// lowest point along the occlusal axis removed (the demo scan is
+    /// closed).
+    pub(crate) fn opened_under_gum(mut state: CaseState, role: ScanRole) -> CaseState {
         let arch = Arch::from_role(role).unwrap();
         let mesh = scan_mesh(&state, role);
         let v: Vec<_> = mesh.positions.iter().map(|p| p.as_dvec3()).collect();

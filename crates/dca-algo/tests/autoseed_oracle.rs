@@ -101,6 +101,7 @@ fn dynamic_programming_matches_the_plugin() {
             crown: &crown,
             skippable: &skippable,
             bin_mm: 0.25,
+            free_ends: None,
         });
         close(cost, num(&c["cost"]), 1e-12, &format!("dp {i} cost"));
         let want: Vec<Option<(usize, usize)>> = c["segs"]

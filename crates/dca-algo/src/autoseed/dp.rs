@@ -35,6 +35,30 @@ pub struct DpProblem<'a> {
     pub skippable: &'a [bool],
     /// Bin size (mm).
     pub bin_mm: f64,
+    /// Free ends of the arch ([`FreeEnds`]); `None`: the plugin's ends,
+    /// the sequence covers the profile up to `END_ZONE + 3` mm of each end.
+    pub free_ends: Option<FreeEnds<'a>>,
+}
+
+/// The ends of the arch left to the data ([`DpProblem::free_ends`]): the
+/// first tooth may start, and the last one end, farther than the plugin's
+/// slack from the ends of the profile when what is left out stays lower
+/// than the crown top of that end tooth by [`FreeEnds::drop_mm`] (the
+/// tuberosity, the retromolar pad or the back wall of a model behind the
+/// last molar, not a crown). What is left beyond the slack costs
+/// [`FreeEnds::tail_cost`] per mm of crown-like surface. Without it the
+/// sequence must reach both ends of the profile, and a profile running past
+/// the last molars gets a tooth too many there or stretched teeth.
+#[derive(Debug, Clone, Copy)]
+pub struct FreeEnds<'a> {
+    /// Crown top height of every bin (mm).
+    pub h: &'a [f64],
+    /// Cost per mm of crown-like surface left out beyond the slack.
+    pub tail_cost: f64,
+    /// What is left out stays this much (mm) below the end tooth's top.
+    pub drop_mm: f64,
+    /// Bins next to the end tooth not compared (its own distal slope).
+    pub guard: usize,
 }
 
 /// Every tooth `j` is either present, a segment `[a, b)` whose cost is the
@@ -80,6 +104,21 @@ pub fn dp(p: &DpProblem<'_>) -> (f64, Vec<Option<(usize, usize)>>) {
     let head = (slack + 1).min(nb);
     cost[..head].copy_from_slice(&bcost[..head]);
     let dmax = (DIASTEMA_MM / bin) as usize;
+    // free ends: crown-like mm in [0, a), crown top over [0, i] and [i, nb)
+    let free = p.free_ends.map(|fe| {
+        let ccr = cumsum(&|i| p.crown[i]);
+        let mut pre = Vec::with_capacity(nb);
+        let mut m = f64::NEG_INFINITY;
+        for &x in &fe.h[..nb] {
+            m = m.max(x);
+            pre.push(m);
+        }
+        let mut suf = vec![f64::NEG_INFINITY; nb + 1];
+        for i in (0..nb).rev() {
+            suf[i] = suf[i + 1].max(fe.h[i]);
+        }
+        (fe, ccr, pre, suf)
+    });
 
     // best start of a space [a - g, a), g = 0..=gmax, ending at every bin a
     let space = |prev: &[f64], gmax: usize, fixed: f64| -> (Vec<f64>, Vec<usize>) {
@@ -115,8 +154,17 @@ pub fn dp(p: &DpProblem<'_>) -> (f64, Vec<Option<(usize, usize)>>) {
         let l_hi = (1.5 * w) as i64 + 2;
         let mut pres = vec![INF; nb];
         let mut t_start = vec![0usize; nb];
+        // the first tooth with free ends: its crown top, the segment grown with its length
+        let first_free = if j == 0 { free.as_ref() } else { None };
         for a in 0..nb {
             let mut best = (f64::NAN, 0usize);
+            let mut top = first_free.map_or(f64::NEG_INFINITY, |(fe, ..)| {
+                let lo = (a as i64 - l_lo + 1).max(0) as usize;
+                fe.h[lo..a]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+            });
             for l in l_lo..l_hi {
                 let start = a as i64 - l;
                 let (valid, ac) = if start >= 0 {
@@ -124,7 +172,24 @@ pub fn dp(p: &DpProblem<'_>) -> (f64, Vec<Option<(usize, usize)>>) {
                 } else {
                     (false, 0)
                 };
-                let prev = if valid { start_cost[ac] } else { INF };
+                let prev = match first_free {
+                    Some((fe, ccr, pre, _)) if valid && ac > slack => {
+                        top = top.max(fe.h[ac]);
+                        // what is left before the tooth: lower than its top
+                        let looked = ac.saturating_sub(fe.guard);
+                        if looked == 0 || pre[looked - 1] < top - fe.drop_mm {
+                            bcost[ac] + fe.tail_cost * (ccr[ac] - ccr[slack + 1])
+                        } else {
+                            INF
+                        }
+                    }
+                    Some((fe, ..)) if valid => {
+                        top = top.max(fe.h[ac]);
+                        start_cost[ac]
+                    }
+                    _ if valid => start_cost[ac],
+                    _ => INF,
+                };
                 let lf = l as f64;
                 let mean_bl = (p.bl_cum[a] - p.bl_cum[ac]) / lf;
                 let dw = (lf - w) / (p.sigma[j] * w);
@@ -178,11 +243,28 @@ pub fn dp(p: &DpProblem<'_>) -> (f64, Vec<Option<(usize, usize)>>) {
         }
     }
     let end_lo = nb.saturating_sub(1 + slack);
-    let mut b = end_lo;
+    // free ends: the last tooth may end before end_lo when what is left after
+    // it stays lower than its top
+    let last_start = backs.last().map(|(_, st)| st);
+    let first = if free.is_some() { 0 } else { end_lo };
+    let mut b = first;
     let mut total = f64::NAN;
-    for i in end_lo..nb {
-        let f = cost[i] + bcost[i];
-        if i == end_lo || f < total {
+    for i in first..nb {
+        let f = match (&free, last_start) {
+            (Some((fe, ccr, _, suf)), Some(st)) if i < end_lo => match st[i] {
+                Some(s) if s < i && cost[i] < INF / 2.0 => {
+                    let top = fe.h[s..i].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    if suf[(i + fe.guard).min(nb)] < top - fe.drop_mm {
+                        cost[i] + bcost[i] + fe.tail_cost * (ccr[end_lo] - ccr[i])
+                    } else {
+                        INF
+                    }
+                }
+                _ => INF,
+            },
+            _ => cost[i] + bcost[i],
+        };
+        if i == first || f < total {
             total = f;
             b = i;
         }
@@ -223,9 +305,94 @@ mod tests {
             crown: &crown,
             skippable: &[false, true, false],
             bin_mm: 0.25,
+            free_ends: None,
         };
         let (cost, segs) = dp(&p);
         assert_eq!(segs, vec![Some((3, 11)), Some((11, 19)), Some((19, 27))]);
         assert!(cost < 0.0, "{cost}");
+    }
+
+    /// Valley depth of a crown-top profile as `autoseed::arch_profiles`
+    /// measures it: highest point within 2 mm (8 bins) minus the height.
+    fn dips(h: &[f64]) -> Vec<f64> {
+        let n = h.len() as i64;
+        (0..n)
+            .map(|i| {
+                let m = (i - 8..=i + 8)
+                    .map(|k| h[k.clamp(0, n - 1) as usize])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                m - h[i as usize]
+            })
+            .collect()
+    }
+
+    /// Three molars of 10 mm (40 bins, valleys between them), then `tail`:
+    /// what lies behind the last one.
+    fn molars_then(tail: &[f64]) -> Vec<f64> {
+        let mut h: Vec<f64> = (0..120)
+            .map(|i| -1.6 + 1.6 * (std::f64::consts::PI * (i % 40) as f64 / 40.0).sin())
+            .collect();
+        h.extend_from_slice(tail);
+        h
+    }
+
+    fn three_molars(h: &[f64], free: bool) -> (f64, Vec<Option<(usize, usize)>>) {
+        let nb = h.len();
+        let dip = dips(h);
+        let bl_cum: Vec<f64> = (0..=nb).map(|i| i as f64).collect();
+        // a noisy scan: the gum behind the molars looks like enamel
+        let crown = vec![1.0; nb];
+        dp(&DpProblem {
+            w_bins: &[40.0, 40.0, 40.0],
+            bl_exp: &[1.0, 1.0, 1.0],
+            dip: &dip,
+            bl_cum: &bl_cum,
+            sigma: &[0.1, 0.1, 0.1],
+            mid: None,
+            crown: &crown,
+            skippable: &[false, false, false],
+            bin_mm: 0.25,
+            free_ends: free.then_some(FreeEnds {
+                h,
+                tail_cost: 2.0,
+                drop_mm: 0.5,
+                guard: 4,
+            }),
+        })
+    }
+
+    /// 10 mm of gum behind the last molar (the tuberosity or the back wall
+    /// of a model: up to 1 mm below the crown tops, then down): the plugin's
+    /// ends make the teeth reach it, the free ends leave it out and the
+    /// teeth stay on their valleys.
+    #[test]
+    fn the_gum_behind_the_last_molar_is_left_out() {
+        let tail: Vec<f64> = (0..40)
+            .map(|i| {
+                if i < 8 {
+                    -1.6 + 0.6 * i as f64 / 8.0
+                } else {
+                    -1.0 - 4.0 * (i - 8) as f64 / 32.0
+                }
+            })
+            .collect();
+        let h = molars_then(&tail);
+        let teeth = vec![Some((0, 40)), Some((40, 80)), Some((80, 120))];
+        let (_, forced) = three_molars(&h, false);
+        assert_ne!(forced, teeth, "the plugin's ends reach the gum");
+        assert!(forced[2].is_some_and(|(_, b)| b >= h.len() - 21));
+        let (_, free) = three_molars(&h, true);
+        assert_eq!(free, teeth);
+    }
+
+    /// What lies behind the last molar as high as a crown is not left out:
+    /// the free ends give the plugin's teeth.
+    #[test]
+    fn a_crown_high_region_is_not_left_out() {
+        let tail: Vec<f64> = (0..40)
+            .map(|i| -1.6 + 1.8 * (std::f64::consts::PI * i as f64 / 40.0).sin())
+            .collect();
+        let h = molars_then(&tail);
+        assert_eq!(three_molars(&h, true), three_molars(&h, false));
     }
 }

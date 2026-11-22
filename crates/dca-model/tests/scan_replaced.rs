@@ -1,17 +1,19 @@
 //! What replacing a scan clears from the Aligners state
-//! (`ModuleData::scan_replaced`), and what it keeps.
+//! (`ModuleData::scan_replaced`), and what it keeps; then what removing one
+//! clears (`ModuleData::scan_removed`).
 
 use std::collections::BTreeMap;
 
-use dc_case::import::{Placement, PreparedScan, commit};
+use dc_case::import::{Placement, PreparedScan, commit, remove_scan};
 use dc_case::{
     BlobRef, Case, CaseState, Fdi, ModuleData, ModuleState, Pose, RoleSource, Scan, ScanRole,
 };
 use dc_mesh::{BadFaceReport, MeshFormat, TriMesh, Units};
 use dca_model::{
-    AlignersState, ArchDetails, ArchSpace, CLEARED_IDS, Decision, IprStep, MODULE_ID, Ramp,
-    RampKind, ReviewKind, ReviewRecord, ReviewStatus, Seed, Stage, StagingSummary, ToothFrame,
-    ToothMeasures, Visit,
+    AlignerBase, AlignersState, ArchDetails, ArchSpace, BiteMethod, BiteRegistration, BiteReport,
+    BiteScanFit, CLEARED_IDS, ClosedBy, Decision, IprStep, MODULE_ID, Ramp, RampKind, ReviewKind,
+    ReviewRecord, ReviewStatus, ScanBase, Seed, Stage, StagingSummary, ToothFrame, ToothMeasures,
+    ToothScale, Visit,
 };
 use glam::{DQuat, DVec3, Vec3};
 use serde_json::Value;
@@ -633,4 +635,222 @@ fn replacing_a_bite_scan_through_the_import_keeps_the_results() {
     let report = commit(&mut state, &[placement(tri(2.0), Bite, None)], &[]).unwrap();
     assert!(report.module_cleared.is_empty());
     assert_eq!(state.module_data::<AlignersState>(MODULE_ID), Some(&st));
+}
+
+// ------------------------------------------------------------ removal
+
+/// The case with both arches filled and both scans in, plus two bite scans.
+fn case_with_scans() -> (CaseState, AlignersState) {
+    let (mut state, st) = case_with(&[Upper, Lower]);
+    commit(
+        &mut state,
+        &[
+            placement(tri(1.0), Upper, None),
+            placement(tri(2.0), Lower, None),
+            placement(tri(5.0), Bite, None),
+            placement(tri(6.0), Bite, None),
+        ],
+        &[],
+    )
+    .unwrap();
+    (state, st)
+}
+
+#[test]
+fn removing_an_arch_scan_clears_what_replacing_it_clears_and_its_move() {
+    for role in [Upper, Lower] {
+        let (state, mut st) = case_with_scans();
+        let scan = state.case.scan(role).unwrap().clone();
+        let kept = state.case.scan(other(role)).unwrap().id.to_string();
+        st.components.set_scan_move(&scan.id.to_string(), pose(1.0));
+        st.components.set_scan_move(&kept, pose(2.0));
+        let mut replaced = st.clone();
+        let want = replaced.scan_replaced(role);
+        assert!(!want.is_empty());
+        assert_eq!(st.scan_removed(&scan), want);
+        // the same state as a replacement, without the move of the scan
+        assert_eq!(st.components.scan_moves.keys().collect::<Vec<_>>(), [&kept]);
+        replaced.components.scan_moves.remove(&scan.id.to_string());
+        assert_eq!(st, replaced);
+    }
+}
+
+#[test]
+fn removing_an_arch_scan_drops_its_base_record_its_tooth_sizes_and_its_view_aligners() {
+    let (mut state, mut st) = case_with_scans();
+    let scan = state.case.scan(Upper).unwrap().clone();
+    let lower = state.case.scan(Lower).unwrap().clone();
+    for s in [&scan, &lower] {
+        st.scan_bases.insert(
+            s.mesh,
+            ScanBase {
+                vertices: 3,
+                faces: 1,
+                flipped: false,
+                closed_by: ClosedBy::Import,
+            },
+        );
+    }
+    // a size by hand and the scanned vertices of a 3D tooth of each arch
+    for role in [Upper, Lower] {
+        let f = teeth(role)[0];
+        let crown = st.crowns[&f];
+        st.components
+            .tooth_scales
+            .insert(f, ToothScale { factor: 1.1, crown });
+        st.crown_scanned.insert(crown, 2);
+        let mesh = state
+            .blobs
+            .insert(tri(if role == Upper { 30.0 } else { 31.0 }));
+        st.aligner_view.bases.push(AlignerBase {
+            arch: role,
+            stage: 1,
+            mesh,
+            exact: false,
+            voxel_mm: 0.5,
+            tolerance_mm: 0.05,
+            key: "k".to_owned(),
+            seconds: 1.0,
+        });
+    }
+    let lower_crown = st.crowns[&teeth(Lower)[0]];
+    let upper_view = st.aligner_view.bases[0].mesh;
+    state.set_module(MODULE_ID, ModuleState::new(st));
+
+    remove_scan(&mut state, scan.id).unwrap().unwrap();
+    let after: &AlignersState = state.module_data(MODULE_ID).unwrap();
+    assert_eq!(after.scan_bases.keys().collect::<Vec<_>>(), [&lower.mesh]);
+    let scales: Vec<_> = after.components.tooth_scales.keys().copied().collect();
+    assert_eq!(scales, [teeth(Lower)[0]]);
+    assert_eq!(
+        after.crown_scanned.keys().collect::<Vec<_>>(),
+        [&lower_crown]
+    );
+    let arches: Vec<_> = after.aligner_view.bases.iter().map(|b| b.arch).collect();
+    assert_eq!(arches, [Lower]);
+    // the aligner of the view built on the removed arch leaves the case
+    assert!(!state.blobs.contains(&upper_view));
+}
+
+#[test]
+fn removing_a_bite_scan_forgets_the_bite_registered_on_the_bite_scans() {
+    let reports = [
+        Some(BiteMethod::Registration),
+        Some(BiteMethod::ThreePoints),
+        // a flag with no report (an older version): its origin is unknown
+        None,
+    ];
+    for method in reports {
+        let (state, mut st) = case_with_scans();
+        st.bite_report = method.map(|method| BiteReport {
+            method,
+            registration: Some(BiteRegistration::default()),
+            correction_mm: 0.0,
+        });
+        let bite = state.case.scans_of(Bite).next().unwrap().clone();
+        st.components.set_scan_move(&bite.id.to_string(), pose(1.0));
+        let mut want = st.clone();
+        want.bite_registered = false;
+        want.bite_report = None;
+        want.components.scan_moves.clear();
+        assert_eq!(st.scan_removed(&bite), ["bite_registered"], "{method:?}");
+        // the arches keep everything, where the registration moved them
+        assert_eq!(st, want, "{method:?}");
+    }
+}
+
+#[test]
+fn removing_a_bite_scan_keeps_a_registration_made_on_the_other_bite_scans() {
+    let (state, mut st) = case_with_scans();
+    let named = |name: &str| BiteScanFit {
+        scan: name.to_owned(),
+        ..BiteScanFit::default()
+    };
+    st.bite_report = Some(BiteReport {
+        method: BiteMethod::Registration,
+        registration: Some(BiteRegistration {
+            scans: vec![named("bite-left.stl")],
+            ..BiteRegistration::default()
+        }),
+        correction_mm: 0.0,
+    });
+    let mut bite = state.case.scans_of(Bite).next().unwrap().clone();
+    // a bite scan the registration did not use: it holds
+    bite.source_name = "bite-old.stl".to_owned();
+    let before = st.clone();
+    assert!(st.scan_removed(&bite).is_empty());
+    assert_eq!(st, before);
+    // the scan it used: it goes
+    bite.source_name = "bite-left.stl".to_owned();
+    assert_eq!(st.scan_removed(&bite), ["bite_registered"]);
+    assert!(!st.bite_registered && st.bite_report.is_none());
+}
+
+#[test]
+fn removing_one_of_two_bite_scans_with_the_same_name_forgets_the_registration() {
+    // the report keeps names, not ids: with two scans of the same name it
+    // cannot tell which one it used, so either one makes it stale
+    let (state, mut st) = case_with_scans();
+    st.bite_report = Some(BiteReport {
+        method: BiteMethod::Registration,
+        registration: Some(BiteRegistration {
+            scans: vec![BiteScanFit {
+                scan: "scan-bite.ply".to_owned(),
+                ..BiteScanFit::default()
+            }],
+            ..BiteRegistration::default()
+        }),
+        correction_mm: 0.0,
+    });
+    for k in 0..2 {
+        let mut s = st.clone();
+        let mut bite = state.case.scans_of(Bite).nth(k).unwrap().clone();
+        bite.source_name = "scan-bite.ply".to_owned();
+        assert_eq!(s.scan_removed(&bite), ["bite_registered"], "{k}");
+        assert!(!s.bite_registered);
+    }
+}
+
+#[test]
+fn removing_a_bite_scan_keeps_a_virtual_bite() {
+    let (state, mut st) = case_with_scans();
+    st.bite_report = Some(BiteReport::virtual_bite());
+    let before = st.clone();
+    let bite = state.case.scans_of(Bite).next().unwrap().clone();
+    assert!(st.scan_removed(&bite).is_empty());
+    assert_eq!(st, before);
+    // no bite at all: nothing to say
+    let mut st = AlignersState::default();
+    assert!(st.scan_removed(&bite).is_empty());
+    assert_eq!(st, AlignersState::default());
+}
+
+#[test]
+fn removing_a_bite_scan_through_the_case_drops_its_mesh_and_undo_restores_it() {
+    let (mut state, st) = case_with_scans();
+    state.set_module(MODULE_ID, ModuleState::new(st.clone()));
+    let snapshot = state.clone(); // what the undo stack keeps
+    let bite = state.case.scans_of(Bite).nth(1).unwrap().clone();
+
+    let removed = remove_scan(&mut state, bite.id).unwrap().unwrap();
+    assert_eq!(removed.module_cleared, ["bite_registered"]);
+    assert!(!removed.world_frame_reset);
+    assert!(!state.blobs.contains(&bite.mesh));
+    assert_eq!(state.case.scans_of(Bite).count(), 1);
+    let after: &AlignersState = state.module_data(MODULE_ID).unwrap();
+    assert!(!after.bite_registered);
+    let mut want = st.clone();
+    want.bite_registered = false;
+    assert_eq!(after, &want);
+    // every blob of the arches stays
+    assert!(
+        st.referenced_blobs()
+            .iter()
+            .all(|b| state.blobs.contains(b))
+    );
+
+    let back: &AlignersState = snapshot.module_data(MODULE_ID).unwrap();
+    assert_eq!(back, &st);
+    assert!(snapshot.blobs.contains(&bite.mesh));
+    assert_eq!(snapshot.case.scans_of(Bite).count(), 2);
 }

@@ -101,8 +101,12 @@ fn compute(input: &BindInput) -> Option<Binding> {
     if w.fdis != input.fdis {
         return None;
     }
-    let mut points = gingiva::deform(&input.gum.gum().vertices, input.gum.prep(), &input.base);
-    let mut weights = w.w.clone();
+    // the gingiva as built on the scan: its base (after it, weighing nothing)
+    // stays out
+    let gum = input.gum.gum();
+    let scanned = gum.scanned_vertices();
+    let mut points = gingiva::deform(&gum.vertices[..scanned], input.gum.prep(), &input.base);
+    let mut weights = w.w[..scanned * nf].to_vec();
     for (f, mesh) in &input.crowns {
         let j = input.fdis.iter().position(|x| x == f)?;
         let d = input.base.get(f).copied().unwrap_or(DMat4::IDENTITY);

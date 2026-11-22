@@ -39,6 +39,7 @@ use crate::evidence;
 use crate::reconstruct::geom::{self, KdTree, unique_edges};
 use crate::reconstruct::solve;
 use crate::reconstruct::{APEX_MM, SMOOTH_ITER, T_MIN};
+use crate::scan_base;
 
 /// Membrane under the crowns / interdental col lowered up to this depth, mm.
 pub const COL_MM: f64 = 0.5;
@@ -66,6 +67,9 @@ pub const FLAG_MARGIN: u16 = 0x4000;
 pub const FLAG_MEMBRANE: u16 = 0x8000;
 /// Vertex label flag of a stored gingiva mesh: interdental col.
 pub const FLAG_COL: u16 = 0x2000;
+/// Vertex label flag of a stored gingiva mesh: point of the flat base that
+/// closes the gingiva ([`GumSurface::close_with_base`]).
+pub const FLAG_BASE: u16 = 0x1000;
 /// Mask of the tooth number in a stored vertex label.
 pub const TOOTH_MASK: u16 = 0x00ff;
 
@@ -121,16 +125,18 @@ impl Default for Params {
     }
 }
 
-/// The gingiva of a whole scan without holes (`gum_surface`).
+/// The gingiva of a whole scan without holes (`gum_surface`), closed with a
+/// flat base by [`GumSurface::close_with_base`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct GumSurface {
     /// Rest positions: the scan vertices (membrane ones moved), then the
-    /// vertices of the margin cut.
+    /// vertices of the margin cut, then the points of the base.
     pub vertices: Vec<DVec3>,
-    /// Triangles (the whole scan, cut along the margin).
+    /// Triangles (the whole scan, cut along the margin), then the walls and
+    /// the caps of the base.
     pub tris: Vec<[u32; 3]>,
     /// Per vertex: FDI number of the tooth it moves with at the margin and
-    /// under the crown, `0` for the free gingiva.
+    /// under the crown, `0` for the free gingiva and the base.
     pub tooth: Vec<u16>,
     /// Vertices of the margin cut (shared with the crowns).
     pub margin: Vec<bool>,
@@ -138,11 +144,14 @@ pub struct GumSurface {
     pub membrane: Vec<bool>,
     /// The part of the membrane between two crowns that no tooth covers.
     pub col: Vec<bool>,
+    /// Points of the flat base (always after all the others).
+    pub base: Vec<bool>,
 }
 
 impl GumSurface {
     /// The surface as a mesh whose vertex labels hold the tooth number and
-    /// the [`FLAG_MARGIN`], [`FLAG_MEMBRANE`] and [`FLAG_COL`] flags.
+    /// the [`FLAG_MARGIN`], [`FLAG_MEMBRANE`], [`FLAG_COL`] and
+    /// [`FLAG_BASE`] flags.
     pub fn to_mesh(&self) -> TriMesh {
         let mut m = TriMesh::new(
             self.vertices.iter().map(|p| p.as_vec3()).collect(),
@@ -155,6 +164,7 @@ impl GumSurface {
                         | if self.margin[i] { FLAG_MARGIN } else { 0 }
                         | if self.membrane[i] { FLAG_MEMBRANE } else { 0 }
                         | if self.col[i] { FLAG_COL } else { 0 }
+                        | if self.base[i] { FLAG_BASE } else { 0 }
                 })
                 .collect(),
         );
@@ -169,14 +179,83 @@ impl GumSurface {
             .as_ref()
             .filter(|l| l.len() == m.vertex_count())
             .ok_or_else(|| GingivaError::Invalid("the gingiva mesh has no vertex flags".into()))?;
-        Ok(Self {
+        let g = Self {
             vertices: m.positions.iter().map(|p| p.as_dvec3()).collect(),
             tris: m.tris.clone(),
             tooth: labels.iter().map(|l| l & TOOTH_MASK).collect(),
             margin: labels.iter().map(|l| l & FLAG_MARGIN != 0).collect(),
             membrane: labels.iter().map(|l| l & FLAG_MEMBRANE != 0).collect(),
             col: labels.iter().map(|l| l & FLAG_COL != 0).collect(),
-        })
+            base: labels.iter().map(|l| l & FLAG_BASE != 0).collect(),
+        };
+        if g.base[g.scanned_vertices()..].iter().any(|&b| !b) {
+            return Err(GingivaError::Invalid(
+                "the base of the gingiva is not after its other points".into(),
+            ));
+        }
+        Ok(g)
+    }
+
+    /// Points of the gingiva before its base: all of them when it has none.
+    pub fn scanned_vertices(&self) -> usize {
+        self.base
+            .iter()
+            .position(|&b| b)
+            .unwrap_or(self.vertices.len())
+    }
+
+    /// Closes the gingiva (arch coordinates, occlusal `+Z`) with the flat
+    /// base the import gives an open scan ([`scan_base::make_base`]: every
+    /// open border extruded onto a plane `height_mm` below the lowest point
+    /// and capped), so that the model is a closed solid. The points of the
+    /// base follow the others with tooth `0` and [`GumSurface::base`]; the
+    /// triangles keep the winding of the scan (the base is wound to match
+    /// it), so [`GumSurface::without_base`] gives back exactly the gingiva
+    /// [`gum_surface`] built. Returns the open edges closed (`0`: it was
+    /// closed already and is left as it is).
+    pub fn close_with_base(&mut self, height_mm: f64) -> Result<usize, GingivaError> {
+        let mesh = TriMesh::new(
+            self.vertices.iter().map(|p| p.as_vec3()).collect(),
+            self.tris.clone(),
+        );
+        let based = scan_base::make_base(&mesh, DVec3::Z, height_mm)
+            .map_err(|e| GingivaError::Invalid(format!("the base of the gingiva: {e}")))?;
+        let Some(based) = based else {
+            return Ok(0);
+        };
+        let n = self.vertices.len();
+        let total = based.mesh.positions.len();
+        self.vertices
+            .extend(based.mesh.positions[n..].iter().map(|p| p.as_dvec3()));
+        self.tris = based.mesh.tris;
+        if based.scan.flipped {
+            for t in &mut self.tris {
+                t.swap(1, 2);
+            }
+        }
+        self.tooth.resize(total, 0);
+        self.margin.resize(total, false);
+        self.membrane.resize(total, false);
+        self.col.resize(total, false);
+        self.base.resize(total, true);
+        Ok(based.closed_edges)
+    }
+
+    /// The gingiva without its base: the points before it and the
+    /// triangles that do not touch it, in their order.
+    pub fn without_base(mut self) -> Self {
+        let n = self.scanned_vertices();
+        if n == self.vertices.len() {
+            return self;
+        }
+        self.vertices.truncate(n);
+        self.tris.retain(|t| t.iter().all(|&i| (i as usize) < n));
+        self.tooth.truncate(n);
+        self.margin.truncate(n);
+        self.membrane.truncate(n);
+        self.col.truncate(n);
+        self.base.truncate(n);
+        self
     }
 }
 
@@ -470,6 +549,7 @@ pub fn gum_surface_with_progress(
         margin,
         membrane,
         col,
+        base: vec![false; n2],
     })
 }
 
@@ -562,8 +642,15 @@ fn smoothstep(x: f64) -> f64 {
 }
 
 /// Harmonic blend weights of the gingiva on the teeth `fdis`
-/// (`gum_weights`, version [`GUM_WEIGHTS_VERSION`]).
+/// (`gum_weights`, version [`GUM_WEIGHTS_VERSION`]). They are computed on
+/// the gingiva without its base, as the plugin computes them on the open
+/// scan; the points of the base weigh nothing and stay still.
 pub fn gum_weights(g: &GumSurface, fdis: &[Fdi], params: &Params) -> GumWeights {
+    if g.scanned_vertices() < g.vertices.len() {
+        let mut w = gum_weights(&g.clone().without_base(), fdis, params);
+        w.w.resize(g.vertices.len() * fdis.len(), 0.0);
+        return w;
+    }
     let v = &g.vertices;
     let n = v.len();
     let nf = fdis.len();
@@ -1018,15 +1105,64 @@ mod tests {
     #[test]
     fn stored_flags_round_trip() {
         let g = GumSurface {
-            vertices: vec![DVec3::ZERO, DVec3::X, DVec3::Y],
-            tris: vec![[0, 1, 2]],
-            tooth: vec![0, 41, 31],
-            margin: vec![false, true, false],
-            membrane: vec![false, false, true],
-            col: vec![false, false, true],
+            vertices: vec![DVec3::ZERO, DVec3::X, DVec3::Y, DVec3::NEG_Z],
+            tris: vec![[0, 1, 2], [0, 2, 3]],
+            tooth: vec![0, 41, 31, 0],
+            margin: vec![false, true, false, false],
+            membrane: vec![false, false, true, false],
+            col: vec![false, false, true, false],
+            base: vec![false, false, false, true],
         };
         let back = GumSurface::from_mesh(&g.to_mesh()).unwrap();
         assert_eq!(back, g);
+        // a base point before a point of the scan is refused
+        let mut m = g.to_mesh();
+        m.vertex_labels.as_mut().unwrap()[1] |= FLAG_BASE;
+        assert!(GumSurface::from_mesh(&m).is_err());
+    }
+
+    #[test]
+    fn the_base_closes_the_gingiva_and_comes_off_again() {
+        let (v, t, l) = flat_crown(24);
+        let open = gum_surface(&v, &t, &l, &Params::default()).unwrap();
+        assert!(open.to_mesh().edge_adjacency().boundary_edge_count() > 0);
+        let mut closed = open.clone();
+        let edges = closed
+            .close_with_base(scan_base::HEIGHT_DEFAULT_MM)
+            .unwrap();
+        assert!(edges > 0);
+        let mesh = closed.to_mesh();
+        assert_eq!(mesh.edge_adjacency().boundary_edge_count(), 0);
+        // the base lies flat, HEIGHT_DEFAULT_MM under the lowest point
+        let lowest = open
+            .vertices
+            .iter()
+            .map(|p| p.z)
+            .fold(f64::INFINITY, f64::min);
+        let n = open.vertices.len();
+        assert_eq!(closed.scanned_vertices(), n);
+        for p in &closed.vertices[n..] {
+            assert!((p.z - (lowest - scan_base::HEIGHT_DEFAULT_MM)).abs() < 1e-4);
+        }
+        assert!(closed.tooth[n..].iter().all(|&x| x == 0));
+        // closed once: a second time changes nothing
+        let mut again = closed.clone();
+        assert_eq!(
+            again.close_with_base(scan_base::HEIGHT_DEFAULT_MM).unwrap(),
+            0
+        );
+        assert_eq!(again, closed);
+        // stored and read back, then without the base: the gingiva as built
+        let back = GumSurface::from_mesh(&mesh).unwrap();
+        assert_eq!(back.base, closed.base);
+        assert_eq!(closed.clone().without_base(), open);
+        // the weights of the scan are those of the open gingiva, the base weighs nothing
+        let fdis = [Fdi::new(41).unwrap()];
+        let w_open = gum_weights(&open, &fdis, &Params::default());
+        let w_closed = gum_weights(&closed, &fdis, &Params::default());
+        assert_eq!(w_closed.w.len(), closed.vertices.len());
+        assert_eq!(w_closed.w[..n], w_open.w[..]);
+        assert!(w_closed.w[n..].iter().all(|&x| x == 0.0));
     }
 
     /// A flat grid with a labelled square (a crown) in the middle.

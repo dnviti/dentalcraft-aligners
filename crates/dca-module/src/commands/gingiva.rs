@@ -3,16 +3,21 @@
 //! `aligners.preparation.gingiva` builds the gingiva without holes of every
 //! segmented arch (or the one arch asked for): the scan, in the arch frame
 //! its seeds define, cut along the smoothed margin of all the teeth, with a
-//! harmonic membrane under the crowns. It is stored as a blob in
+//! harmonic membrane under the crowns, then closed with the flat base the
+//! import gives an open scan (`dca_algo::scan_base::make_base`, 3 mm under
+//! its lowest point along the occlusal axis of the arch frame), so that the
+//! model shown with the 3D teeth is a closed solid. It is stored as a blob in
 //! `AlignersState::gingiva` (case coordinates; the vertex labels hold the
-//! tooth each vertex moves with and the margin, membrane and col flags, from
-//! which `dca_algo::gingiva::gum_weights` computes the blend weights that
-//! move it with the teeth). The scans are not modified.
+//! tooth each vertex moves with and the margin, membrane, col and base flags,
+//! from which `dca_algo::gingiva::gum_weights` computes the blend weights
+//! that move it with the teeth; the base stays still). The scans are not
+//! modified.
 
 use dc_case::{CaseState, ModuleState};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::gingiva;
+use dca_algo::scan_base::HEIGHT_DEFAULT_MM;
 use dca_model::MODULE_ID;
 use serde_json::{Map, Value, json};
 
@@ -65,6 +70,10 @@ fn run_gingiva(
             e => CommandError::Failed(format!("{} arch: {e}", arch_name(arch))),
         })?;
         ctx.check_cancelled()?;
+        // closed with the flat base, in the arch frame (occlusal +Z)
+        let base_edges = g
+            .close_with_base(HEIGHT_DEFAULT_MM)
+            .map_err(|e| CommandError::Failed(format!("{} arch: {e}", arch_name(arch))))?;
         for p in &mut g.vertices {
             *p = scan.to_case.transform_point3(*p);
         }
@@ -75,6 +84,8 @@ fn run_gingiva(
             "margin_vertices": count(&g.margin),
             "membrane_vertices": count(&g.membrane),
             "col_vertices": count(&g.col),
+            "base_vertices": count(&g.base),
+            "base_edges": base_edges,
             "seconds": t0.elapsed().as_secs_f64(),
         });
         let blob = next.blobs.insert(g.to_mesh());

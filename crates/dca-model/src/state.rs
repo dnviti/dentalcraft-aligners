@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dc_case::{BlobRef, Fdi, Pose, ScanRole};
+use dc_case::{BlobRef, Fdi, Pose, Scan, ScanRole};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
@@ -412,7 +412,9 @@ pub struct AlignersState {
     /// A bite registration (the registration commands and the virtual bite)
     /// moved the upper arch and no arch was replaced since. The move is baked
     /// into the mesh: nothing undoes it when an arch is replaced, so
-    /// [`AlignersState::clear_arch`] reports it once, as `bite_registered`.
+    /// [`AlignersState::clear_arch`] reports it once, as `bite_registered`;
+    /// removing a bite scan the registration used resets it too
+    /// (`ModuleData::scan_removed`).
     pub bite_registered: bool,
     /// The last bite of the case: how the relation was found and the report
     /// of a registration on the bite scans (the plugin's `bite_json`). It
@@ -1212,6 +1214,54 @@ impl dc_case::ModuleData for AlignersState {
     /// cleared. This is not a reset to the imported situation.
     fn scan_replaced(&mut self, role: ScanRole) -> Vec<&'static str> {
         self.clear_arch(role)
+    }
+
+    /// Clears what was computed from, or entered about, the removed scan
+    /// (`case.remove-scan`): the move made by hand to the scan and the
+    /// record of the base it was closed with go with it.
+    ///
+    /// An arch scan clears what replacing it clears
+    /// ([`AlignersState::clear_arch`]), then the sizes by hand and the
+    /// scanned-vertex counts of the 3D teeth that went, and the aligners
+    /// built for the view on that arch.
+    ///
+    /// A bite scan forgets the bite registered on the bite scans
+    /// ([`AlignersState::forget_bite`], id `bite_registered`) when that
+    /// registration used it: its report names the scan (the report keeps
+    /// file names, so a scan whose name it holds counts as used, also when
+    /// another bite scan has the same name), or the report does not say
+    /// which scans it used. As with a replaced arch, the move already
+    /// applied to the arches is not undone. A virtual bite, which no bite
+    /// scan made, and a registration on the other bite scans stay.
+    fn scan_removed(&mut self, scan: &Scan) -> Vec<&'static str> {
+        self.components.scan_moves.remove(&scan.id.to_string());
+        self.scan_bases.remove(&scan.mesh);
+        if scan.role != ScanRole::Bite {
+            let cleared = self.clear_arch(scan.role);
+            let crowns = &self.crowns;
+            self.components
+                .tooth_scales
+                .retain(|f, s| crowns.get(f) == Some(&s.crown));
+            self.prune_crown_scanned();
+            self.aligner_view.bases.retain(|b| b.arch != scan.role);
+            return cleared;
+        }
+        let used = match &self.bite_report {
+            Some(r) if r.method == crate::BiteMethod::Virtual => false,
+            Some(r) => match &r.registration {
+                Some(reg) if !reg.scans.is_empty() => {
+                    reg.scans.iter().any(|s| s.scan == scan.source_name)
+                }
+                _ => true,
+            },
+            // a flag with no report (an older version): its scans are unknown
+            None => true,
+        };
+        if used && self.forget_bite() {
+            vec!["bite_registered"]
+        } else {
+            Vec::new()
+        }
     }
 }
 

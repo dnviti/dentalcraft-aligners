@@ -230,6 +230,7 @@ fn strip() -> TriMesh {
         margin,
         membrane: vec![false; n],
         col: vec![false; n],
+        base: vec![false; n],
         vertices,
         tris,
     }
