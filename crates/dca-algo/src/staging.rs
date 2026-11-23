@@ -502,6 +502,12 @@ pub struct Unresolved {
     pub b: Fdi,
     /// Interpenetration (mm).
     pub penetration_mm: f64,
+    /// The interpenetration the plan allows the contact (mm), which
+    /// `penetration_mm` exceeds: the overlap of the crowns at rest plus the
+    /// tolerance and the IPR of the contact, or the overlap in the final
+    /// setup plus the tolerance, the larger. The crowns of a case often
+    /// overlap at rest already, so only the excess is the collision.
+    pub allowed_mm: f64,
 }
 
 /// Interpenetration of a contact in the final setup.
@@ -1236,11 +1242,11 @@ pub fn run_with_progress(
         while it < p.max_iter {
             it += 1;
             let n = sch.n_stages();
-            let mut viol: Option<(i64, Fdi, Fdi)> = None;
+            let mut viol: Option<(i64, Fdi, Fdi, f64)> = None;
             'search: for k in 1..=n {
                 for &((a, b), [thr, _, _]) in &base {
                     if pen_at!(a, b, k) > thr {
-                        viol = Some((k, a, b));
+                        viol = Some((k, a, b, thr));
                         break 'search;
                     }
                 }
@@ -1248,7 +1254,7 @@ pub fn run_with_progress(
             if !progress((it as f64 / p.max_iter as f64).min(0.99)) {
                 return Err(StagingError::Cancelled);
             }
-            let Some((k, a, b)) = viol else {
+            let Some((k, a, b, allowed)) = viol else {
                 converged = true;
                 break;
             };
@@ -1281,6 +1287,7 @@ pub fn run_with_progress(
                     a,
                     b,
                     penetration_mm: pen,
+                    allowed_mm: allowed,
                 });
                 if let Some(e) = base.iter_mut().find(|(pair, _)| *pair == (a, b)) {
                     e.1[0] = 1e9;
@@ -1303,6 +1310,19 @@ pub fn run_with_progress(
             log.push(format!(
                 "Anti-collision delays (aligners): {}",
                 delayed.join(", ")
+            ));
+        }
+        // the plugin says these only in its report and its panel: the notes say them too,
+        // with how far over the allowance they go
+        for u in &unresolved {
+            log.push(format!(
+                "Collision left at aligner {} {}|{}: {:.2} mm, {:.2} mm over the {:.2} mm allowed (correct the setup, add IPR or slow a tooth)",
+                u.stage,
+                u.a,
+                u.b,
+                u.penetration_mm,
+                u.penetration_mm - u.allowed_mm,
+                u.allowed_mm
             ));
         }
         let n = sch.n_stages();
@@ -1759,6 +1779,62 @@ mod tests {
         let plan = run(&input, &p).unwrap();
         assert!(plan.final_overlap[0].mm > 0.9);
         assert!(plan.log.iter().any(|l| l.contains("Residual overlap")));
+    }
+
+    #[test]
+    fn a_collision_no_delay_solves_is_in_the_notes_with_its_allowance() {
+        // 12 turns 60 degrees about its long axis beside 11, which does not move: half way a
+        // corner of the box sweeps deeper into 11 than the turned box ends up, and delaying 12
+        // only moves the sweep to a later aligner
+        let turn = 60.0_f64.to_radians();
+        let moves = [
+            tooth(12, -7.0, [0.0, 0.0, 0.0, 0.0, 0.0, turn]),
+            tooth(11, 0.0, [0.0; 6]),
+        ];
+        let input = Input {
+            moves: &moves,
+            ipr: &[],
+            complexity: Complexity::default(),
+        };
+        let p = Params::default();
+        let plan = run(&input, &p).unwrap();
+        assert_eq!(plan.unresolved.len(), 1, "{:?}", plan.log);
+        let u = plan.unresolved[0];
+        assert_eq!((u.a, u.b), (fdi(12), fdi(11)));
+        // the faces touch at rest: the allowance is the overlap the turned box ends with,
+        // plus the tolerance
+        let end = plan.final_overlap[0].mm;
+        assert!(end > 0.5, "{end}");
+        assert!(
+            (u.allowed_mm - (end + p.collision_tol_mm)).abs() < 1e-9,
+            "{u:?} {end}"
+        );
+        assert!(u.penetration_mm > u.allowed_mm, "{u:?}");
+        let note = format!(
+            "Collision left at aligner {} 12|11: {:.2} mm, {:.2} mm over the {:.2} mm allowed",
+            u.stage,
+            u.penetration_mm,
+            u.penetration_mm - u.allowed_mm,
+            u.allowed_mm
+        );
+        assert!(
+            plan.log.iter().any(|l| l.starts_with(&note)),
+            "{note} in {:?}",
+            plan.log
+        );
+        // a plan with nothing left says nothing of the kind
+        let still = [tooth(12, -7.0, [0.0; 6]), tooth(11, 0.0, [0.0; 6])];
+        let calm = run(
+            &Input {
+                moves: &still,
+                ipr: &[],
+                complexity: Complexity::default(),
+            },
+            &p,
+        )
+        .unwrap();
+        assert!(calm.unresolved.is_empty());
+        assert!(!calm.log.iter().any(|l| l.contains("Collision left")));
     }
 
     #[test]
