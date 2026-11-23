@@ -61,6 +61,15 @@ pub const RIM_MM: f64 = 0.5;
 pub const THIN_MM: f64 = 0.35;
 /// Distance from the neighbouring crown where thin sheets are looked for, mm.
 pub const THIN_REACH: f64 = 2.0;
+/// Two sides of a scanned crown closer than this and facing away from each
+/// other (more than 120°): the walls of a tunnel the scanner left through a
+/// cusp, a strand over a fissure. When the tunnel is cut away
+/// (`handles::cut`), its thin walls go with it, else the closed tooth
+/// keeps their stumps as fins of no thickness, which the field of a printed
+/// model samples differently at every pose (a hole through the model at
+/// some stages only), mm. Under the finest voxel of the print files
+/// (0.08 mm).
+pub const THIN_SCAN_MM: f64 = 0.05;
 /// Occlusal / incisal band kept as scanned next to the neighbour, mm.
 pub const KEEP_TOP_MM: f64 = 1.0;
 /// Top of the contact line held where the scanner saw it, mm.
@@ -1388,8 +1397,9 @@ mod tests {
     /// crown, joined to it at both ends: a handle of the scanned crown (a
     /// tunnel runs under the strand), as a scanner leaves one across a
     /// fissure or under a thin edge. A dome 4 mm high on a 12 mm square, the
-    /// strand a square tube 0.25 mm wide arching 1.1 mm over the crown.
-    fn crown_with_a_strand() -> (Vec<DVec3>, Vec<[u32; 3]>, Vec<u16>) {
+    /// strand a square tube `width` wide arching 1.1 mm over the crown from
+    /// two feet 0.25 mm square.
+    fn crown_with_a_strand(width: f64) -> (Vec<DVec3>, Vec<[u32; 3]>, Vec<u16>) {
         let (n, h) = (49usize, 0.25);
         let dome = |x: f64, y: f64| 4.0 * (-(x * x + y * y) / 9.0).exp();
         let id = |i: usize, j: usize| (j * n + i) as u32;
@@ -1415,7 +1425,7 @@ mod tests {
         let foot = |i: usize| [id(i, j0), id(i + 1, j0), id(i + 1, j0 + 1), id(i, j0 + 1)];
         // square rings along a half circle from one foot to the other (the
         // second foot run the other way round, so that the faces go outward)
-        let (w, rho, steps) = (0.5 * h, 1.125, 11u32);
+        let (w, rho, steps) = (0.5 * width, 1.125, 11u32);
         let mid = DVec3::new(0.0, 0.125, dome(-1.125, 0.125));
         let mut rings = vec![foot(ia)];
         for s in 1..=steps {
@@ -1450,7 +1460,7 @@ mod tests {
     /// without it.
     #[test]
     fn a_crown_with_a_tunnel_through_it_is_closed_into_one_solid() {
-        let (v, t, labels) = crown_with_a_strand();
+        let (v, t, labels) = crown_with_a_strand(0.25);
         // the scanned crown has a handle: (2 - V + E - F - holes) / 2 = 1
         let crown: Vec<[u32; 3]> = t
             .iter()
@@ -1485,6 +1495,47 @@ mod tests {
         // the whole arch at once gives the same tooth
         let out = run(&input, &Params::default()).unwrap();
         assert_eq!(out.teeth[&fdi], tooth);
+    }
+
+    /// A strand whose walls lie 0.01 mm apart, as the scanner left one
+    /// under the cusp of the Provino-demo 23: cut where it was narrowest,
+    /// its stumps stayed on the closed tooth as fins of no thickness, which
+    /// the field of the printed model sampled differently at every pose (a
+    /// hole through the stage models 05 to 07 at standard quality). Its thin
+    /// walls are taken away and their holes closed.
+    #[test]
+    fn a_crown_with_a_thin_strand_is_closed_without_fins() {
+        let (v, t, labels) = crown_with_a_strand(0.01);
+        let fdi = Fdi::new(11).unwrap();
+        let axes = BTreeMap::from([(fdi, DVec3::Z)]);
+        let input = Input {
+            vertices: &v,
+            tris: &t,
+            labels: &labels,
+            axes: &axes,
+        };
+        let tooth = closed_tooth(&input, fdi, DVec3::Z, &Params::default()).expect("a solid");
+        let mesh = TriMesh::new(
+            tooth.vertices.iter().map(|p| p.as_vec3()).collect(),
+            tooth.tris.clone(),
+        );
+        let s = dc_mesh::solid_topology(&mesh);
+        assert!(s.is_closed(), "{s:?}");
+        assert_eq!((s.pieces, s.genus), (1, Some(0)), "{s:?}");
+        let thin = geom::thin_faces(&tooth.vertices, &tooth.tris, THIN_SCAN_MM);
+        let at: Vec<DVec3> = tooth
+            .tris
+            .iter()
+            .zip(&thin)
+            .filter(|(_, t)| **t)
+            .map(|(f, _)| tooth.vertices[f[0] as usize])
+            .take(4)
+            .collect();
+        assert!(
+            at.is_empty(),
+            "{} faces of no thickness, at {at:?}",
+            thin.iter().filter(|t| **t).count()
+        );
     }
 
     /// Three teeth asked on a scan that has none of them: every tooth fails

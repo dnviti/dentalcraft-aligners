@@ -31,7 +31,7 @@
 //! the scan, and its closed tooth has the tunnels.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 
 use glam::DVec3;
 
@@ -688,6 +688,9 @@ pub(super) fn cut(v: &[DVec3], t: &[[u32; 3]]) -> Option<Cut> {
         }
         cur = cut?;
     }
+    if handles.unwrap_or(0) > 0 {
+        thin_walls_away(v, t, &mut cur, floor);
+    }
     // the faces kept, then a fan over every hole of a cut
     let mut kept: Vec<u32> = cur.iter().flatten().copied().collect();
     kept.sort_unstable();
@@ -721,6 +724,57 @@ pub(super) fn cut(v: &[DVec3], t: &[[u32; 3]]) -> Option<Cut> {
         caps,
         handles: handles.unwrap_or(0),
     })
+}
+
+/// Takes away from `cur` (the crown `t` with its handles cut) the thin
+/// walls of the tunnels cut: its faces within [`super::THIN_SCAN_MM`] of a
+/// face that faces away from them ([`geom::thin_faces`]) reached from a cut
+/// through such faces. They are the stumps of a strand the scanner left
+/// over the crown; kept, they would stay on the closed tooth as fins of no
+/// thickness. Nothing is taken when that would leave less than `floor` of
+/// the crown.
+fn thin_walls_away(v: &[DVec3], t: &[[u32; 3]], cur: &mut Vec<[u32; 3]>, floor: f64) {
+    let thin = geom::thin_faces(v, cur, super::THIN_SCAN_MM);
+    if !thin.contains(&true) {
+        return;
+    }
+    // the points of the faces a cut took away, then of the walls reached
+    let present: HashSet<[u32; 3]> = cur.iter().copied().collect();
+    let mut reached = vec![false; v.len()];
+    for f in t.iter().filter(|f| !present.contains(*f)) {
+        for &i in f {
+            reached[i as usize] = true;
+        }
+    }
+    let mut gone = vec![false; cur.len()];
+    loop {
+        let mut grew = false;
+        for (k, f) in cur.iter().enumerate() {
+            if thin[k] && !gone[k] && f.iter().any(|&i| reached[i as usize]) {
+                gone[k] = true;
+                grew = true;
+                for &i in f {
+                    reached[i as usize] = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    if !gone.contains(&true) {
+        return;
+    }
+    let mut next: Vec<[u32; 3]> = cur
+        .iter()
+        .zip(&gone)
+        .filter(|(_, g)| !**g)
+        .map(|(f, _)| *f)
+        .collect();
+    tidy(&mut next);
+    if !next.is_empty() && area(v, &next) >= floor {
+        *cur = next;
+    }
 }
 
 /// A torus around `+Z` (radius `big`, and `small(u)` around its tube at
