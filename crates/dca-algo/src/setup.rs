@@ -251,6 +251,11 @@ pub struct Config {
     /// excess, so the turn grows from nothing at the tolerance. The parity
     /// tests with the plugin turn it on.
     pub plugin_derotation: bool,
+    /// The plugin's scale of the robust arch line: 6 x the median residual of
+    /// every tooth, taken again at every round ([`cusp_line`]). Off by default
+    /// (2026-11-23): the scale is taken once, from the canines and premolars.
+    /// The parity tests with the plugin turn it on.
+    pub plugin_line_scale: bool,
 }
 
 impl Default for Config {
@@ -285,6 +290,7 @@ impl Default for Config {
             ipr_surface_cap: 0.25,
             enamel_fraction: 0.5,
             plugin_derotation: false,
+            plugin_line_scale: false,
         }
     }
 }
@@ -896,7 +902,7 @@ pub fn base_line(
     };
     let anchors: Vec<Fdi> = poses.keys().copied().collect();
     oriented(
-        &cusp_line(&cusps, &seq, sigma, &anchors),
+        &cusp_line(&cusps, &seq, sigma, &anchors, false),
         mean(&cusps[first]),
     )
 }
@@ -1433,7 +1439,13 @@ pub fn conservative_setup(
     let interior = interior(&cusps, &seq);
     let anchors_locked: Vec<Fdi> = poses.keys().copied().collect();
     let base = match line {
-        None => cusp_line(&cusps, &seq, cfg.sigma, &anchors_locked),
+        None => cusp_line(
+            &cusps,
+            &seq,
+            cfg.sigma,
+            &anchors_locked,
+            cfg.plugin_line_scale,
+        ),
         Some(l) => oriented(l, pc[0]),
     };
     let base = oriented(&base, pc[0]);
@@ -1468,7 +1480,7 @@ pub fn conservative_setup(
     // a locked tooth out of line: compared with the line of the other teeth (the one through
     // it would always find it in line)
     if !poses.is_empty() {
-        let free_line = cusp_line(&cusps, &seq, cfg.sigma, &[]);
+        let free_line = cusp_line(&cusps, &seq, cfg.sigma, &[], cfg.plugin_line_scale);
         let sb0 = arc(&free_line);
         for f in poses.keys() {
             let Some(i) = seq.iter().position(|x| x == f) else {
@@ -2116,6 +2128,7 @@ impl Params {
             ipr_surface_cap: self.ipr_surface_cap_mm,
             enamel_fraction: self.enamel_fraction,
             plugin_derotation: false,
+            plugin_line_scale: false,
         }
     }
 

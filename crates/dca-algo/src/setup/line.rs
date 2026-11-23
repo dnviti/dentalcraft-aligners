@@ -309,15 +309,21 @@ fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> [f64; 3] {
 
 /// The arch line `(n, 3)` through the real cusps `cusps` in the order `seq`,
 /// from the first to the last tooth, extended straight by 4 mm at the ends.
-/// Robust weights per tooth (biweight of the mean residual of its cusps,
-/// scale 6 x the median residual, at least 0.6 mm): a tooth out of the arch
-/// does not drag the line. `anchors`: reference teeth (locked by the
-/// clinician) that weigh 10 and are never down-weighted.
+/// Robust weights per tooth (biweight of the mean residual of its cusps, a
+/// continuous weight that reaches its floor at the scale): a tooth out of
+/// the arch does not drag the line. The scale is taken once, from the first
+/// line: 6 x the median residual of the canines and premolars (their single
+/// cusps hold when the segmentation moves; every tooth when fewer than two),
+/// at least 0.6 mm; with `plugin_scale` it is the plugin's, 6 x the median
+/// residual of every tooth taken again at every round, which moves the whole
+/// line when one residual crosses the median. `anchors`: reference teeth
+/// (locked by the clinician) that weigh 10 and are never down-weighted.
 pub fn cusp_line(
     cusps: &BTreeMap<Fdi, Vec<DVec3>>,
     seq: &[Fdi],
     sigma: f64,
     anchors: &[Fdi],
+    plugin_scale: bool,
 ) -> Vec<DVec3> {
     let (p, lab) = order_points(cusps, seq);
     if p.len() < 3 {
@@ -337,6 +343,7 @@ pub fn cusp_line(
     let mut teeth: Vec<Fdi> = lab.clone();
     teeth.sort();
     teeth.dedup();
+    let mut first_scale = None;
     for _ in 0..ROBUST {
         let r = offsets_3d(&l, &p);
         let rt: Vec<f64> = teeth
@@ -351,7 +358,20 @@ pub fn cusp_line(
                 v.iter().sum::<f64>() / v.len() as f64
             })
             .collect();
-        let scale = (6.0 * median(&rt)).max(MIN_SCALE);
+        let scale = if plugin_scale {
+            (6.0 * median(&rt)).max(MIN_SCALE)
+        } else {
+            *first_scale.get_or_insert_with(|| {
+                let stable: Vec<f64> = teeth
+                    .iter()
+                    .zip(&rt)
+                    .filter(|(f, _)| (3..=5).contains(&crate::anatomy::index(**f)))
+                    .map(|(_, x)| *x)
+                    .collect();
+                let base = if stable.len() >= 2 { &stable } else { &rt };
+                (6.0 * median(base)).max(MIN_SCALE)
+            })
+        };
         let wt: Vec<f64> = rt
             .iter()
             .map(|&x| {

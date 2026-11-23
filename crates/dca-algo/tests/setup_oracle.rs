@@ -253,10 +253,12 @@ fn compare(case: &str, file: &str, worst: &mut Worst) {
         fixed: &[],
         poses: &BTreeMap::new(),
     };
-    // the plugin's derotation (the port's own, only the excess over the tolerance, is
-    // stated in `derotating_only_the_excess_changes_the_demo_setups_as_stated`)
+    // the plugin's derotation and line scale (the port's own are stated in
+    // `derotating_only_the_excess_changes_the_demo_setups_as_stated` and
+    // `the_scale_of_the_arch_line_changes_the_demo_setups_as_stated`)
     let cfg = Config {
         plugin_derotation: true,
+        plugin_line_scale: true,
         ..params.config(arch)
     };
     let out = setup::run_with(&input, &cfg).unwrap();
@@ -366,21 +368,53 @@ fn setup_matches_the_oracle_on_the_demo_cases() {
 /// degree for the incisors and canines; up to 2 degrees where the tooth
 /// also ends elsewhere on the line or its axis is tipped), and its centre
 /// of resistance ends up to 0.15 mm away. The arch line, the moved teeth
-/// and the IPR plan are the same. Per case: (case, largest rotation
-/// difference of a moved tooth in degrees, largest distance between the
-/// final centres of resistance in mm, the IPR at every contact the plugin
-/// strips in mm, teeth the plugin moves and the port does not).
-const EXCESS_ONLY: [(&str, f64, f64, f64, &[u8]); 6] = [
-    ("demo_lower_mild", 1.64, 0.10, 0.20, &[]),
-    ("demo_lower_moderate", 1.04, 0.02, 0.35, &[]),
-    ("demo_lower_severe", 1.12, 0.12, 0.50, &[]),
-    ("demo_upper_mild", 1.18, 0.13, 0.10, &[]),
-    ("demo_upper_moderate", 1.98, 0.15, 0.15, &[]),
-    ("demo_upper_severe", 1.20, 0.08, 0.50, &[]),
+/// and the IPR plan are the same.
+const EXCESS_ONLY: [Departure; 6] = [
+    ("demo_lower_mild", 1.64, 0.10, 0.20, &[], 0.0),
+    ("demo_lower_moderate", 1.04, 0.02, 0.35, &[], 0.0),
+    ("demo_lower_severe", 1.12, 0.12, 0.50, &[], 0.0),
+    ("demo_upper_mild", 1.18, 0.13, 0.10, &[], 0.0),
+    ("demo_upper_moderate", 1.98, 0.15, 0.15, &[], 0.0),
+    ("demo_upper_severe", 1.20, 0.08, 0.50, &[], 0.0),
 ];
+
+/// What the port's scale of the robust arch line (taken once, from the
+/// canines and premolars, [`Config::plugin_line_scale`] off, departure of
+/// 2026-11-23) changes on the demo setups against the plugin's
+/// (`setup.json`, default settings, the plugin's derotation): the line
+/// moves by up to 1.12 mm (`demo_lower_mild`, elsewhere at most 0.22 mm),
+/// a moved tooth by at most 1.63 degrees and 0.16 mm, the moved teeth are
+/// the same and the IPR of `demo_upper_severe` is one step less (0.45 mm
+/// instead of 0.50 at its seven contacts).
+const LINE_SCALE: [Departure; 6] = [
+    ("demo_lower_mild", 1.63, 0.15, 0.20, &[], 1.12),
+    ("demo_lower_moderate", 0.44, 0.04, 0.35, &[], 0.03),
+    ("demo_lower_severe", 0.06, 0.01, 0.50, &[], 0.01),
+    ("demo_upper_mild", 0.01, 0.00, 0.10, &[], 0.00),
+    ("demo_upper_moderate", 0.01, 0.00, 0.15, &[], 0.00),
+    ("demo_upper_severe", 0.79, 0.16, 0.45, &[], 0.22),
+];
+
+/// A departure from the plugin's setup of a demo case: (case, largest
+/// rotation difference of a moved tooth in degrees, largest distance
+/// between the final centres of resistance in mm, the IPR at every contact
+/// the plugin strips in mm, teeth the plugin moves and the port does not,
+/// largest distance between the arch lines in mm).
+type Departure = (&'static str, f64, f64, f64, &'static [u8], f64);
 
 #[test]
 fn derotating_only_the_excess_changes_the_demo_setups_as_stated() {
+    stated(&EXCESS_ONLY, (false, true));
+}
+
+#[test]
+fn the_scale_of_the_arch_line_changes_the_demo_setups_as_stated() {
+    stated(&LINE_SCALE, (true, false));
+}
+
+/// Checks `rows` against the setups with the port's `(plugin_derotation,
+/// plugin_line_scale)` and the plugin's, on every demo case.
+fn stated(rows: &[Departure], port_cfg: (bool, bool)) {
     let dir = fixtures();
     let mut cases: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -395,7 +429,7 @@ fn derotating_only_the_excess_changes_the_demo_setups_as_stated() {
     cases.sort();
     let mut unstated = Vec::new();
     for case in &cases {
-        let (port, plugin) = (run_case(case, false), run_case(case, true));
+        let (port, plugin) = (run_case(case, port_cfg), run_case(case, (true, true)));
         let rest_frames = &json(&dir.join(case).join("setup/setup.json"))["rest_frames"];
         let (mut deg, mut mm) = (0.0f64, 0.0f64);
         for (f, d) in &plugin.result.targets {
@@ -432,12 +466,12 @@ fn derotating_only_the_excess_changes_the_demo_setups_as_stated() {
             "{case}: rotation {deg:.2} deg, translation {mm:.2} mm, IPR {ipr:?} (plugin {:?}), not moved {gone:?}, line {line:.3} mm",
             plugin.result.ipr.values().collect::<Vec<_>>()
         );
-        let want = EXCESS_ONLY.iter().find(|r| r.0 == case);
-        let Some(&(_, w_deg, w_mm, w_ipr, w_gone)) = want else {
+        let want = rows.iter().find(|r| r.0 == case);
+        let Some(&(_, w_deg, w_mm, w_ipr, w_gone, w_line)) = want else {
             unstated.push(case.clone());
             continue;
         };
-        assert!(line <= TOL_MM, "{case}: line {line}");
+        assert!((line - w_line).abs() < 0.01, "{case}: line {line}");
         assert!((deg - w_deg).abs() < 0.05, "{case}: rotation {deg}");
         assert!((mm - w_mm).abs() < 0.05, "{case}: translation {mm}");
         assert!(
@@ -450,8 +484,8 @@ fn derotating_only_the_excess_changes_the_demo_setups_as_stated() {
 }
 
 /// The setup of `case` (`setup.json`, the oracle's inputs) with the
-/// plugin's derotation or the port's.
-fn run_case(case: &str, plugin_derotation: bool) -> setup::Output {
+/// plugin's derotation and line scale or the port's.
+fn run_case(case: &str, (plugin_derotation, plugin_line_scale): (bool, bool)) -> setup::Output {
     let dir = fixtures().join(case);
     let teeth_json = json(&dir.join("teeth/teeth.json"));
     let oracle = json(&dir.join("setup").join("setup.json"));
@@ -493,6 +527,7 @@ fn run_case(case: &str, plugin_derotation: bool) -> setup::Output {
     };
     let cfg = Config {
         plugin_derotation,
+        plugin_line_scale,
         ..params.config(arch)
     };
     setup::run_with(&input, &cfg).unwrap()

@@ -240,7 +240,7 @@ fn has(res: &SetupResult, pred: impl Fn(&Note) -> bool) -> bool {
 #[test]
 fn the_line_passes_through_the_cusps_of_a_regular_arch() {
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     for f in seq() {
         assert!(max_dist(&l, &a.cusps[&f]) < 0.12, "{f}");
     }
@@ -252,7 +252,7 @@ fn the_line_is_not_dragged_by_a_tooth_out_of_the_arch() {
         shift: vec![(32, DVec3::new(0.0, -1.5, 0.0))],
         ..Mal::default()
     });
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     let d = line_distance(&l, &a.cusps[&fdi(32)]);
     assert!(d.iter().sum::<f64>() / d.len() as f64 > 0.7);
 }
@@ -260,7 +260,7 @@ fn the_line_is_not_dragged_by_a_tooth_out_of_the_arch() {
 #[test]
 fn the_line_runs_from_the_first_to_the_last_tooth() {
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     let near = |f: u8, p: DVec3| {
         a.cusps[&fdi(f)]
             .iter()
@@ -497,7 +497,7 @@ fn crowding_without_space_uses_ipr() {
 #[test]
 fn a_drawn_line_is_followed() {
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     let n = line_normals(&l, interior(&a.cusps, &seq()));
     let l2: Vec<DVec3> = l
         .iter()
@@ -1147,6 +1147,7 @@ fn scenarios() -> Vec<(&'static str, SetupResult)> {
         // the plugin derotates fully
         let cfg = Config {
             plugin_derotation: true,
+            plugin_line_scale: true,
             ..cfg
         };
         let r = conservative_setup(
@@ -1195,7 +1196,7 @@ fn scenarios() -> Vec<(&'static str, SetupResult)> {
         BTreeMap::from([(fdi(42), DMat4::IDENTITY)]),
     );
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], true);
     let n = line_normals(&l, interior(&a.cusps, &seq()));
     let l2: Vec<DVec3> = l
         .iter()

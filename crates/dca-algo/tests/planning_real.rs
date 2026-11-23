@@ -286,6 +286,7 @@ fn check_setup(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, DMat4> {
         },
         &setup::Config {
             plugin_derotation: true,
+            plugin_line_scale: true,
             ..setup::Params::default().config(s.arch)
         },
     )
