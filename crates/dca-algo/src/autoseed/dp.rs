@@ -12,6 +12,9 @@ const INF: f64 = 1e18;
 const SIGMA_BL: f64 = 0.2;
 /// Weight of the bucco-lingual width term.
 const LAM_BL: f64 = 0.7;
+/// How far (mm) from each end of the profile the tooth sequence must
+/// start and end without free ends: the plugin's `END_ZONE + 3`.
+pub(crate) const SLACK_MM: f64 = END_ZONE + 3.0;
 
 /// A tooth-sequence problem on the bins `[0, nb)` of the arch profile
 /// (`nb = dip.len()`).
@@ -78,7 +81,7 @@ pub fn dp(p: &DpProblem<'_>) -> (f64, Vec<Option<(usize, usize)>>) {
     let n = p.w_bins.len();
     let nb = p.dip.len();
     let bin = p.bin_mm;
-    let slack = ((END_ZONE + 3.0) / bin) as usize;
+    let slack = (SLACK_MM / bin) as usize;
     let bcost: Vec<f64> = p
         .dip
         .iter()
