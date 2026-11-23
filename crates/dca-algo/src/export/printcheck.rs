@@ -123,6 +123,9 @@ pub enum Problem {
     Genus {
         /// Handles of the surface.
         count: i64,
+        /// Where they are: the centre of the shortest loop found through
+        /// each (coordinates of the file, mm); empty when none is found.
+        at: Vec<[f64; 3]>,
     },
     /// Zero or negative volume (inverted normals).
     NonPositiveVolume,
@@ -159,7 +162,14 @@ impl Problem {
             Problem::Degenerate { count } => n("chk-degenerate", &[count.to_string()]),
             Problem::Pieces { count } => n("chk-pieces", &[count.to_string()]),
             Problem::SelfIntersections { count } => n("chk-selfint", &[count.to_string()]),
-            Problem::Genus { count } => n("chk-genus", &[count.to_string()]),
+            Problem::Genus { count, at } if at.is_empty() => n("chk-genus", &[count.to_string()]),
+            Problem::Genus { count, at } => {
+                let places: Vec<String> = at
+                    .iter()
+                    .map(|p| format!("({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]))
+                    .collect();
+                n("chk-genus-at", &[count.to_string(), places.join(", ")])
+            }
             Problem::NonPositiveVolume => n("chk-volume", &[]),
             Problem::TooThin { min_mm, limit_mm } => n(
                 "chk-thin",
@@ -454,7 +464,10 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
     if let (Some(max), Some(g)) = (options.max_genus, out.genus)
         && g > i64::from(max)
     {
-        p.push(Problem::Genus { count: g });
+        p.push(Problem::Genus {
+            count: g,
+            at: hole_places(&pos, &tris, g.max(0) as usize),
+        });
     }
     if out.volume_mm3 <= 0.0 {
         p.push(Problem::NonPositiveVolume);
@@ -475,6 +488,31 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
     }
     out.ok = out.problems.is_empty();
     out
+}
+
+/// The centre of the shortest loop found through every handle of the
+/// closed surface `pos`, `tris` (at most `count`, a millimetre apart at
+/// least): where its holes through the wall are
+/// ([`crate::trim::holes::handle_loops`], [`crate::trim::holes::short_loops`]).
+fn hole_places(pos: &[Vec3], tris: &[[u32; 3]], count: usize) -> Vec<[f64; 3]> {
+    use crate::trim::holes;
+    let p: Vec<DVec3> = pos.iter().map(|v| v.as_dvec3()).collect();
+    let mut short: Vec<(f64, Vec<u32>)> = holes::handle_loops(&p, tris)
+        .iter()
+        .flat_map(|l| holes::short_loops(&p, tris, l, holes::CROP_MM, holes::ROOTS, 1))
+        .collect();
+    short.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<DVec3> = Vec::new();
+    for (_, l) in short {
+        if out.len() == count {
+            break;
+        }
+        let c = l.iter().map(|&v| p[v as usize]).sum::<DVec3>() / l.len().max(1) as f64;
+        if out.iter().all(|q| (*q - c).length() > 1.0) {
+            out.push(c);
+        }
+    }
+    out.into_iter().map(|c| c.to_array()).collect()
 }
 
 /// Checks the STL file at `path`.
@@ -1180,5 +1218,67 @@ pub(crate) mod tests {
             ),
             1
         );
+    }
+
+    /// A closed torus around the `z` axis through `centre` (radii `big`,
+    /// `small`), outward faces.
+    fn torus(centre: Vec3, big: f32, small: f32) -> TriMesh {
+        let (nu, nv) = (48usize, 24usize);
+        let mut positions = Vec::with_capacity(nu * nv);
+        for i in 0..nu {
+            let u = std::f32::consts::TAU * i as f32 / nu as f32;
+            for j in 0..nv {
+                let v = std::f32::consts::TAU * j as f32 / nv as f32;
+                let r = big + small * v.cos();
+                positions.push(centre + Vec3::new(r * u.cos(), r * u.sin(), small * v.sin()));
+            }
+        }
+        let at = |i: usize, j: usize| ((i % nu) * nv + j % nv) as u32;
+        let mut tris = Vec::new();
+        for i in 0..nu {
+            for j in 0..nv {
+                tris.push([at(i, j), at(i + 1, j), at(i + 1, j + 1)]);
+                tris.push([at(i, j), at(i + 1, j + 1), at(i, j + 1)]);
+            }
+        }
+        TriMesh::new(positions, tris)
+    }
+
+    #[test]
+    fn a_hole_through_the_wall_is_flagged_where_it_is() {
+        let centre = Vec3::new(20.0, -5.0, 3.0);
+        let c = check(&torus(centre, 3.0, 1.0), &opts());
+        assert!(c.volume_mm3 > 0.0, "{c:?}");
+        assert_eq!(c.genus, Some(1));
+        let at = c
+            .problems
+            .iter()
+            .find_map(|p| match p {
+                Problem::Genus { count: 1, at } => Some(at.clone()),
+                _ => None,
+            })
+            .expect("the hole is a problem");
+        // one place, on the torus: the loop round its tube or round its hole
+        assert_eq!(at.len(), 1, "{at:?}");
+        let q = DVec3::from(at[0]) - centre.as_dvec3();
+        let r = q.truncate().length();
+        assert!(q.z.abs() < 0.5 && (r < 0.5 || (r - 3.0).abs() < 0.5), "{q}");
+        let en = c.problem_texts(Lang::En).join("; ");
+        let it = c.problem_texts(Lang::It).join("; ");
+        let place = format!("({:.1}, {:.1}, {:.1})", at[0][0], at[0][1], at[0][2]);
+        assert!(
+            en.contains(&format!("1 holes through the wall, near {place}")),
+            "{en}"
+        );
+        assert!(
+            it.contains(&format!("1 fori passanti nella parete, vicino a {place}")),
+            "{it}"
+        );
+        // without the loops (none found) the count alone
+        let bare = Problem::Genus {
+            count: 2,
+            at: Vec::new(),
+        };
+        assert_eq!(bare.text(Lang::En), "2 holes through the wall");
     }
 }

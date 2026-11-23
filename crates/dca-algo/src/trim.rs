@@ -51,6 +51,15 @@
 //! border by a slot of the trim surface and the shell built again
 //! ([`holes`]: `_open_holes`, `_plug_holes`, `_window_cuts`).
 //!
+//! STRAIGHT, SCALLOPED, SMOOTH: the trim surface is held under the flat
+//! walls of the shell it would run along inside ([`flat`]): where a crown's
+//! label stops short of its gingival margin the border taken from it runs
+//! over the top of the crown, and the surface sliced the occlusal wall into
+//! a lace of holes. Every stretch where it lies inside a flat wall along the
+//! wall is held two voxels under it (the cap kept whole, cut across where
+//! the surface comes back up), and so is a window it would open through the
+//! wall; a stretch across a wall, the rim, is left as it is.
+//!
 //! One piece ([`bars`], `_weak_pairs`, `_bar`): two consecutive caps (arch
 //! order, a missing tooth skipped) in different pieces of the meshed shell,
 //! or joined through a neck thinner than the section wanted, are joined by a
@@ -79,11 +88,14 @@
 //! past the end of the line of the arch (the plugin skips them) and the reach
 //! from its crown is [`smooth::SMOOTH_END_NEAR_MM`], not `SMOOTH_NEAR_MM`
 //! ([`smooth_near`]): on a scan with a flange behind the last molar the
-//! plugin's rules cut a notch into its cap and leave ragged tongues.
+//! plugin's rules cut a notch into its cap and leave ragged tongues. The
+//! plugin lets a margin border run inside a flat wall and plugs or opens the
+//! holes left ([`flat`] keeps the cap instead).
 
 pub mod bars;
 pub mod checks;
 pub mod cutter;
+pub mod flat;
 pub mod grid;
 pub mod holes;
 pub mod line;
@@ -1057,7 +1069,16 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     let voxel = f64::from(input.shell.voxel_size);
     let r =
         rim_round(wall, params.round_mm).min(((wall - RIM_MIN_WALL_VOXELS * voxel) / 2.0).max(0.0));
+    // a border from the margins: held under the flat walls it would slice
+    // ([`flat`]; the EQUATOR field keeps the caps itself)
+    let floor = lo.z - outer - 1.0;
+    let flat_walls = |z: &mut Vec<f64>, shell: &SdfGrid| {
+        if eq.is_none() {
+            flat::under_flat_walls(&grid, z, shell, wall, z_top, floor);
+        }
+    };
     let mut z = surface(&[]);
+    flat_walls(&mut z, input.shell);
     let near = if mode == Mode::Smooth {
         let end = near_r - smooth::SMOOTH_NEAR_MM + smooth::SMOOTH_END_NEAR_MM;
         smooth_near(input, &smooth_order(input), near_r, end, input.shell)?
@@ -1118,6 +1139,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                 ));
             }
             z = surface(&made);
+            flat_walls(&mut z, &shell);
             b = Build {
                 shell: Cow::Owned(shell),
                 near: near_with_strips(b.near, &made, near_r, input.shell)?,

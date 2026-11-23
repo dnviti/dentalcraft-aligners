@@ -41,6 +41,11 @@ static TABLE: &[(&str, &str, &str)] = &[
         "{0} fori passanti nella parete",
     ),
     (
+        "chk-genus-at",
+        "{0} holes through the wall, near {1} (mm, coordinates of the file)",
+        "{0} fori passanti nella parete, vicino a {1} (mm, coordinate del file)",
+    ),
+    (
         "chk-volume",
         "volume not positive (inverted normals)",
         "volume non positivo (normali invertite)",
