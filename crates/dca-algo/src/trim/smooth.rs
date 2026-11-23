@@ -11,8 +11,10 @@
 //! tip of every papilla (a real case: 0.4-0.9 mm above it, or up to 0.6 mm
 //! on it, against 2 mm above the margin in the middle of the teeth). With a
 //! `relief` the border is raised wherever it is less than that above the
-//! margin, in a rounded notch round the papilla ([`papilla_lift`]), never
-//! within [`PAPILLA_NECK_MM`] of the contact of the two crowns.
+//! margin, and above the tip of every papilla within [`PAPILLA_TOP_MM`] of
+//! it along the arch ([`papilla_tops`]), in a rounded notch round the
+//! papilla ([`papilla_lift`]), never within [`PAPILLA_NECK_MM`] of the top
+//! of the contact of the two crowns ([`contacts`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -52,12 +54,22 @@ pub const SMOOTH_END_NEAR_MM: f64 = 1.0;
 /// Default of [`super::Params::papilla_relief_mm`]: the edge stays this far
 /// above the gingival margin (mm) all along the arch, round every papilla.
 pub const PAPILLA_RELIEF_MM: f64 = 1.0;
+/// The tip of the papilla under a contact is the highest margin point of a
+/// side within this distance (mm) along the arch of the contact, and the
+/// border stands the relief above it as far on either side of it
+/// ([`papilla_tops`]): the edge crosses the gap between the crowns in the
+/// plane of their contact, which meets the line of the arch at a slant, and
+/// the trim surface between the two rings of its points takes the height
+/// of the nearest of them, so the edge passes over the papilla up to this
+/// far along the arch from the tip (three real arches: 0.5 to 1.5 mm, the
+/// edge 0.3 mm above the tip there against 1 mm at the tip's own place).
+pub const PAPILLA_TOP_MM: f64 = 1.5;
 /// The border raised round a papilla falls back to its own height this far
 /// (mm, along the arch) from where the lift is needed, as the bump
 /// [`notch`]: a notch with a rounded top and no step at its feet.
 pub const PAPILLA_NOTCH_HALF_MM: f64 = 2.5;
-/// The raised border stays this far (mm) under the contact of the two
-/// crowns, so that their caps stay joined round it ...
+/// The raised border stays this far (mm) under the top of the contact of
+/// the two crowns, so that their caps stay joined round it ...
 pub const PAPILLA_NECK_MM: f64 = 0.5;
 /// ... the limit rising away from it along the arch as a rounded V
 /// ([`soft_abs`] with this radius, mm; one mm per mm far from it) ...
@@ -68,6 +80,12 @@ pub const PAPILLA_ROUND_MM: f64 = 0.5;
 /// Two neighbouring crowns whose scanned points come closer than this (mm)
 /// have a contact; farther apart, nothing holds the border down.
 pub const PAPILLA_CONTACT_MM: f64 = 2.0;
+/// The scanned points of two crowns at most this much (mm) farther apart
+/// than their closest two touch as well: the contact is a zone, not a
+/// point (where the scanner cannot see between two crowns, the boundary of
+/// their labels runs from the contact down to each papilla, every point of
+/// it as close as the contact itself).
+pub const PAPILLA_CONTACT_TOL_MM: f64 = 0.1;
 
 /// `y` smoothed by a gaussian of `sigma` samples, the weights renormalised
 /// at the ends (`_gauss_rows`).
@@ -171,30 +189,60 @@ pub fn papilla_lift(z: &[f64], need: &[f64], cap: &[f64], weights: &[f64]) -> Ve
         .collect()
 }
 
-/// The contacts of the neighbouring crowns of `marg` (arch order): the
-/// middle of the closest two scanned points of every two consecutive teeth
-/// closer than [`PAPILLA_CONTACT_MM`].
+/// The contacts of the neighbouring crowns of `marg` (arch order), for
+/// every two consecutive teeth whose scanned points come closer than
+/// [`PAPILLA_CONTACT_MM`]: the top of the zone where they touch, the
+/// highest middle of two points at most [`PAPILLA_CONTACT_TOL_MM`] farther
+/// apart than the closest two. Under it the crowns touch, or the scan
+/// bridges the gap between them down to the papillae: the closest two alone
+/// may lie anywhere on that bridge, as low as a papilla (a real case: 3 mm
+/// under the contact, 2.4 mm under the tip of the papilla it held down).
 fn contacts(marg: &[(Fdi, Vec<DVec3>)], crowns: &BTreeMap<Fdi, Vec<DVec3>>) -> Vec<DVec3> {
     marg.windows(2)
         .filter_map(|w| {
             let (a, b) = (crowns.get(&w[0].0)?, crowns.get(&w[1].0)?);
             let pb: Vec<Vec3> = b.iter().map(|p| p.as_vec3()).collect();
             let index = KnnIndex::build(&pb).ok()?;
-            let mut best: Option<(f64, DVec3)> = None;
-            for p in a {
-                let Some(nb) = index.nearest(p.as_vec3()) else {
-                    continue;
-                };
-                let q = b[nb.index as usize];
-                let d = p.distance(q);
-                if best.is_none_or(|(bd, _)| d < bd) {
-                    best = Some((d, (*p + q) * 0.5));
-                }
+            let pairs: Vec<(f64, DVec3)> = a
+                .iter()
+                .filter_map(|p| {
+                    let q = b[index.nearest(p.as_vec3())?.index as usize];
+                    Some((p.distance(q), (*p + q) * 0.5))
+                })
+                .collect();
+            let closest = pairs.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
+            if closest > PAPILLA_CONTACT_MM {
+                return None;
             }
-            best.filter(|(d, _)| *d <= PAPILLA_CONTACT_MM)
+            pairs
+                .into_iter()
+                .filter(|(d, _)| *d <= closest + PAPILLA_CONTACT_TOL_MM)
                 .map(|(_, c)| c)
+                .max_by(|x, y| x.z.total_cmp(&y.z))
         })
         .collect()
+}
+
+/// `tip` (the highest margin point of every sample `g` of a side, `−∞`
+/// without one) with the tip of the papilla under every contact of `touch`
+/// (its place along the arch first: the highest of `tip` within
+/// [`PAPILLA_TOP_MM`] of it) held as far on either side of that tip: every
+/// sample there at least as high.
+fn papilla_tops(g: &[f64], touch: &[(f64, f64)], tip: &[f64]) -> Vec<f64> {
+    let mut out = tip.to_vec();
+    let n = g.len().min(tip.len());
+    for &(s, _) in touch {
+        let Some(kt) = (0..n)
+            .filter(|&k| (g[k] - s).abs() <= PAPILLA_TOP_MM && tip[k].is_finite())
+            .max_by(|&a, &b| tip[a].total_cmp(&tip[b]))
+        else {
+            continue;
+        };
+        for k in (0..n).filter(|&k| (g[k] - g[kt]).abs() <= PAPILLA_TOP_MM) {
+            out[k] = out[k].max(tip[kt]);
+        }
+    }
+    out
 }
 
 /// Height and depth of the border at one end of a side.
@@ -497,14 +545,19 @@ pub fn smooth_border(
         let wave = gauss_rows(&dev, SMOOTH_WAVE_SIGMA_MM / step);
         let zb: Vec<f64> = base.iter().zip(&wave).map(|(a, w)| a + w + gap).collect();
         // round every papilla: the border at least `relief` above the highest
-        // margin point of every bin (the tip of a papilla), under the contacts
+        // margin point of every bin (the tip of a papilla, held round it),
+        // under the contacts
         let zb = if relief > 0.0 {
-            let mut need = vec![f64::NEG_INFINITY; g.len()];
+            let mut tip = vec![f64::NEG_INFINITY; g.len()];
             for (&bi, ix) in &bins {
-                if let Some(v) = bi.checked_sub(lo_i).and_then(|k| need.get_mut(k)) {
-                    *v = ix.iter().map(|&i| m[i].z).fold(f64::NEG_INFINITY, f64::max) + relief;
+                if let Some(v) = bi.checked_sub(lo_i).and_then(|k| tip.get_mut(k)) {
+                    *v = ix.iter().map(|&i| m[i].z).fold(f64::NEG_INFINITY, f64::max);
                 }
             }
+            let need: Vec<f64> = papilla_tops(&g, &touch, &tip)
+                .into_iter()
+                .map(|t| t + relief)
+                .collect();
             let cap: Vec<f64> = g
                 .iter()
                 .map(|&s| {
@@ -640,6 +693,65 @@ pub fn smooth_border(
         }
     }
     Some((out, high))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use dc_case::Fdi;
+    use glam::DVec3;
+
+    use super::{PAPILLA_CONTACT_TOL_MM, contacts, papilla_tops};
+
+    #[test]
+    fn the_contact_is_the_top_of_the_zone_where_two_crowns_touch() {
+        // two crowns bridged from their contact (z 0) down to the papilla
+        // (z -3): the closest two points lie at the bottom of the bridge
+        let (a, b) = (Fdi::new(31).unwrap(), Fdi::new(32).unwrap());
+        let bridge = |x: f64, k: usize| DVec3::new(x, 0.0, -3.0 + 0.1 * k as f64);
+        let crowns: BTreeMap<Fdi, Vec<DVec3>> = [
+            (a, (0..=30).map(|k| bridge(-0.02, k)).collect::<Vec<_>>()),
+            (
+                b,
+                (0..=30)
+                    .map(|k| bridge(if k == 0 { 0.0 } else { 0.03 }, k))
+                    .collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let marg = vec![(a, vec![DVec3::ZERO]), (b, vec![DVec3::ZERO])];
+        let c = contacts(&marg, &crowns);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].z.abs() < 1e-9, "the contact at {}", c[0]);
+        // apart by more than the tolerance than the closest two, the bridge
+        // is no contact
+        let mut far = crowns.clone();
+        for p in far.get_mut(&b).unwrap().iter_mut().skip(1) {
+            p.x = 0.05 + PAPILLA_CONTACT_TOL_MM;
+        }
+        let c = contacts(&marg, &far);
+        assert!(c[0].z < -2.9, "the contact at {}", c[0]);
+    }
+
+    #[test]
+    fn the_tip_of_a_papilla_is_held_round_it_along_the_arch() {
+        // samples every 0.5 mm, a papilla at s 5 under the contact at s 5.7
+        // and a higher bump past the reach of that contact
+        let g: Vec<f64> = (0..=20).map(|k| 0.5 * f64::from(k)).collect();
+        let mut tip = vec![0.0; g.len()];
+        tip[10] = 2.0;
+        tip[18] = 3.0;
+        tip[0] = f64::NEG_INFINITY;
+        let out = papilla_tops(&g, &[(5.7, 1.0)], &tip);
+        for (k, (&o, &t)) in out.iter().zip(&tip).enumerate() {
+            let want = if (7..=13).contains(&k) { 2.0 } else { t };
+            assert!(o == want, "sample {k} (s {}): {o}, want {want}", g[k]);
+        }
+        // no contact: the margin as it is
+        assert_eq!(papilla_tops(&g, &[], &tip), tip);
+    }
 }
 
 #[cfg(kani)]

@@ -622,6 +622,83 @@ fn the_smooth_border_goes_round_every_papilla() {
     assert!(t >= t0.min(0.5 * a.wall) - 0.05, "{t} < {t0}");
 }
 
+#[test]
+fn the_border_clears_a_papilla_under_a_bridged_contact() {
+    // a scan that cannot see between two crowns bridges the gap from their
+    // contact down to the papilla: every point of the bridge is as close to
+    // both crowns as the contact itself. The border stays under the top of
+    // that zone, never under the papilla it would come down onto (a real
+    // test piece: the closest two points 2.4 mm under the tip of the
+    // papilla, the edge 0.5 mm onto it)
+    let mut a = demo_arch(Arch::Lower, 0.6, 0.25);
+    raise_papillae(&mut a, 3.0);
+    let crowns: Vec<Vec<DVec3>> = a.teeth.iter().map(|t| t.crown.clone()).collect();
+    let order: Vec<usize> = {
+        let fdis: Vec<Fdi> = a.teeth.iter().map(|t| t.fdi).collect();
+        crate::anatomy::arch_sequence(&fdis, Arch::Lower)
+            .iter()
+            .filter_map(|f| a.teeth.iter().position(|t| t.fdi == *f))
+            .collect()
+    };
+    let mut bridged = 0;
+    for w in order.windows(2) {
+        let (i, j) = (w[0], w[1]);
+        let mut best = (f64::INFINITY, DVec3::ZERO);
+        for p in &crowns[i] {
+            for q in &crowns[j] {
+                if p.distance(*q) < best.0 {
+                    best = (p.distance(*q), (*p + *q) * 0.5);
+                }
+            }
+        }
+        if best.0 > smooth::PAPILLA_CONTACT_MM {
+            continue;
+        }
+        let c = best.1;
+        // the bridge: from the tip of the papilla under the contact up to it,
+        // the same points on both crowns (the lowest first)
+        let tip = a.teeth[i]
+            .margin
+            .iter()
+            .chain(&a.teeth[j].margin)
+            .filter(|q| q.truncate().distance(c.truncate()) < 2.0)
+            .map(|q| q.z)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let steps = ((c.z - tip) / 0.1).floor();
+        if steps < 5.0 {
+            continue;
+        }
+        let bridge: Vec<DVec3> = (0..steps as usize)
+            .map(|k| DVec3::new(c.x, c.y, tip + k as f64 * 0.1))
+            .collect();
+        for t in [i, j] {
+            let mut pts = bridge.clone();
+            pts.extend_from_slice(&a.teeth[t].crown);
+            a.teeth[t].crown = pts;
+        }
+        bridged += 1;
+    }
+    assert!(bridged >= 6, "{bridged} contacts bridged");
+    let p = Params::default();
+    let out = run(&a.input(), &p).unwrap();
+    // measured against the crowns as they are, without the bridges
+    for (t, c) in a.teeth.iter_mut().zip(crowns) {
+        t.crown = c;
+    }
+    let (slack, n) = papilla_slack(&a, &out, p.papilla_relief_mm);
+    eprintln!(
+        "bridged contacts: {bridged}, papillae {n} points, slack {slack:.3} mm, relief {}, \
+         genus {}",
+        out.papilla_relief_mm, out.genus
+    );
+    assert!(n >= 20, "{n} papilla points measured");
+    let tol = f64::from(a.voxel) + 0.05;
+    assert!(slack >= -tol, "the edge comes down onto a papilla: {slack}");
+    assert_eq!(out.papilla_relief_mm, p.papilla_relief_mm);
+    check_solid(&out);
+    assert_eq!(out.genus, 0);
+}
+
 /// How near the trimmed aligner `mesh` comes to the gingiva of `a`: the
 /// smallest distance of its vertices from the surface of the gingiva, and
 /// the smallest distance of the interdental gingiva (its vertices within
