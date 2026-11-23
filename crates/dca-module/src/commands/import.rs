@@ -175,18 +175,26 @@ pub struct ScanClosure {
     pub scan_id: String,
     /// Its role.
     pub role: ScanRole,
-    /// It had no open edge: it stays as it was read.
+    /// It had no open edge and nothing to repair: it stays as it was read.
     pub already_closed: bool,
     /// Open edges closed (`0` when it was not closed).
     pub closed_edges: usize,
+    /// Triangles of the scan taken out to repair an edge of more than two
+    /// triangles (their hole filled).
+    pub removed_faces: usize,
     /// Points the base added.
     pub vertices_added: usize,
     /// Triangles the base added.
     pub faces_added: usize,
     /// Thickness of the base under the lowest point of the scan (mm).
     pub height_mm: f64,
-    /// The scan of the case is a closed solid.
+    /// The scan of the case is a clean solid: closed and manifold, counted
+    /// as an STL file is (points identified by position).
     pub watertight: bool,
+    /// Edges of one triangle left in the scan of the case.
+    pub open_edges: usize,
+    /// Edges of more than two triangles left in the scan of the case.
+    pub nonmanifold_edges: usize,
     /// Why an open scan was not closed (it stays open; "Close with a base"
     /// closes it).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -421,8 +429,11 @@ pub fn import_scans(state: &mut CaseState, request: &ImportRequest, ctx: &JobCtx
 /// case has no tooth marks yet). The closed solid becomes the scan of the
 /// case, and `report` describes it (its blob and counts); where the scan as
 /// it was read ends in it is kept (`AlignersState::scan_bases`). A bite
-/// scan and a closed scan stay as they are, and so does a scan whose
-/// direction cannot be found (said in [`ScanClosure::not_closed`]).
+/// scan and a clean closed scan stay as they are, and so does a scan whose
+/// direction cannot be found (said in [`ScanClosure::not_closed`]). An arch
+/// scan of the case that is not a clean solid after all that (open or
+/// non-manifold edges left, counted as the print check counts them) gets
+/// a warning in `report` that says how many.
 /// `None` when the job was cancelled: `state` is then half done.
 fn close_imported(
     state: &mut CaseState,
@@ -440,6 +451,7 @@ fn close_imported(
     };
     let mut out = Vec::new();
     let mut stale = Vec::new();
+    let mut warnings = Vec::new();
     for imported in report
         .imported
         .iter_mut()
@@ -459,25 +471,24 @@ fn close_imported(
             role: imported.role,
             already_closed: false,
             closed_edges: 0,
+            removed_faces: 0,
             vertices_added: 0,
             faces_added: 0,
             height_mm: HEIGHT_DEFAULT_MM,
             watertight: false,
+            open_edges: 0,
+            nonmanifold_edges: 0,
             not_closed: None,
         };
         let based = scan_base::occlusal_direction(&mesh)
             .and_then(|n| scan_base::make_base(&mesh, n, HEIGHT_DEFAULT_MM));
-        match based {
-            Ok(None) => {
-                closure.already_closed = true;
-                closure.watertight = mesh.validate().is_watertight();
-            }
-            Err(e) => closure.not_closed = Some(e.to_string()),
+        let left = match based {
             Ok(Some(based)) => {
                 closure.closed_edges = based.closed_edges;
+                closure.removed_faces = based.removed_faces;
                 closure.vertices_added = based.sources.len();
-                closure.faces_added = based.mesh.face_count() - mesh.face_count();
-                closure.watertight = based.mesh.validate().is_watertight();
+                closure.faces_added = based.mesh.face_count() - based.scan.faces as usize;
+                let left = (based.open_edges, based.nonmanifold_edges);
                 let (vertices, faces) = (based.mesh.vertex_count(), based.mesh.face_count());
                 let r = state.blobs.insert(based.mesh);
                 for s in state
@@ -493,10 +504,23 @@ fn close_imported(
                 imported.mesh = r;
                 imported.vertices = vertices;
                 imported.faces = faces;
+                left
             }
-        }
+            other => {
+                match other {
+                    Ok(_) => closure.already_closed = true,
+                    Err(e) => closure.not_closed = Some(e.to_string()),
+                }
+                let solid = dc_mesh::solid_topology(&mesh);
+                (solid.boundary_edges, solid.nonmanifold_edges)
+            }
+        };
+        (closure.open_edges, closure.nonmanifold_edges) = left;
+        closure.watertight = left == (0, 0);
+        warnings.extend(not_closed(&imported.source_name, left));
         out.push(closure);
     }
+    report.warnings.extend(warnings);
     if !stale.is_empty() {
         data.prune_scan_bases(state.case.scans.iter().map(|s| &s.mesh));
         state.set_module(MODULE_ID, ModuleState::new(data));
@@ -504,6 +528,23 @@ fn close_imported(
     }
     ctx.set_progress(1.0, None);
     Some(out)
+}
+
+/// The warning for the scan `name` of the case when `left` (its open and
+/// non-manifold edges, counted as a solid) is not `(0, 0)`: it is not a
+/// clean solid, and the export may fail on it.
+fn not_closed(name: &str, left: (usize, usize)) -> Option<ImportWarning> {
+    (left != (0, 0)).then(|| {
+        warning(
+            WarningCode::NotClosed,
+            "aligners-import-warn-not-closed",
+            &[
+                ("name", name),
+                ("open", &left.0.to_string()),
+                ("nonmanifold", &left.1.to_string()),
+            ],
+        )
+    })
 }
 
 /// The files of an import, from exactly one of `path` and `files`.
@@ -1136,6 +1177,72 @@ mod tests {
         assert_eq!(out["bases"][0]["already_closed"], true, "{out}");
         let data = next.module_data::<AlignersState>(MODULE_ID);
         assert!(data.is_none_or(|d| d.scan_bases.is_empty()));
+    }
+
+    #[test]
+    fn a_face_folded_over_the_scan_is_taken_out_and_the_scan_closes_into_a_clean_solid() {
+        let files = Files::new("fold");
+        // the demo arch opened under the gum, and one more triangle folded
+        // under an edge of it (three triangles on that edge), as a scan gives
+        // where it doubles back on itself
+        let closed = demo_mesh(LOWER, 1);
+        let low = closed
+            .positions
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::INFINITY, f32::min)
+            + 4.0;
+        let mut open = closed.clone();
+        open.tris
+            .retain(|t| !t.iter().all(|&i| closed.positions[i as usize].z < low));
+        let edges = open.edge_adjacency();
+        let inner = (0..open.tris.len())
+            .find(|&f| {
+                let t = open.tris[f];
+                (0..3).all(|k| edges.faces_of(t[k], t[(k + 1) % 3]).len() == 2)
+            })
+            .unwrap();
+        let [a, b, _] = open.tris[inner];
+        let under = (open.positions[a as usize] + open.positions[b as usize]) * 0.5
+            - open.face_normal(inner) * 0.5;
+        let c = open.positions.len() as u32;
+        open.positions.push(under);
+        open.tris.push([a, b, c]);
+        let path = files.stl("scan_a.stl", &open);
+        let (next, out) = import(
+            &CaseState::default(),
+            json!({ "path": path, "role": "lower" }),
+        )
+        .unwrap();
+        let base = &out["bases"][0];
+        assert_eq!(base["watertight"], true, "{out}");
+        assert_eq!(base["open_edges"], 0, "{out}");
+        assert_eq!(base["nonmanifold_edges"], 0, "{out}");
+        assert_eq!(base["removed_faces"], 1, "{out}");
+        assert!(!codes(&out).iter().any(|c| c == "not_closed"), "{out}");
+        // as an STL file of it is read: closed, every edge between two
+        // triangles (the demo crowns are pieces of their own)
+        let scan = next.case.scan(ScanRole::Lower).unwrap();
+        let solid = dc_mesh::solid_topology(next.blobs.require(&scan.mesh).unwrap());
+        assert!(solid.is_closed() && solid.flipped_edges == 0, "{solid:?}");
+    }
+
+    #[test]
+    fn a_scan_that_is_no_clean_solid_is_told_with_its_edges_left() {
+        assert!(not_closed("a.stl", (0, 0)).is_none());
+        let w = not_closed("a.stl", (3, 2)).unwrap();
+        assert_eq!(w.code, WarningCode::NotClosed);
+        assert_eq!(w.key, "aligners-import-warn-not-closed");
+        let json = serde_json::to_value(&w).unwrap();
+        assert_eq!(json["code"], "not_closed");
+        assert_eq!(json["args"]["open"], "3");
+        assert_eq!(json["args"]["nonmanifold"], "2");
+        let message = json["message"].as_str().unwrap();
+        assert!(
+            message.contains("a.stl") && message.contains('3') && message.contains('2'),
+            "{message}"
+        );
+        assert!(!message.contains("aligners-import"), "{message}");
     }
 
     #[test]

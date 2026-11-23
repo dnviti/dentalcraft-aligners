@@ -111,6 +111,7 @@ pub(super) fn run_make_base(
     })?;
     let scan_id = scan.id;
     let Some(based) = based else {
+        let solid = dc_mesh::solid_topology(closed);
         return Ok((
             state.clone(),
             json!({
@@ -120,10 +121,13 @@ pub(super) fn run_make_base(
                 "rebuilt": false,
                 "frame": if from_marks { "tooth_marks" } else { "scan" },
                 "closed_edges": 0,
+                "removed_faces": 0,
                 "vertices_added": 0,
                 "faces_added": 0,
                 "height_mm": height,
-                "watertight": closed.validate().is_watertight(),
+                "watertight": solid.is_closed(),
+                "open_edges": solid.boundary_edges,
+                "nonmanifold_edges": solid.nonmanifold_edges,
                 "labels_extended": false,
             }),
         ));
@@ -133,8 +137,9 @@ pub(super) fn run_make_base(
     let mut next = state.clone();
     let mut stale = vec![scan.mesh];
     let vertices_added = based.sources.len();
-    let faces_added = based.mesh.tris.len() - mesh.tris.len();
-    let watertight = based.mesh.validate().is_watertight();
+    let faces_added = based.mesh.tris.len() - based.scan.faces as usize;
+    let (open_edges, nonmanifold_edges) = (based.open_edges, based.nonmanifold_edges);
+    let removed_faces = based.removed_faces;
     // the labels of the arch follow the points of the scan; the base is
     // gingiva
     let mut labels_extended = false;
@@ -192,10 +197,13 @@ pub(super) fn run_make_base(
             "rebuilt": rebuilt,
             "frame": if from_marks { "tooth_marks" } else { "scan" },
             "closed_edges": based.closed_edges,
+            "removed_faces": removed_faces,
             "vertices_added": vertices_added,
             "faces_added": faces_added,
             "height_mm": height,
-            "watertight": watertight,
+            "watertight": open_edges == 0 && nonmanifold_edges == 0,
+            "open_edges": open_edges,
+            "nonmanifold_edges": nonmanifold_edges,
             "labels_extended": labels_extended,
         }),
     ))
