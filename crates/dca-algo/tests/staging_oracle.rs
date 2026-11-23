@@ -14,9 +14,11 @@
 //! the phases, the IPR timing and the calendar dates equal. The same plan
 //! comes out of the target poses as the case stores them (`Setup::poses`),
 //! whatever the sign of their quaternions. The comparison keeps the plugin's
-//! sample of 2500 points per crown in the collision check; what the port's
-//! own default, every crown point, changes is stated in
-//! `every_crown_point_changes_the_demo_plans_as_stated`.
+//! sample of 2500 points per crown in the collision check and its delays
+//! against a neighbour that never moves; what the port's own defaults, every
+//! crown point and no such delay, change is stated in
+//! `every_crown_point_changes_the_demo_plans_as_stated` and
+//! `no_delay_against_a_still_neighbour_leaves_the_demo_plans_as_they_are`.
 
 use std::path::PathBuf;
 
@@ -140,13 +142,17 @@ fn load(case: &str) -> Case {
 const PLUGIN_SAMPLE: usize = 2500;
 
 /// The staging parameters `p` with the plugin's sample of the crowns (2500
-/// points, every k-th of the list): the plugin's plans are reproduced with
-/// it. The port's own default uses every crown point
-/// ([`staging::Params::sample_points`]); what that changes on the demo cases
-/// is stated in [`every_crown_point_changes_the_demo_plans_as_stated`].
+/// points, every k-th of the list) and its delays against a neighbour that
+/// never moves: the plugin's plans are reproduced with them. The port's own
+/// defaults use every crown point ([`staging::Params::sample_points`]) and
+/// leave a collision against a still neighbour
+/// ([`staging::Params::delay_against_still`]); what they change on the demo
+/// cases is stated in [`every_crown_point_changes_the_demo_plans_as_stated`]
+/// and [`no_delay_against_a_still_neighbour_leaves_the_demo_plans_as_they_are`].
 fn plugin(p: Params) -> Params {
     Params {
         sample_points: Some(PLUGIN_SAMPLE),
+        delay_against_still: true,
         ..p
     }
 }
@@ -410,7 +416,13 @@ fn the_staging_matches_the_plugin_on_the_demo_cases() {
 fn every_crown_point_changes_the_demo_plans_as_stated() {
     for case in CASES {
         let c = load(case);
-        let plan = plan_with(&c, &Params::default());
+        let plan = plan_with(
+            &c,
+            &Params {
+                delay_against_still: true,
+                ..Params::default()
+            },
+        );
         let want = &c.plan;
         let n = want["n_stages"].as_u64().unwrap() as u32;
         assert_eq!(plan.n_stages, n, "{case}: number of aligners");
@@ -457,6 +469,33 @@ fn every_crown_point_changes_the_demo_plans_as_stated() {
                 w[2]
             );
         }
+    }
+}
+
+/// What leaving a collision against a neighbour that never moves (the port's
+/// default, [`staging::Params::delay_against_still`] off, departure of
+/// 2026-11-23) changes on the demo cases against the plugin's plans: nothing.
+/// On the plugin's setups of these cases no tooth runs into a still
+/// neighbour, so the plugin delays none and the plans stay the same (on the
+/// port's own setups of the demo arches, as the commands chain them, it is
+/// what shortens `demo_lower_severe` from 30 to 18 aligners and
+/// `demo_upper_moderate` from 25 to 9, each still listing its collision).
+#[test]
+fn no_delay_against_a_still_neighbour_leaves_the_demo_plans_as_they_are() {
+    for case in CASES {
+        let c = load(case);
+        let want = plan_of(&c);
+        let plan = plan_with(
+            &c,
+            &Params {
+                sample_points: Some(PLUGIN_SAMPLE),
+                ..Params::default()
+            },
+        );
+        assert_eq!(plan.n_stages, want.n_stages, "{case}: number of aligners");
+        assert_eq!(plan.q, want.q, "{case}: poses");
+        assert_eq!(plan.unresolved, want.unresolved, "{case}: collisions left");
+        assert_eq!(plan.log, want.log, "{case}: notes");
     }
 }
 

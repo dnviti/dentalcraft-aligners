@@ -22,7 +22,10 @@
 //! creation, alignment, then vertical movements), auto (from the case
 //! complexity). Adjacent crowns are checked for interpenetration at every
 //! stage and the movement of the tooth that moves into its neighbour is
-//! delayed (collision-free staging).
+//! delayed (collision-free staging). Against a neighbour that never moves
+//! nothing is delayed (unlike the plugin, [`Params::delay_against_still`]):
+//! a delay would only move the same contact to a later aligner, so the
+//! collision is left in [`Plan::unresolved`] for the clinician.
 //!
 //! # Coordinates and conventions
 //!
@@ -234,6 +237,12 @@ pub struct Params {
     /// one; `Some(n)`, the plugin's `sample_points`, at most `n` taken every
     /// k-th in the list ([`teeth::subsample`]).
     pub sample_points: Option<usize>,
+    /// Delay a tooth that collides with a neighbour that never moves in the
+    /// plan, as the plugin does. Off by default (2026-11-23): such a delay
+    /// only moves the same contact to a later aligner and lengthens the
+    /// plan, so the collision is left and listed in [`Plan::unresolved`];
+    /// against a neighbour that moves the delays stay.
+    pub delay_against_still: bool,
 }
 
 impl Default for Params {
@@ -255,6 +264,7 @@ impl Default for Params {
             delay_step: 2,
             max_iter: 300,
             sample_points: None,
+            delay_against_still: false,
         }
     }
 }
@@ -493,7 +503,8 @@ pub struct IprStage {
     pub stage: u32,
 }
 
-/// A collision that no delay could solve.
+/// A collision that no delay could solve, or that the staging does not delay
+/// because the neighbour never moves ([`Params::delay_against_still`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Unresolved {
     /// Aligner.
@@ -1287,7 +1298,12 @@ pub fn run_with_progress(
             let mut best: Option<(f64, i64, Fdi)> = None;
             for x in [a, b] {
                 let movable = sch.tracks[&x].phases.iter().any(|ph| ph.n > 0);
-                if total_delay[&x] + dly > max_delay[&x] || !movable {
+                let other = if x == a { b } else { a };
+                let other_moves = sch.tracks[&other].phases.iter().any(|ph| ph.n > 0);
+                if total_delay[&x] + dly > max_delay[&x]
+                    || !movable
+                    || !(other_moves || p.delay_against_still)
+                {
                     continue;
                 }
                 let qa = sch.q_at(a, if x == a { k - dly } else { k });
@@ -1843,6 +1859,31 @@ mod tests {
             "{note} in {:?}",
             plan.log
         );
+        // 11 never moves: delaying 12 would only move the sweep to a later aligner, so
+        // nothing is delayed and the plan is as long as without the check
+        assert!(
+            !plan.log.iter().any(|l| l.contains("delays")),
+            "{:?}",
+            plan.log
+        );
+        let unchecked = Params {
+            collision: false,
+            ..p.clone()
+        };
+        assert_eq!(plan.n_stages, run(&input, &unchecked).unwrap().n_stages);
+        // the plugin delays 12 all the same: a longer plan with the same collision left
+        let plugin = Params {
+            delay_against_still: true,
+            ..p.clone()
+        };
+        let delayed = run(&input, &plugin).unwrap();
+        assert!(
+            delayed.log.iter().any(|l| l.contains("delays")),
+            "{:?}",
+            delayed.log
+        );
+        assert!(delayed.n_stages > plan.n_stages, "{}", delayed.n_stages);
+        assert_eq!(delayed.unresolved.len(), 1, "{:?}", delayed.log);
         // a plan with nothing left says nothing of the kind
         let still = [tooth(12, -7.0, [0.0; 6]), tooth(11, 0.0, [0.0; 6])];
         let calm = run(
