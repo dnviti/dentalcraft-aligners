@@ -210,6 +210,7 @@ fn mesh_provider<'a>(
             arch: None,
             stage: None,
             aligner: false,
+            passive: false,
             key: "rpt-note-scans",
             detail: why,
         };
@@ -240,6 +241,7 @@ fn mesh_provider<'a>(
                 arch: None,
                 stage: None,
                 aligner: false,
+                passive: false,
                 key: "rpt-note-shells",
                 detail: format!(
                     "resolution {voxel} mm, tolerance {} mm",
@@ -359,6 +361,7 @@ fn doubt_notes(data: &AlignersState) -> Vec<Note> {
                 arch: Some(arch),
                 stage: None,
                 aligner: false,
+                passive: false,
                 key: "rpt-note-doubts",
                 detail: doubts
                     .iter()

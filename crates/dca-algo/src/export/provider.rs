@@ -37,6 +37,9 @@ pub struct Note {
     pub stage: Option<u32>,
     /// Model (`false`) or aligner (`true`).
     pub aligner: bool,
+    /// A passive aligner (after the last active stage of its arch): its
+    /// file is the `_passivo` one.
+    pub passive: bool,
     /// Key of the text (`export::text`).
     pub key: &'static str,
     /// Details (numbers, the reason given by the step), as they are.

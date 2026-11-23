@@ -595,7 +595,7 @@ pub fn note(n: &super::provider::Note, lang: Lang) -> String {
     match (n.arch, n.stage) {
         (Some(arch), Some(k)) => {
             let name = if n.aligner {
-                super::package::aligner_name(arch, k, false)
+                super::package::aligner_name(arch, k, n.passive)
             } else {
                 super::package::model_name(arch, k)
             };
@@ -641,6 +641,33 @@ mod tests {
             "3 spigoli aperti"
         );
         assert_eq!(tr(Lang::En, "nope"), "nope");
+    }
+
+    /// A note names the file it is about: the model, the aligner, or the
+    /// `_passivo` file of a passive aligner (its stamp is its own).
+    #[test]
+    fn a_note_names_its_file_passive_aligners_included() {
+        use crate::anatomy::Arch;
+        let note = |stage, aligner, passive| super::super::provider::Note {
+            arch: Some(Arch::Lower),
+            stage: Some(stage),
+            aligner,
+            passive,
+            key: "rpt-note-stamp",
+            detail: "no room".to_owned(),
+        };
+        assert_eq!(
+            super::note(&note(7, true, true), Lang::En),
+            "INF_allineatore_07_passivo.stl: no stamp: no room"
+        );
+        assert_eq!(
+            super::note(&note(5, true, false), Lang::En),
+            "INF_allineatore_05.stl: no stamp: no room"
+        );
+        assert_eq!(
+            super::note(&note(0, false, false), Lang::It),
+            "INF_modello_00_iniziale.stl: senza scritta: no room"
+        );
     }
 
     /// Every key used in the sources of this module is in the table.

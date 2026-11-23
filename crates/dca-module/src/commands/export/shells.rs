@@ -180,6 +180,7 @@ impl<'a> ShellProvider<'a> {
                 arch: None,
                 stage: None,
                 aligner: true,
+                passive: false,
                 key: "rpt-note-bite",
                 detail: why.to_owned(),
             });
@@ -229,7 +230,10 @@ impl<'a> ShellProvider<'a> {
         }
     }
 
+    /// A note about the file of model or aligner `k`; an aligner after the
+    /// last active stage of its arch is a passive one (its own file).
     fn note(&self, arch: Arch, k: u32, aligner: bool, key: &'static str, detail: String) {
+        let passive = aligner && k > self.last(arch);
         self.notes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -237,6 +241,7 @@ impl<'a> ShellProvider<'a> {
                 arch: Some(arch),
                 stage: Some(k),
                 aligner,
+                passive,
                 key,
                 detail,
             });
