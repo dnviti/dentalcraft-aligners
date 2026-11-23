@@ -30,7 +30,11 @@
 //!    the run, the estimate does not take its place), otherwise the virtual
 //!    bite (`aligners.occlusion.virtual-bite`), which adds the plugin's
 //!    warning to `warnings`. Arches already related (registered, or
-//!    exported in occlusion) are not moved and the step is left out;
+//!    exported in occlusion) are not moved and the step is left out. A case
+//!    with one arch has no bite ([`dca_model::bite_use`]): the step "Bite"
+//!    (`aligners.occlusion.align`) runs in its place, says that it does not
+//!    apply and changes nothing, so nothing is estimated and the run goes on
+//!    with the one arch;
 //! 8. setup (`aligners.planning.setup.automatic`);
 //! 9. staging (`aligners.planning.staging.automatic`);
 //! 10. the clinical review (`aligners.review.classify`): the
@@ -70,13 +74,13 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use dc_case::{CaseState, Fdi, ScanRole};
+use dc_case::{CaseState, Fdi};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
 use dca_algo::arch_check::{self, ATTEMPTS, Trial};
 use dca_algo::export::provider::Quality;
-use dca_model::{AlignersState, MODULE_ID};
+use dca_model::{AlignersState, BiteUse, MODULE_ID};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -85,7 +89,7 @@ use super::import::DETECT_ARCH;
 use super::messages;
 use super::seed_check::CHECK;
 use super::teeth_build::RECONSTRUCT;
-use super::wrappers::{VIRTUAL_BITE, bite_steps};
+use super::wrappers::{BITE, VIRTUAL_BITE, bite_steps};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -279,14 +283,16 @@ fn later_steps(state: &CaseState, params: &Params, numbered: &[Arch]) -> Vec<Ste
         Step::new("aligners.preparation.gingiva", Value::Null),
         Step::new("aligners.diagnosis.space-analysis", Value::Null),
     ]);
-    let both =
-        state.case.scan(ScanRole::Upper).is_some() && state.case.scan(ScanRole::Lower).is_some();
+    let bite_use = BiteUse::of(state);
     let [bite, contacts] = bite_steps(state).1;
-    let occlusion = params.occlusion && both;
+    let occlusion = params.occlusion && bite_use.applies();
     // `case_auto.auto_steps`: with both arches the bite comes before the
     // final position, when they are not related yet
     if occlusion {
         steps.push(bite.unless_related());
+    } else if params.occlusion && bite_use.one_arch() {
+        // one arch has no bite: the step says so, and nothing is estimated
+        steps.push(Step::new(BITE, Value::Null));
     }
     steps.extend([
         Step::new("aligners.planning.setup.automatic", Value::Null),
@@ -555,6 +561,7 @@ fn run_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dc_case::ScanRole;
 
     fn exec(id: &str, state: &CaseState, params: Value) -> Result<CommandOutput, CommandError> {
         crate::commands::find(id)
@@ -900,6 +907,90 @@ mod tests {
             later_steps(&s, &no_bite, &[])
                 .iter()
                 .all(|s| !s.id.starts_with("aligners.occlusion."))
+        );
+    }
+
+    #[test]
+    fn one_arch_has_the_bite_step_that_says_it_does_not_apply() {
+        for arch in ["lower", "upper"] {
+            let mut s = exec(
+                "aligners.demo",
+                &CaseState::default(),
+                json!({ "arch": arch }),
+            )
+            .unwrap()
+            .0;
+            // a bite scan makes no bite with one arch
+            let mut bite = s.case.scans[0].clone();
+            bite.role = ScanRole::Bite;
+            s.case.scans.push(bite);
+            let ids = |p: &Params| -> Vec<&'static str> {
+                later_steps(&s, p, &[]).iter().map(|s| s.id).collect()
+            };
+            let all = ids(&Params::default());
+            let bites: Vec<&str> = all
+                .iter()
+                .copied()
+                .filter(|id| id.starts_with("aligners.occlusion."))
+                .collect();
+            assert_eq!(bites, [BITE], "{arch}: {all:?}");
+            // in the place of the bite: after the analysis, before the final position
+            let at = |id: &str| all.iter().position(|i| *i == id).unwrap();
+            assert_eq!(at(BITE), at("aligners.diagnosis.space-analysis") + 1);
+            assert_eq!(at(BITE) + 1, at("aligners.planning.setup.automatic"));
+            let no_bite = Params {
+                occlusion: false,
+                ..Params::default()
+            };
+            assert!(
+                ids(&no_bite)
+                    .iter()
+                    .all(|id| !id.starts_with("aligners.occlusion."))
+            );
+        }
+    }
+
+    #[test]
+    fn one_arch_runs_to_its_aligners_without_a_bite() {
+        let s = exec(
+            "aligners.demo",
+            &CaseState::default(),
+            json!({ "arch": "upper" }),
+        )
+        .unwrap()
+        .0;
+        let (next, out) = exec("aligners.auto", &s, Value::Null).unwrap();
+        let steps = out["steps"].as_array().unwrap();
+        let bite: Vec<&Value> = steps
+            .iter()
+            .filter(|r| r["id"].as_str().unwrap().starts_with("aligners.occlusion."))
+            .collect();
+        assert_eq!(bite.len(), 1, "{steps:?}");
+        assert_eq!(bite[0]["id"], BITE);
+        let said = &bite[0]["output"];
+        assert_eq!(said["applies"], false, "{said}");
+        assert_eq!(said["reason"], "one_arch");
+        assert_eq!(said["arch"], "upper");
+        // nothing estimated: no warning of a virtual bite, no bite in the case
+        let warning = messages::tr("aligners-auto-warn-virtual-bite", &[]);
+        assert!(
+            out["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| *w != warning)
+        );
+        let d = next.module_data::<AlignersState>(MODULE_ID).unwrap();
+        assert!(!d.bite_registered && d.bite_report.is_none());
+        assert_eq!(d.aligner_bite, dca_model::AlignerBite::default());
+        assert!(d.diagnosis.bolton_overall.is_none() && d.diagnosis.bolton_anterior.is_none());
+        // the aligners of the one arch, the arch where it was
+        assert!(!d.setup.poses.is_empty() && !d.stages.is_empty());
+        assert!(d.setup.poses.keys().all(|f| f.is_upper()));
+        assert!(BiteUse::of(&next).one_arch());
+        assert_eq!(
+            next.case.scan(ScanRole::Upper).unwrap().mesh,
+            s.case.scan(ScanRole::Upper).unwrap().mesh
         );
     }
 

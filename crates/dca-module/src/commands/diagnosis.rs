@@ -27,8 +27,8 @@
 //! `largest_space`, `catcat_items`, `catcat_score`, `level`, and
 //! `classification` (`aligner_suitable` with its `reasons`, and per tooth
 //! the nearest typical crown type and the plausibility of its dimensions).
-//! Top level: `bolton` (overall, anterior, with the norms), `complexity_score`
-//! and the `references` the values come from.
+//! Top level: `bolton` (overall, anterior, with the norms; only with both
+//! arches), `complexity_score` and the `references` the values come from.
 
 use std::collections::BTreeMap;
 
@@ -41,7 +41,7 @@ use dca_algo::diagnosis::edit::{self, EditField};
 use dca_algo::diagnosis::{self, ArchDiagnosis, ArchInput, Crowns, Input, Params, classify};
 use dca_algo::evidence;
 use dca_algo::frame;
-use dca_model::{AlignersState, ArchDetails, ArchEdits, MODULE_ID, ToothMeasures};
+use dca_model::{AlignersState, ArchDetails, ArchEdits, BiteUse, MODULE_ID, ToothMeasures};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -263,15 +263,19 @@ fn run_diagnosis(
     // the arches not analysed now keep the values written by hand
     data.diagnosis.complexity_score = edit::complexity_score(&data);
 
-    report.insert(
-        "bolton".to_owned(),
-        json!({
-            "overall": out.bolton.overall,
-            "anterior": out.bolton.anterior,
-            "overall_norm": diagnosis::BOLTON_OVERALL_NORM,
-            "anterior_norm": diagnosis::BOLTON_ANTERIOR_NORM,
-        }),
-    );
+    // the Bolton ratios compare the two arches: a case with one arch has
+    // none, and none is in its report (`dca_model::bite_use`)
+    if BiteUse::of(state).applies() {
+        report.insert(
+            "bolton".to_owned(),
+            json!({
+                "overall": out.bolton.overall,
+                "anterior": out.bolton.anterior,
+                "overall_norm": diagnosis::BOLTON_OVERALL_NORM,
+                "anterior_norm": diagnosis::BOLTON_ANTERIOR_NORM,
+            }),
+        );
+    }
     report.insert(
         "complexity_score".to_owned(),
         json!(data.diagnosis.complexity_score),
@@ -576,8 +580,8 @@ mod tests {
                 assert_eq!(t["plausible"], true, "{fdi}: {t}");
             }
 
-            // one arch alone has no Bolton ratio
-            assert!(out["bolton"]["overall"].is_null());
+            // one arch alone has no Bolton ratio, and its report none
+            assert!(out.get("bolton").is_none(), "{out}");
             assert!(data(&next).diagnosis.bolton_overall.is_none());
             // the scans and the other data are untouched
             assert_eq!(next.case.scans, state.case.scans);

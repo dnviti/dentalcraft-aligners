@@ -1208,6 +1208,127 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// One arch has no bite: the whole pipeline of a demo arch, the upper
+    /// one and then the lower one, to the full export from the shell stage.
+    /// The step "Bite" says that it does not apply, the case holds no bite,
+    /// the export says nothing of a bite and its aligners pass the print
+    /// check. A bite an old project still stores (the flag, a virtual bite,
+    /// the ramps on with a ramp on the first incisor, a manual occlusal
+    /// thickness) changes no file of the export.
+    #[test]
+    #[ignore = "the pipeline and the shells of every stage of one demo arch, twice per arch: run with --release --ignored"]
+    fn one_arch_makes_its_aligners_without_a_bite() {
+        use dca_model::{BiteReport, OcclusalMode};
+        for arch in [Arch::Upper, Arch::Lower] {
+            let name = if arch.is_upper() { "upper" } else { "lower" };
+            let s = exec(
+                "aligners.demo",
+                &CaseState::default(),
+                json!({ "arch": name }),
+            )
+            .unwrap()
+            .0;
+            let t = std::time::Instant::now();
+            let (s, out) = exec("aligners.auto", &s, json!({ "start_date": "2026-11-02" })).unwrap();
+            eprintln!("{name}: pipeline {:.1} s", t.elapsed().as_secs_f64());
+            let bite: Vec<&Value> = out["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["id"].as_str().unwrap().starts_with("aligners.occlusion."))
+                .collect();
+            assert_eq!(bite.len(), 1, "{name}");
+            assert_eq!(bite[0]["output"]["applies"], false, "{name}");
+            assert_eq!(bite[0]["output"]["reason"], "one_arch", "{name}");
+            let d = aligners_data(&s).unwrap();
+            assert!(!d.bite_registered && d.bite_report.is_none(), "{name}");
+            assert!(d.aligner_bite.ramps.ramps.is_empty(), "{name}");
+
+            let export = |s: &CaseState, tag: &str| -> (Value, String) {
+                let dir = temp(&format!("one-{name}-{tag}"));
+                let t = std::time::Instant::now();
+                let (_, out) = exec(
+                    "aligners.output.report",
+                    s,
+                    json!({
+                        "dir": dir.display().to_string(),
+                        "shells": true,
+                        "quality": "draft",
+                        "embed_renders": false,
+                        "generated": "2026-01-01",
+                        "start_date": "2026-11-02",
+                        "stamp_code": "ONE-1",
+                    }),
+                )
+                .unwrap();
+                eprintln!("{name} {tag}: export {:.1} s", t.elapsed().as_secs_f64());
+                let report = std::fs::read_to_string(dir.join("report.html")).unwrap();
+                std::fs::remove_dir_all(&dir).unwrap();
+                (out, report)
+            };
+            let (clean, report) = export(&s, "clean");
+            assert_eq!(clean["meshes"], "shells", "{name}");
+            assert_eq!(
+                clean["print_check"]["failed"],
+                json!([]),
+                "{name}: {:#}",
+                clean["print_check"]
+            );
+            let notes = clean["notes"].to_string();
+            for bite_note in ["occlusal thickness", "spessore occlusale", "ramps:", "rampe:"] {
+                assert!(!notes.contains(bite_note), "{name}: {notes}");
+                assert!(!report.contains(bite_note), "{name}: {bite_note}");
+            }
+            assert!(!report.contains("Bolton"), "{name}");
+            // the files of the one arch only, every aligner of it in the print check
+            let files = clean["files"].as_array().unwrap();
+            let other = if arch.is_upper() { "INF_" } else { "SUP_" };
+            assert!(
+                files
+                    .iter()
+                    .all(|f| !f["name"].as_str().unwrap().contains(other)),
+                "{name}"
+            );
+            let aligners = files
+                .iter()
+                .filter(|f| f["name"].as_str().unwrap().starts_with("stampa_resina/"))
+                .count();
+            assert!(aligners > 0, "{name}");
+
+            // a bite an old file still stores: no file of the export changes
+            let mut data = d.clone();
+            data.bite_registered = true;
+            data.bite_report = Some(BiteReport::virtual_bite());
+            data.aligner_bite.occlusal.mode = OcclusalMode::Manual;
+            data.aligner_bite.occlusal.thickness_mm = 0.5;
+            data.aligner_bite.ramps.enabled = true;
+            let incisor = Fdi::new(if arch.is_upper() { 11 } else { 41 }).unwrap();
+            let scan = s.mesh(&s.case.scan(arch.role()).unwrap().mesh).unwrap();
+            let labels = s.mesh(&d.labels[&arch.role()]).unwrap();
+            let tip = scan
+                .positions
+                .iter()
+                .zip(labels.vertex_labels.as_ref().unwrap())
+                .filter(|(_, l)| **l == u16::from(incisor.get()))
+                .map(|(p, _)| p.as_dvec3())
+                .max_by(|a, b| a.y.total_cmp(&b.y))
+                .unwrap();
+            data.aligner_bite.ramps.ramps.push(dca_algo::ramps::manual_ramp(
+                incisor,
+                tip,
+                glam::DVec3::Y,
+                [3.0, 2.0, 1.5],
+                data.settings.clearance_mm,
+                data.settings.shell_thickness_mm,
+            ));
+            let mut stale = s.clone();
+            stale.set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(data));
+            let (old, _) = export(&stale, "stale");
+            assert_eq!(old["notes"], clean["notes"], "{name}");
+            assert_eq!(old["files"], clean["files"], "{name}: a stored bite changed a file");
+        }
+    }
+
     /// A real export of the demo case with the stamp on and two passive
     /// aligners at least: the arch that ends first repeats the shell of its
     /// last stage until the other one ends, each passive file stamped on it

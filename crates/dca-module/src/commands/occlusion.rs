@@ -10,7 +10,9 @@
 //!   antagonist crowns, the teeth in contact and the deepest
 //!   interpenetration. The case is not modified (the app colours the map).
 //!
-//! Both need the two arches segmented (labels) with their seeds.
+//! Both need the two arches segmented (labels) with their seeds. A case with
+//! one arch has no bite ([`dca_model::bite_use`]): every bite command answers
+//! that it does not apply ([`one_arch`]) and leaves the case as it is.
 
 use super::messages;
 use dc_case::{BlobRef, CaseState, ModuleState, ScanRole};
@@ -19,7 +21,7 @@ use dc_mesh::TriMesh;
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
 use dca_algo::occlusion::{self, ArchModel};
-use dca_model::{AlignersState, MODULE_ID};
+use dca_model::{AlignersState, BiteUse, MODULE_ID};
 use glam::{DMat3, DMat4};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -63,6 +65,35 @@ pub(crate) fn aligners_data(state: &CaseState) -> Result<AlignersState, CommandE
 
 fn arch_name(arch: Arch) -> &'static str {
     if arch.is_upper() { "upper" } else { "lower" }
+}
+
+/// The answer of a bite command on a case with one arch: there the bite
+/// does not apply ([`dca_model::bite_use`]), so nothing is registered,
+/// estimated or measured and the case is left as it is. The output says it:
+/// `applies` false, `reason` `one_arch`, the `arch` of the case and the
+/// sentence (`message`). `None`: the case has both arches (or none), the
+/// command runs.
+pub(crate) fn one_arch(state: &CaseState) -> Option<CommandOutput> {
+    if !BiteUse::of(state).one_arch() {
+        return None;
+    }
+    let arch = if state.case.scan(ScanRole::Upper).is_some() {
+        Arch::Upper
+    } else {
+        Arch::Lower
+    };
+    Some((
+        state.clone(),
+        json!({
+            "applies": false,
+            "reason": "one_arch",
+            "arch": arch_name(arch),
+            "message": messages::tr(
+                "aligners-bite-one-arch",
+                &[("arch", &messages::arch_word(arch))],
+            ),
+        }),
+    ))
 }
 
 /// The labelled scan of an arch as an [`ArchModel`].
@@ -279,6 +310,9 @@ fn run_virtual_bite(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    if let Some(out) = one_arch(state) {
+        return Ok(out);
+    }
     let mut data = aligners_data(state)?;
     let lower = arch_model(state, &data, Arch::Lower)?;
     let upper = arch_model(state, &data, Arch::Upper)?;
@@ -306,6 +340,9 @@ fn run_contact_map(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    if let Some(out) = one_arch(state) {
+        return Ok(out);
+    }
     let data = aligners_data(state)?;
     let lower = arch_model(state, &data, Arch::Lower)?;
     let upper = arch_model(state, &data, Arch::Upper)?;
@@ -361,27 +398,69 @@ pub(crate) mod tests {
         }
     }
 
+    /// The bite command `id` on `state`, a case with one arch: it does not
+    /// apply, says so in the words of the app and leaves the case as it is.
+    pub(crate) fn assert_not_applicable(id: &str, state: &CaseState, params: Value) {
+        let (next, out) = try_exec(id, state, params).unwrap_or_else(|e| panic!("{id}: {e}"));
+        assert_eq!(out["applies"], false, "{id}: {out}");
+        assert_eq!(out["reason"], "one_arch", "{id}: {out}");
+        let arch = if out["arch"] == "upper" {
+            Arch::Upper
+        } else {
+            assert_eq!(out["arch"], "lower", "{id}: {out}");
+            Arch::Lower
+        };
+        assert!(state.case.scan(arch.role()).is_some(), "{id}: {out}");
+        let word = messages::arch_word(arch);
+        assert_eq!(
+            out["message"],
+            messages::tr("aligners-bite-one-arch", &[("arch", &word)]),
+            "{id}"
+        );
+        assert_eq!(next.case, state.case, "{id}");
+        assert_eq!(
+            next.module_data::<AlignersState>(MODULE_ID),
+            state.module_data::<AlignersState>(MODULE_ID),
+            "{id}"
+        );
+        assert_eq!(next.referenced_blobs(), state.referenced_blobs(), "{id}");
+    }
+
     #[test]
-    fn both_arches_are_needed() {
-        let lower = exec("aligners.demo", &CaseState::default(), Value::Null).0;
-        for id in [
-            "aligners.occlusion.virtual-bite",
-            "aligners.occlusion.contact-map",
-        ] {
-            let err = try_exec(id, &lower, Value::Null).unwrap_err();
-            assert!(
-                matches!(&err, CommandError::Invalid(m) if m.contains("upper")),
-                "{err}"
-            );
-        }
-        assert!(matches!(
-            try_exec(
+    fn one_arch_has_no_bite_to_estimate_or_measure() {
+        for arch in ["lower", "upper"] {
+            let one = exec(
+                "aligners.demo",
+                &CaseState::default(),
+                json!({ "arch": arch }),
+            )
+            .0;
+            for id in [
                 "aligners.occlusion.virtual-bite",
-                &lower,
-                json!({ "nope": 1 })
-            ),
-            Err(CommandError::Invalid(_))
-        ));
+                "aligners.occlusion.contact-map",
+            ] {
+                assert_not_applicable(id, &one, Value::Null);
+            }
+            // the parameters are still checked
+            assert!(matches!(
+                try_exec(
+                    "aligners.occlusion.virtual-bite",
+                    &one,
+                    json!({ "nope": 1 })
+                ),
+                Err(CommandError::Invalid(_))
+            ));
+        }
+        // both arches, one of them without its tooth colours: the step needs it
+        let mut two = two_demo_arches();
+        let mut d = two.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+        d.labels.remove(&ScanRole::Upper);
+        two.set_module(MODULE_ID, ModuleState::new(d));
+        let err = try_exec("aligners.occlusion.virtual-bite", &two, Value::Null).unwrap_err();
+        assert!(
+            matches!(&err, CommandError::Invalid(m) if m.contains("upper")),
+            "{err}"
+        );
     }
 
     #[test]

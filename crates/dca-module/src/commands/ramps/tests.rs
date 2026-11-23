@@ -48,17 +48,15 @@ fn the_commands_are_registered_with_schemas() {
 }
 
 #[test]
-fn both_arches_are_needed() {
+fn one_arch_has_no_bite_and_its_aligners_no_ramps() {
+    use crate::commands::occlusion::tests::assert_not_applicable;
+    use dc_case::ScanRole;
     let lower = exec("aligners.demo", &CaseState::default(), Value::Null).0;
     for id in [
         "aligners.occlusion.bite-with-aligners",
         "aligners.occlusion.bite-ramps",
     ] {
-        let err = try_exec(id, &lower, Value::Null).unwrap_err();
-        assert!(
-            matches!(&err, CommandError::Invalid(m) if m.contains("upper")),
-            "{id}: {err}"
-        );
+        assert_not_applicable(id, &lower, Value::Null);
     }
     assert!(matches!(
         try_exec(
@@ -68,6 +66,36 @@ fn both_arches_are_needed() {
         ),
         Err(CommandError::Invalid(_))
     ));
+
+    // the ramps of a deep bite on the upper incisors, in the aligners of both arches
+    let (with, _) = exec(
+        "aligners.occlusion.bite-ramps",
+        &deep(2.5),
+        json!({ "overbite_min_mm": 1.0 }),
+    );
+    let d = data(&with);
+    assert!(d.aligner_bite.ramps.enabled && !d.aligner_bite.ramps.ramps.is_empty());
+    let both = StageBite::new(&with).unwrap();
+    assert!(!both.ramps(Arch::Upper, 0).is_empty());
+    assert!(both.shapes_shells() && both.to_arch(Arch::Upper).is_some());
+    // the same project with the lower arch gone, its bite still stored (an
+    // old file): nothing of it enters the aligners of the upper arch
+    let mut upper = with.clone();
+    upper.case.scans.retain(|s| s.role != ScanRole::Lower);
+    let one = StageBite::new(&upper).unwrap();
+    assert!(!one.shapes_shells(), "no occlusal shaping, and no note about it");
+    assert!(one.ramps(Arch::Upper, 0).is_empty());
+    assert!(one.to_arch(Arch::Upper).is_none() && one.bite(0, 0).is_none());
+    assert!(one.covered(Arch::Upper).is_empty());
+    assert!(ramp_solids(&upper, Arch::Upper, 0).unwrap().is_empty());
+    for (id, params) in [
+        ("aligners.occlusion.bite-with-aligners", json!({ "mode": "manual" })),
+        ("aligners.occlusion.bite-ramps", json!({ "action": "propose" })),
+        ("aligners.occlusion.bite-ramps", json!({ "action": "remove" })),
+        ("aligners.occlusion.bite-ramps", json!({ "action": "set", "enabled": true })),
+    ] {
+        assert_not_applicable(id, &upper, params);
+    }
 }
 
 #[test]
