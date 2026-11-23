@@ -238,6 +238,8 @@ fn run_study_models(
         }
     }
     let report = serde_json::to_value(&out.report).map_err(failed)?;
+    // a model that is not one clean solid, said in the language of the app
+    let warnings = solid_warnings(&out.report);
     // the models go in the case, in place of the earlier ones of their arch
     let mut next = state.clone();
     let mut data = data.clone();
@@ -260,8 +262,39 @@ fn run_study_models(
             "report": report,
             "files": files,
             "kept": kept,
+            "warnings": warnings,
         }),
     ))
+}
+
+/// One sentence for each study model of `report` that is not one clean
+/// solid (the warnings `not_solid`): how many pieces, open edges, edges of
+/// more than two faces and tunnels the scan does not have it is left with.
+fn solid_warnings(report: &study_base::Report) -> Vec<String> {
+    report
+        .warnings
+        .iter()
+        .filter(|w| w.code == "not_solid")
+        .filter_map(|w| {
+            let a = report.arches.get(&w.arch)?;
+            let arch = if w.arch == "upper" {
+                Arch::Upper
+            } else {
+                Arch::Lower
+            };
+            let made = a.genus.map_or(0, |g| g - a.tunnels.len() as i64).max(0);
+            Some(super::messages::tr(
+                "aligners-study-warn-not-solid",
+                &[
+                    ("arch", &super::messages::arch_word(arch)),
+                    ("pieces", &a.components.to_string()),
+                    ("open", &a.open_edges.to_string()),
+                    ("nonmanifold", &a.nonmanifold_edges.to_string()),
+                    ("tunnels", &made.to_string()),
+                ],
+            ))
+        })
+        .collect()
 }
 
 fn run_settings(
@@ -440,6 +473,90 @@ mod tests {
             data.study_models[&ScanRole::Lower]
         );
         assert!(!again.blobs.contains(&data.study_models[&ScanRole::Upper]));
+        // each model counted as a solid, and one sentence for each model
+        // that is not one clean solid
+        for arch in ["upper", "lower"] {
+            let a = &out["report"]["arches"][arch];
+            for k in [
+                "watertight",
+                "components",
+                "open_edges",
+                "nonmanifold_edges",
+                "loose_pieces",
+                "tunnels",
+            ] {
+                assert!(!a[k].is_null(), "{arch}: {k}: {a}");
+            }
+            assert!(a.get("genus").is_some(), "{arch}: {a}");
+        }
+        let not_solid = out["report"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] == "not_solid")
+            .count();
+        assert_eq!(out["warnings"].as_array().unwrap().len(), not_solid);
+    }
+
+    /// A study model that is not one clean solid is said in `warnings`, in
+    /// the language of the app, with what is left; a clean one is not.
+    #[test]
+    fn a_model_that_is_not_one_clean_solid_gets_a_warning() {
+        let d = dca_algo::demo::run(&dca_algo::demo::Params {
+            arch: Arch::Upper,
+            ..dca_algo::demo::Params::default()
+        });
+        let labels = d.mesh.vertex_labels.clone().unwrap();
+        let v: Vec<_> = d.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+        let framed = frame::run(
+            &frame::Input {
+                arch: Arch::Upper,
+                vertices: &v,
+                seeds: &d.seeds,
+                occlusal_flipped: false,
+            },
+            &frame::Params::default(),
+        )
+        .unwrap();
+        let input = Input {
+            upper: Some(ArchInput {
+                scan: &d.mesh,
+                labels: &labels,
+                arch_frame: framed.arch_frame,
+            }),
+            lower: None,
+        };
+        let p = Params {
+            voxel_mm: 1.0,
+            tolerance_mm: 0.1,
+            ..Params::default()
+        };
+        let mut report = study_base::run(&input, &p).unwrap().report;
+        report.warnings.retain(|w| w.code != "not_solid");
+        assert!(solid_warnings(&report).is_empty());
+        // the same model broken: two pieces, three tunnels, one of the scan
+        let a = report.arches.get_mut("upper").unwrap();
+        (a.components, a.genus, a.open_edges, a.nonmanifold_edges) = (2, Some(3), 0, 4);
+        a.tunnels = vec![study_base::Tunnel {
+            at: [0.0; 3],
+            loop_mm: 3.0,
+        }];
+        report.warnings.push(study_base::Warning {
+            code: "not_solid".to_owned(),
+            arch: "upper".to_owned(),
+            detail: String::new(),
+        });
+        let said = solid_warnings(&report);
+        assert_eq!(said.len(), 1, "{said:?}");
+        let s = &said[0];
+        assert!(!s.contains("aligners-study"), "{s}");
+        for n in ["2", "4"] {
+            assert!(s.contains(n), "{n}: {s}");
+        }
+        assert!(
+            s.contains(&super::super::messages::arch_word(Arch::Upper)),
+            "{s}"
+        );
     }
 
     /// Writes occlusal and frontal renders of the bases to `$DC_STUDY_PNG_DIR`

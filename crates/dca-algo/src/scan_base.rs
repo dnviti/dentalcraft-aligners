@@ -556,7 +556,7 @@ fn least_area(p: &[DVec3], forbidden: &dyn Fn(usize, usize) -> bool) -> Option<V
 }
 
 /// The edges of the closed ring `ring`, in its order.
-fn ring_edges(ring: &[u32]) -> impl Iterator<Item = (u32, u32)> + '_ {
+pub(crate) fn ring_edges(ring: &[u32]) -> impl Iterator<Item = (u32, u32)> + '_ {
     (0..ring.len()).map(move |i| (ring[i], ring[(i + 1) % ring.len()]))
 }
 
@@ -590,6 +590,8 @@ pub(crate) struct Openings {
     /// Per piece, its footprint: the area of the convex hull of its points
     /// seen along the direction (mm²).
     pub footprints: Vec<f64>,
+    /// Per point, its piece (`u32::MAX` for a point of no kept triangle).
+    pub piece_of: Vec<u32>,
 }
 
 /// A cycle of open edges of [`Openings`].
@@ -657,6 +659,7 @@ pub(crate) fn openings(positions: &[Vec3], tris: &[[u32; 3]], z: DVec3) -> Openi
         open_edges,
         cycles,
         footprints,
+        piece_of,
     }
 }
 

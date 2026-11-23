@@ -135,7 +135,11 @@ fn the_result_is_deterministic_and_keeps_the_teeth() {
         .filter(|(_, l)| **l > 0)
         .map(|(p, _)| grid.sample(*p))
         .fold(f32::NEG_INFINITY, f32::max);
-    assert!(worst <= 0.5, "a tooth vertex {worst} mm outside the base");
+    assert!(
+        worst <= 0.5,
+        "a tooth vertex {worst} mm outside the base: {:?}",
+        a.report.arches["lower"]
+    );
 }
 
 #[test]
@@ -174,6 +178,12 @@ fn bad_parameters_and_inputs_are_refused() {
 /// the upper sheet also holds the palate vault, deeper than the vestibule.
 /// The crown points carry the FDI number of their tooth.
 fn undercut_arch(arch: Arch) -> (TriMesh, Vec<u16>, ArchFrame) {
+    arch_sheet(arch, true)
+}
+
+/// The sheet of [`undercut_arch`], its crowns bulging over the gum when
+/// `undercut`, else the gum going straight out from under them.
+fn arch_sheet(arch: Arch, undercut: bool) -> (TriMesh, Vec<u16>, ArchFrame) {
     // the profile across the arch, occlusal side up: (radius, height, crown)
     let mut ctrl: Vec<(f64, f64, bool)> = Vec::new();
     if arch.is_upper() {
@@ -192,13 +202,24 @@ fn undercut_arch(arch: Arch) -> (TriMesh, Vec<u16>, ArchFrame) {
         (26.0, 0.0, true),
         (27.0, -1.0, true),
         (27.6, -2.4, true), // height of contour
-        (27.2, -3.6, true),
-        (26.3, -4.6, true), // gingival margin, under the bulge
-        (25.6, -7.0, false),
-        (25.4, -9.5, false),
-        (26.5, -12.0, false),
-        (29.0, -14.0, false), // the border, in the vestibule
     ]);
+    if undercut {
+        ctrl.extend([
+            (27.2, -3.6, true),
+            (26.3, -4.6, true), // gingival margin, under the bulge
+            (25.6, -7.0, false),
+            (25.4, -9.5, false),
+            (26.5, -12.0, false),
+        ]);
+    } else {
+        ctrl.extend([
+            (27.8, -4.6, true),
+            (28.0, -7.0, false),
+            (28.2, -9.5, false),
+            (28.6, -12.0, false),
+        ]);
+    }
+    ctrl.push((29.0, -14.0, false)); // the border, in the vestibule
     let mut profile: Vec<(f64, f64, bool)> = vec![ctrl[0]];
     for w in ctrl.windows(2) {
         let (a, b) = (w[0], w[1]);
@@ -359,4 +380,318 @@ fn the_study_models_keep_the_scanned_anatomy_undercuts_and_palate_included() {
             "{key}: {r:?}"
         );
     }
+}
+
+/// `scan` closed as an older program closes a scan: the triangle `hole`
+/// taken out of it, its border and the loop of that hole walled along `down`
+/// onto a plane 3 mm beyond its farthest point, each ring on the plane
+/// capped by a fan from its middle point. The border gives the model a base
+/// of its own, tilted when `down` is; the hole a chimney from the crown down
+/// to that base, inside the model. The new points are labelled `0`; also
+/// the three corners of the chimney on the crown and on the base.
+fn closed_by_an_old_base(
+    scan: &TriMesh,
+    labels: &[u16],
+    down: DVec3,
+    hole: usize,
+) -> (TriMesh, Vec<u16>, [(DVec3, DVec3); 3]) {
+    let mut tris = scan.tris.clone();
+    let chimney = tris.remove(hole);
+    let mut positions = scan.positions.clone();
+    let reach = positions
+        .iter()
+        .map(|p| down.dot(p.as_dvec3()))
+        .fold(f64::NEG_INFINITY, f64::max)
+        + 3.0;
+    let mut corners = [(DVec3::ZERO, DVec3::ZERO); 3];
+    for ring in holes::boundary_loops(&tris, positions.len()) {
+        let copy: Vec<u32> = ring
+            .iter()
+            .map(|&w| {
+                let p = positions[w as usize].as_dvec3();
+                let q = p + down * (reach - down.dot(p));
+                if let Some(k) = chimney.iter().position(|&c| c == w) {
+                    corners[k] = (p, q);
+                }
+                positions.push(q.as_vec3());
+                (positions.len() - 1) as u32
+            })
+            .collect();
+        let mid = copy
+            .iter()
+            .map(|&w| positions[w as usize].as_dvec3())
+            .sum::<DVec3>()
+            / copy.len() as f64;
+        let center = positions.len() as u32;
+        positions.push(mid.as_vec3());
+        for k in 0..ring.len() {
+            let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+            let (a2, b2) = (copy[k], copy[(k + 1) % ring.len()]);
+            tris.extend([[b, a, a2], [b, a2, b2], [b2, a2, center]]);
+        }
+    }
+    let mut labels = labels.to_vec();
+    labels.resize(positions.len(), 0);
+    (TriMesh::new(positions, tris), labels, corners)
+}
+
+/// One arch alone through [`run`].
+fn alone(arch: Arch, scan: &TriMesh, labels: &[u16], frame: ArchFrame, params: &Params) -> Output {
+    let a = Some(ArchInput {
+        scan,
+        labels,
+        arch_frame: frame,
+    });
+    let input = if arch.is_upper() {
+        Input {
+            upper: a,
+            lower: None,
+        }
+    } else {
+        Input {
+            upper: None,
+            lower: a,
+        }
+    };
+    run(&input, params).unwrap()
+}
+
+/// One closed piece without tunnels, no `not_solid` warning (else where
+/// the tunnels are: the length and the middle of the shortest loop round
+/// each).
+fn assert_one_clean_solid(out: &Output, key: &str) {
+    let r = &out.report.arches[key];
+    assert!(r.watertight, "{key}: {r:?}");
+    let model = if key == "upper" {
+        out.upper_base.as_ref()
+    } else {
+        out.lower_base.as_ref()
+    }
+    .unwrap();
+    let pos: Vec<DVec3> = to_vec(model);
+    let loops: Vec<(f64, DVec3)> = holes::handle_loops(&pos, &model.tris)
+        .iter()
+        .filter_map(|l| {
+            holes::short_loops(&pos, &model.tris, l, holes::CROP_MM, holes::ROOTS, 1).pop()
+        })
+        .map(|(len, lp)| {
+            let at = lp.iter().map(|&w| pos[w as usize]).sum::<DVec3>() / lp.len() as f64;
+            (len, at)
+        })
+        .collect();
+    assert_eq!(
+        (r.components, r.genus, r.open_edges, r.nonmanifold_edges),
+        (1, Some(0), 0, 0),
+        "{key}: tunnels {loops:?}"
+    );
+    assert!(
+        !out.report.warnings.iter().any(|w| w.code == "not_solid"),
+        "{:?}",
+        out.report.warnings
+    );
+}
+
+#[test]
+fn a_model_closed_on_a_tilted_base_of_its_own_with_a_chimney_is_one_solid() {
+    let params = Params {
+        voxel_mm: 0.4,
+        tolerance_mm: 0.0,
+        ..Params::default()
+    };
+    // the crowns without an undercut: the old base walls the ends of the
+    // arch down too, and walls dropped from a crown that bulges over its gum
+    // would pass through one another
+    let (sheet, labels, frame) = arch_sheet(Arch::Upper, false);
+    // a triangle of an incisor crown, its chimney walled down with the base
+    let hole = (0..sheet.tris.len())
+        .filter(|&f| sheet.tris[f].iter().all(|&w| labels[w as usize] == 11))
+        .max_by(|&a, &b| {
+            let depth = |f: usize| -sheet.triangle(f)[0].z;
+            depth(a).total_cmp(&depth(b))
+        })
+        .unwrap();
+    // the base of the upper arch is towards +Z, tilted 8° across the arch
+    let tilt = 8f64.to_radians();
+    let down = DVec3::new(tilt.sin(), 0.0, tilt.cos());
+    let (model, labels, chimney) = closed_by_an_old_base(&sheet, &labels, down, hole);
+    assert_eq!(dc_mesh::solid_topology(&model).boundary_edges, 0);
+    let out = alone(Arch::Upper, &model, &labels, frame, &params);
+    assert_one_clean_solid(&out, "upper");
+    let built = out.upper_base.as_ref().unwrap();
+    // the anatomy is on the surface of the model, within the meshing
+    let d = distances(&sheet.positions, built);
+    let mut sorted = d.clone();
+    sorted.sort_by(f64::total_cmp);
+    let (max, p95) = (sorted[sorted.len() - 1], sorted[sorted.len() * 95 / 100]);
+    assert!(
+        max <= params.voxel_mm && p95 <= 0.1,
+        "the model departs from the anatomy by up to {max:.2} mm (95%: {p95:.3} mm): {:?}",
+        out.report
+    );
+    // the chimney is inside the model: none of its walls is surface
+    let inside: Vec<Vec3> = chimney
+        .iter()
+        .flat_map(|(top, bottom)| [0.3, 0.5, 0.7].map(|t| top.lerp(*bottom, t).as_vec3()))
+        .collect();
+    let deep = distances(&inside, built);
+    assert!(
+        deep.iter().all(|&x| x > 0.5),
+        "the walls of the chimney are on the surface: {deep:?}"
+    );
+}
+
+#[test]
+fn an_open_scan_with_a_folded_face_and_a_pinched_border_gets_no_fin() {
+    let params = Params {
+        voxel_mm: 0.4,
+        tolerance_mm: 0.0,
+        ..Params::default()
+    };
+    let (mut sheet, mut labels, frame) = undercut_arch(Arch::Lower);
+    // a face folded back 1 mm over a crown tip, on an edge of two crown faces
+    let crown = (0..sheet.tris.len())
+        .filter(|&f| sheet.tris[f].iter().all(|&w| labels[w as usize] == 41))
+        .max_by(|&a, &b| sheet.triangle(a)[0].z.total_cmp(&sheet.triangle(b)[0].z))
+        .unwrap();
+    let [a, b, _] = sheet.tris[crown];
+    let apex = (sheet.positions[a as usize] + sheet.positions[b as usize]) * 0.5 + Vec3::Z;
+    sheet.positions.push(apex);
+    labels.push(41);
+    let fold = sheet.positions.len() as u32 - 1;
+    sheet.tris.push([a, b, fold]);
+    // a hole of three by three cells in the gum, touching at a point the
+    // notch of a face taken out of the border: the border passes it twice
+    let n_theta = 181u32;
+    let rows = (sheet.positions.len() as u32 - 1) / n_theta;
+    let at = |j: u32, i: u32| j * n_theta + i;
+    let (last, i) = (rows - 1, 60);
+    let gone: Vec<[u32; 3]> = std::iter::once([at(last - 1, i), at(last, i), at(last, i + 1)])
+        .chain((last - 4..last - 1).flat_map(|j| {
+            (i..i + 3).flat_map(move |c| {
+                [
+                    [at(j, c), at(j + 1, c), at(j + 1, c + 1)],
+                    [at(j, c), at(j + 1, c + 1), at(j, c + 1)],
+                ]
+            })
+        }))
+        .collect();
+    let sorted = |t: &[u32; 3]| {
+        let mut s = *t;
+        s.sort_unstable();
+        s
+    };
+    let gone: Vec<[u32; 3]> = gone.iter().map(sorted).collect();
+    let before = sheet.tris.len();
+    sheet.tris.retain(|t| !gone.contains(&sorted(t)));
+    assert_eq!(sheet.tris.len(), before - gone.len());
+    let out = alone(Arch::Lower, &sheet, &labels, frame, &params);
+    assert_one_clean_solid(&out, "lower");
+    // the fold is gone: nothing of the model reaches up to its tip
+    let built = out.lower_base.as_ref().unwrap();
+    let tip = distances(&[apex], built)[0];
+    assert!(
+        tip > 0.5,
+        "a fin up to {tip:.2} mm from the tip of the fold"
+    );
+    // the rest of the anatomy is on the surface of the model
+    let used: Vec<Vec3> = sheet.positions[..sheet.positions.len() - 1]
+        .iter()
+        .enumerate()
+        .filter(|(w, _)| sheet.tris.iter().any(|t| t.contains(&(*w as u32))))
+        .map(|(_, p)| *p)
+        .collect();
+    let d = distances(&used, built);
+    let max = d.iter().copied().fold(0.0, f64::max);
+    assert!(
+        max <= params.voxel_mm,
+        "the model departs from the scan by {max:.2} mm"
+    );
+}
+
+#[test]
+fn a_model_that_is_not_one_clean_solid_is_reported() {
+    // a closed box: nothing to say
+    let cube = |o: Vec3| {
+        let p: Vec<Vec3> = (0..8)
+            .map(|k| o + Vec3::new((k & 1) as f32, ((k >> 1) & 1) as f32, ((k >> 2) & 1) as f32))
+            .collect();
+        let t = vec![
+            [0, 2, 1],
+            [1, 2, 3],
+            [4, 5, 6],
+            [5, 7, 6],
+            [0, 1, 4],
+            [1, 5, 4],
+            [2, 6, 3],
+            [3, 6, 7],
+            [0, 4, 2],
+            [2, 4, 6],
+            [1, 3, 5],
+            [3, 7, 5],
+        ];
+        TriMesh::new(p, t)
+    };
+    let mut warnings = Vec::new();
+    let solid = solid_check(&cube(Vec3::ZERO), 0, "upper", &mut warnings);
+    assert_eq!((solid.pieces, solid.genus), (1, Some(0)));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    // two pieces
+    let mut two = cube(Vec3::ZERO);
+    let other = cube(Vec3::splat(3.0));
+    two.tris.extend(other.tris.iter().map(|t| t.map(|w| w + 8)));
+    two.positions.extend(other.positions);
+    solid_check(&two, 0, "lower", &mut warnings);
+    // open: a face taken out
+    let mut open = cube(Vec3::ZERO);
+    open.tris.pop();
+    solid_check(&open, 0, "upper", &mut warnings);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings.iter().all(|w| w.code == "not_solid"));
+    assert_eq!(warnings[0].arch, "lower");
+    assert!(
+        warnings[0].detail.contains("2 pieces"),
+        "{}",
+        warnings[0].detail
+    );
+    assert!(
+        warnings[1].detail.contains("3 open edges"),
+        "{}",
+        warnings[1].detail
+    );
+    // a tunnel through it: one the scan does not have is reported, one of
+    // the scan kept is not
+    let (nu, nv) = (24u32, 12u32);
+    let torus = TriMesh::new(
+        (0..nu)
+            .flat_map(|i| {
+                (0..nv).map(move |j| {
+                    let (u, v) = (
+                        std::f32::consts::TAU * i as f32 / nu as f32,
+                        std::f32::consts::TAU * j as f32 / nv as f32,
+                    );
+                    let r = 10.0 + 3.0 * v.cos();
+                    Vec3::new(r * u.cos(), r * u.sin(), 3.0 * v.sin())
+                })
+            })
+            .collect(),
+        (0..nu)
+            .flat_map(|i| {
+                (0..nv).flat_map(move |j| {
+                    let w = |a: u32, b: u32| (a % nu) * nv + b % nv;
+                    [
+                        [w(i, j), w(i + 1, j), w(i + 1, j + 1)],
+                        [w(i, j), w(i + 1, j + 1), w(i, j + 1)],
+                    ]
+                })
+            })
+            .collect(),
+    );
+    let mut more = Vec::new();
+    let solid = solid_check(&torus, 0, "upper", &mut more);
+    assert_eq!((solid.pieces, solid.genus), (1, Some(1)));
+    assert_eq!(more.len(), 1);
+    assert!(more[0].detail.contains("1 tunnels"), "{}", more[0].detail);
+    more.clear();
+    solid_check(&torus, 1, "upper", &mut more);
+    assert!(more.is_empty(), "{more:?}");
 }
