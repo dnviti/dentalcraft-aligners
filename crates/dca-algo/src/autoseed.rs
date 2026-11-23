@@ -1074,6 +1074,13 @@ pub enum Doubt {
     /// tooth or the ridge of a missing tooth: left as it was found
     /// ([`RIDGE_DOUBT_MM`], [`Check::low`]).
     LowCrown,
+    /// An end of the arch shorter than in the plugin's proposal: the checks
+    /// left out what the plugin took for the last tooth of a side (the gum
+    /// or the base of a model behind the last molar, but also a low, partly
+    /// erupted or very wide last molar), and no other doubt tells it
+    /// ([`Doubt::EndNotTooth`] with no end tooth kept). The last tooth of
+    /// each side must be checked.
+    EndLeftOut,
 }
 
 /// The check of a doubtful proposal ([`Diagnostics::checked`]).
@@ -1246,6 +1253,10 @@ fn width_scales() -> Vec<f64> {
 /// first one only when it is no worse (`ends::no_worse`); otherwise the
 /// first one stays, with the doubt.
 ///
+/// An end of the arch left shorter than in the plugin's proposal by any of
+/// these checks is always a doubt on it ([`Doubt::EndLeftOut`]): what was
+/// left out may be a real last molar.
+///
 /// Before all this, a stretch of the arch with no crown on it between two
 /// crowns (the ridge of a missing tooth, as high as the crowns on a model)
 /// is made gum, and the teeth are found around it (`ridges`,
@@ -1369,6 +1380,12 @@ fn mark(
     stretches: &Stretches<'_>,
     not_crowns: Vec<u8>,
 ) -> Proposal {
+    // an end of the arch the checks made shorter is always told: what was
+    // left out may be a low or wide last molar
+    let told = doubts.contains(&Doubt::EndNotTooth) && not_crowns.is_empty();
+    if !told && shortened(&plugin_teeth, &p.seeds) {
+        doubts.push(Doubt::EndLeftOut);
+    }
     if !stretches.empty.is_empty() {
         doubts.push(Doubt::EmptyRidge);
     }
@@ -1389,6 +1406,25 @@ fn mark(
         });
     }
     p
+}
+
+/// `true` when an end of the arch of `seeds` is shorter than in
+/// `plugin_teeth`, the teeth of the plugin's proposal: the last tooth of a
+/// side stands nearer the midline.
+fn shortened(plugin_teeth: &[u8], seeds: &[Seed]) -> bool {
+    let plugin = last_teeth(plugin_teeth.iter().filter_map(|&n| Fdi::new(n).ok()));
+    let now = last_teeth(seeds.iter().map(|s| s.fdi));
+    now.iter().zip(plugin).any(|(&n, p)| n < p)
+}
+
+/// The position (1..=8) of the last tooth of each side (right, left) of
+/// `teeth`, 0 on a side with none.
+fn last_teeth(teeth: impl IntoIterator<Item = Fdi>) -> [u8; 2] {
+    let mut out = [0; 2];
+    for f in teeth {
+        out[side(f)] = out[side(f)].max(anatomy::index(f));
+    }
+    out
 }
 
 /// The check of the plugin's proposal `p` on the profiles `pr` (its teeth

@@ -622,3 +622,133 @@ fn a_low_tooth_is_a_tooth() {
         }
     }
 }
+
+/// A demo arch (with third molars when `third`) whose teeth `changed` are
+/// sunk `sink` mm and scaled `along` x `across` the arch about the middle
+/// of their crown (the direction from the seed of the tooth next to them
+/// in the arch order to theirs). The true teeth, the mesh.
+fn arch_with_changed_teeth(
+    arch: Arch,
+    seed: u64,
+    third: bool,
+    changed: &[u8],
+    sink: f64,
+    (along, across): (f64, f64),
+) -> (Vec<Fdi>, Vec<DVec3>, Vec<[u32; 3]>) {
+    let d = demo::run(&demo::Params {
+        arch,
+        severity: Severity::Mild,
+        seed,
+        third_molars: third,
+    });
+    let labels = d.mesh.vertex_labels.as_ref().unwrap();
+    let mut v: Vec<DVec3> = d.mesh.positions.iter().map(|p| p.as_dvec3()).collect();
+    let n = d.seeds.len();
+    for &f in changed {
+        let i = d.seeds.iter().position(|s| s.fdi.get() == f).unwrap();
+        let next = if i == 0 { 1 } else { i - 1 };
+        let u = (d.seeds[i].position - d.seeds[next.min(n - 1)].position)
+            .truncate()
+            .normalize();
+        let w = DVec2::new(-u.y, u.x);
+        let on = |l: &u16| *l == u16::from(f);
+        let count = labels.iter().filter(|l| on(l)).count() as f64;
+        let c = v
+            .iter()
+            .zip(labels)
+            .filter(|(_, l)| on(l))
+            .map(|(p, _)| p.truncate())
+            .sum::<DVec2>()
+            / count;
+        for (p, l) in v.iter_mut().zip(labels) {
+            if on(l) {
+                let r = p.truncate() - c;
+                let xy = c + u * (r.dot(u) * along) + w * (r.dot(w) * across);
+                *p = DVec3::new(xy.x, xy.y, p.z - sink);
+            }
+        }
+    }
+    (teeth(&d.seeds), v, d.mesh.tris.clone())
+}
+
+/// The position of the last tooth of each side (right, left) of `teeth`.
+fn last_teeth(teeth: &[Fdi]) -> [u8; 2] {
+    let mut out = [0; 2];
+    for f in teeth {
+        let s = usize::from(!f.is_right());
+        out[s] = out[s].max(f.position());
+    }
+    out
+}
+
+/// Every way the checks can leave an end of the arch shorter than the
+/// plugin's proposal, with a real last tooth there: a very wide last molar
+/// (1.3-1.5 times across the arch), which fails the end test, the ends
+/// found again from the crowns leave it out ([`Doubt::EndNotTooth`]); a
+/// last molar sunk until 1-2 mm of it stand over the gum, left out by the
+/// free ends ([`Doubt::EndNotCrown`]); partly erupted third molars (sunk
+/// 1.5-3.5 mm), left out as gum ([`Doubt::ThirdMolar`]). Whichever teeth
+/// are kept, an end made shorter always carries a doubt for the ends of the
+/// arch: the end left out ([`Doubt::EndNotTooth`] with no end tooth kept,
+/// or [`Doubt::EndLeftOut`]), which the app shows as "check the last tooth
+/// of each side".
+#[test]
+fn an_arch_end_shortened_by_the_checks_carries_a_doubt() {
+    let wide = |w: f64| (1.0, w);
+    // the way, arch, seed, third molars, the teeth changed, sunk (mm), scaled
+    type Case = (
+        &'static str,
+        Arch,
+        u64,
+        bool,
+        &'static [u8],
+        f64,
+        (f64, f64),
+    );
+    let cases: [Case; 7] = [
+        ("wide", Arch::Upper, 3, false, &[17], 0.0, wide(1.3)),
+        ("wide", Arch::Upper, 3, false, &[27], 0.0, wide(1.5)),
+        ("wide", Arch::Lower, 5, false, &[37], 0.0, wide(1.4)),
+        ("low", Arch::Lower, 3, false, &[37], 4.5, wide(1.0)),
+        ("low", Arch::Upper, 5, false, &[17], 4.5, wide(1.0)),
+        ("third", Arch::Lower, 3, true, &[38, 48], 2.5, wide(1.0)),
+        ("third", Arch::Upper, 7, true, &[18, 28], 1.5, wide(1.0)),
+    ];
+    let mut shortened = std::collections::BTreeMap::<&str, usize>::new();
+    for (path, arch, seed, third, changed, sink, scale) in cases {
+        let name = format!("{path}: {arch:?} seed {seed} {changed:?} sunk {sink} scaled {scale:?}");
+        let (truth, v, t) = arch_with_changed_teeth(arch, seed, third, changed, sink, scale);
+        let plugin = autoseed::propose(&v, &t, arch, &Options::default(), None).unwrap();
+        let out = checked(arch, &v, &t, &[]);
+        let (before, after) = (
+            last_teeth(&teeth(&plugin.seeds)),
+            last_teeth(&teeth(&out.seeds)),
+        );
+        let short = before.iter().zip(after).any(|(&b, a)| a < b);
+        let check = out.diagnostics.checked.as_ref();
+        let doubts = check.map(|c| c.doubts.clone()).unwrap_or_default();
+        let not_crowns = check.map(|c| c.not_crowns.clone()).unwrap_or_default();
+        let lost: Vec<Fdi> = truth
+            .iter()
+            .filter(|f| !out.seeds.iter().any(|s| s.fdi == **f))
+            .copied()
+            .collect();
+        eprintln!(
+            "{name}: plugin ends {before:?}, checked {after:?}, real teeth lost {lost:?}, \
+             doubts {doubts:?}, not crowns {not_crowns:?}"
+        );
+        if short {
+            *shortened.entry(path).or_default() += 1;
+            let told = doubts.contains(&Doubt::EndLeftOut)
+                || doubts.contains(&Doubt::EndNotTooth) && not_crowns.is_empty();
+            assert!(told, "{name}: an end made shorter with no doubt on it");
+        }
+    }
+    // every way is taken at least once
+    for path in ["wide", "low", "third"] {
+        assert!(
+            shortened.get(path).is_some_and(|&n| n > 0),
+            "{path}: {shortened:?}"
+        );
+    }
+}

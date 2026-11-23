@@ -16,8 +16,9 @@
 //!   list (`parse_missing(s.missing_teeth)`), and the menu leaf passes the
 //!   list of the case settings. What its check left in doubt on the teeth
 //!   it found (an end tooth that may be the base of a model, an end of the
-//!   arch on such a base left out, a stretch with no crown counted as a
-//!   space, a low stretch left as found) is kept in words with the seeds
+//!   arch left out, always said when the check made an end of the arch
+//!   shorter than the plugin's proposal, a stretch with no crown counted as
+//!   a space, a low stretch left as found) is kept in words with the seeds
 //!   (`numbering_doubts`, one `warnings` sentence per arch in the output):
 //!   the separation and its check put it first among the doubts of the
 //!   arch, which the export, the report and the whole run warn about.
@@ -286,22 +287,24 @@ fn run_numbering(
 }
 
 /// What the numbering left in doubt on the teeth it found, in words, from
-/// its check (`diagnostics.checked`): an end tooth kept although the scan
-/// does not fall away on both sides of it (the base of a model), an end of
-/// the arch on such a base left out, a stretch with no crown counted as a
-/// space (the teeth on its sides named), a low stretch left as found. The
-/// other reasons of the check only made the numbering find the teeth again:
-/// they are no doubt on what it found.
+/// its check (`diagnostics.checked`): an end of the arch left out (on the
+/// base of a model, or any end the check made shorter than the plugin's
+/// proposal), an end tooth kept although the scan does not fall away on
+/// both sides of it (the base of a model), a stretch with no crown counted
+/// as a space (the teeth on its sides named), a low stretch left as found.
+/// The other reasons of the check only made the numbering find the teeth
+/// again: they are no doubt on what it found.
 fn numbering_doubts(d: &autoseed::Diagnostics) -> Vec<String> {
     use crate::commands::messages::tr;
     let Some(c) = &d.checked else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    if c.doubts.contains(&Doubt::EndNotTooth) {
-        if c.not_crowns.is_empty() {
-            out.push(tr("aligners-find-doubt-end-left-out", &[]));
-        }
+    let not_tooth = c.doubts.contains(&Doubt::EndNotTooth);
+    if not_tooth && c.not_crowns.is_empty() || c.doubts.contains(&Doubt::EndLeftOut) {
+        out.push(tr("aligners-find-doubt-end-left-out", &[]));
+    }
+    if not_tooth {
         for f in &c.not_crowns {
             out.push(tr(
                 "aligners-find-doubt-end-not-tooth",
@@ -1095,5 +1098,105 @@ pub(crate) mod tests {
                 d.segmentation_doubts
             );
         }
+    }
+
+    /// An end of the arch the check made shorter than the plugin's proposal
+    /// is said as the end of the arch left out, once, beside the end teeth
+    /// kept although no crown.
+    #[test]
+    fn an_end_left_out_is_said() {
+        let (_, out) = numbering(&demo_state("lower", 3), json!({})).unwrap();
+        let mut d: autoseed::Diagnostics =
+            serde_json::from_value(out["arches"][0]["diagnostics"].clone()).unwrap();
+        let left_out = crate::commands::messages::tr("aligners-find-doubt-end-left-out", &[]);
+        let check = |doubts: Vec<Doubt>, not_crowns: Vec<u8>| autoseed::Check {
+            doubts,
+            plugin_teeth: vec![38, 37],
+            spaces: Vec::new(),
+            low: Vec::new(),
+            not_crowns,
+        };
+        for (doubts, not_crowns, said) in [
+            (vec![Doubt::EndNotCrown, Doubt::EndLeftOut], vec![], 1),
+            (vec![Doubt::ThirdMolar, Doubt::EndLeftOut], vec![], 1),
+            (vec![Doubt::EndNotTooth, Doubt::EndLeftOut], vec![], 1),
+            (vec![Doubt::EndNotTooth, Doubt::EndLeftOut], vec![47], 2),
+        ] {
+            d.checked = Some(check(doubts.clone(), not_crowns));
+            let got = numbering_doubts(&d);
+            assert_eq!(got.len(), said, "{doubts:?}: {got:?}");
+            assert_eq!(got[0], left_out, "{doubts:?}");
+        }
+    }
+
+    /// `state` with the tooth `fdi` of the demo scan of `role` sunk `mm`
+    /// into the gum (its vertices moved down, from the labels of the demo).
+    fn with_sunk_tooth(state: &CaseState, role: ScanRole, fdi: u8, mm: f32) -> CaseState {
+        let mut s = state.clone();
+        let scan = s.case.scan(role).unwrap().clone();
+        let labels_ref = data_of(state).labels[&role];
+        let labels = s.blobs.require(&labels_ref).unwrap();
+        let labels = labels.vertex_labels.clone().unwrap();
+        let old = s.blobs.require(&scan.mesh).unwrap();
+        let mut mesh = dc_mesh::TriMesh::new(old.positions.clone(), old.tris.clone());
+        for (p, l) in mesh.positions.iter_mut().zip(&labels) {
+            if *l == u16::from(fdi) {
+                p.z -= mm;
+            }
+        }
+        let r = s.blobs.insert(mesh);
+        s.case
+            .scans
+            .iter_mut()
+            .find(|x| x.role == role)
+            .unwrap()
+            .mesh = r;
+        s
+    }
+
+    /// A last molar sunk until less than 2 mm of it stand over the gum: the
+    /// check of Find the teeth leaves that end of the arch shorter than the
+    /// plugin's proposal (the free ends), and the doubt of the end left out
+    /// is in the case, in the warnings of the run, and first among the
+    /// doubts of the arch after the separation.
+    #[test]
+    fn an_end_shortened_by_find_teeth_is_a_doubt_in_the_case() {
+        let low = with_sunk_tooth(&demo_state("lower", 3), ScanRole::Lower, 37, 4.5);
+        let (found, out) = exec("aligners.teeth.find", &low, json!({})).unwrap();
+        let numbered = &out["steps"][0]["output"];
+        let arch = &numbered["arches"][0];
+        let last = |teeth: &Value| -> [u64; 2] {
+            let mut e = [0; 2];
+            for f in teeth.as_array().unwrap().iter().filter_map(Value::as_u64) {
+                let s = usize::from(f / 10 == 3);
+                e[s] = e[s].max(f % 10);
+            }
+            e
+        };
+        let plugin = last(&arch["diagnostics"]["checked"]["plugin_teeth"]);
+        let teeth = last(&arch["teeth"]);
+        assert!(
+            plugin.iter().zip(teeth).any(|(&p, t)| t < p),
+            "an end made shorter: {numbered}"
+        );
+        let left_out = crate::commands::messages::tr("aligners-find-doubt-end-left-out", &[]);
+        let said = &data_of(&found).numbering_doubts[&ScanRole::Lower];
+        assert_eq!(said.first(), Some(&left_out), "{said:?}");
+        let warnings = numbered["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].as_str().unwrap().contains(&left_out),
+            "{warnings:?}"
+        );
+        let (seg, _) = exec(
+            "aligners.preparation.segmentation.automatic",
+            &found,
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(
+            data_of(&seg).segmentation_doubts[&ScanRole::Lower].first(),
+            Some(&left_out)
+        );
     }
 }
