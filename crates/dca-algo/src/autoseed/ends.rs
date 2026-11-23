@@ -213,6 +213,17 @@ pub(crate) fn end_crowns(pr: &Profiles, hm: &HeightMap, segs: &ToothBins) -> [bo
     non_crowns(pr, hm, segs).map(|r| r == 0)
 }
 
+/// The teeth from each end of a proposal whose teeth lie on the bins `segs`
+/// of `pr` that are no crown ([`non_crowns`]), first end first.
+pub(crate) fn non_crown_teeth(pr: &Profiles, hm: &HeightMap, segs: &ToothBins) -> Vec<u8> {
+    let [first, last] = non_crowns(pr, hm, segs);
+    let n = segs.len();
+    let mut out: Vec<u8> = segs[..first.min(n)].iter().map(|s| s.0.get()).collect();
+    let tail = n.saturating_sub(last).max(first.min(n));
+    out.extend(segs[tail..].iter().map(|s| s.0.get()));
+    out
+}
+
 /// The plugin's proposal on profiles whose ends are found again from the
 /// crowns: the profiles run over every point along the arch curve, then the
 /// arch is cut at the middle of an end tooth that is no crown (with

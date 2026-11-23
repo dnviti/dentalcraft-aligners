@@ -320,6 +320,11 @@ fn run_automatic(
 
         // what the old labels gave goes (3D teeth, measures, plan, doubts)
         invalidated.extend(data.clear_label_dependents(role));
+        // what the numbering left in doubt on these teeth is the first doubt
+        // of the arch (its check puts its own after it)
+        if let Some(d) = data.numbering_doubts.get(&role).filter(|d| !d.is_empty()) {
+            data.segmentation_doubts.insert(role, d.clone());
+        }
         // the labels blob: the scan of the case with one FDI per vertex, the
         // base of a scan closed with one gingiva
         let mut labelled = (**closed).clone();

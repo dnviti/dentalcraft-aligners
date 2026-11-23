@@ -14,7 +14,13 @@
 //!   fails only when every arch fails. The run reads the teeth known to be
 //!   missing and does not store them: the plugin's proposal only reads its
 //!   list (`parse_missing(s.missing_teeth)`), and the menu leaf passes the
-//!   list of the case settings.
+//!   list of the case settings. What its check left in doubt on the teeth
+//!   it found (an end tooth that may be the base of a model, an end of the
+//!   arch on such a base left out, a stretch with no crown counted as a
+//!   space, a low stretch left as found) is kept in words with the seeds
+//!   (`numbering_doubts`, one `warnings` sentence per arch in the output):
+//!   the separation and its check put it first among the doubts of the
+//!   arch, which the export, the report and the whole run warn about.
 //!
 //! Both refuse a scan still marked provisional: its arch is a guess, and what
 //! they compute depends on it (`aligners.case.detect-arch` settles it).
@@ -23,7 +29,7 @@ use dc_case::{CaseState, Fdi, ModuleState, ScanRole};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_algo::anatomy::Arch;
-use dca_algo::autoseed::{self, AutoseedError};
+use dca_algo::autoseed::{self, AutoseedError, Doubt};
 use dca_algo::frame::{self, Reference};
 use dca_model::{AlignersState, MODULE_ID};
 use schemars::JsonSchema;
@@ -202,6 +208,7 @@ fn run_numbering(
     let mut data = aligners_data(state)?;
     let mut report = Vec::new();
     let mut failed: Vec<(Arch, CommandError)> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for arch in arches {
         let scan = state
             .case
@@ -229,12 +236,22 @@ fn run_numbering(
         // new seeds make the colours, the 3D teeth and everything planned
         // from them out of date: they go (the plugin marks them to redo)
         let dropped = data.replace_arch_seeds(arch.role(), &out.seeds);
+        // what the user must check on these teeth stays with them (in place
+        // of what was doubted before), and is said now
+        let doubts = numbering_doubts(&out.diagnostics);
+        if !doubts.is_empty() {
+            warnings.push(crate::commands::messages::segmentation_doubts_warning(
+                arch, &doubts,
+            ));
+        }
+        data.set_numbering_doubts(arch.role(), doubts.clone());
         report.push(json!({
             "arch": arch,
             "dropped": dropped,
             "teeth": out.seeds.iter().map(|s| s.fdi.get()).collect::<Vec<_>>(),
             "arch_frame": out.arch_frame,
             "diagnostics": out.diagnostics,
+            "doubts": doubts,
         }));
     }
     if report.is_empty()
@@ -262,7 +279,66 @@ fn run_numbering(
         .iter()
         .map(|(arch, e)| json!({ "arch": arch, "error": error_text(e) }))
         .collect();
-    Ok((next, json!({ "arches": report, "failed": failed })))
+    Ok((
+        next,
+        json!({ "arches": report, "failed": failed, "warnings": warnings }),
+    ))
+}
+
+/// What the numbering left in doubt on the teeth it found, in words, from
+/// its check (`diagnostics.checked`): an end tooth kept although the scan
+/// does not fall away on both sides of it (the base of a model), an end of
+/// the arch on such a base left out, a stretch with no crown counted as a
+/// space (the teeth on its sides named), a low stretch left as found. The
+/// other reasons of the check only made the numbering find the teeth again:
+/// they are no doubt on what it found.
+fn numbering_doubts(d: &autoseed::Diagnostics) -> Vec<String> {
+    use crate::commands::messages::tr;
+    let Some(c) = &d.checked else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if c.doubts.contains(&Doubt::EndNotTooth) {
+        if c.not_crowns.is_empty() {
+            out.push(tr("aligners-find-doubt-end-left-out", &[]));
+        }
+        for f in &c.not_crowns {
+            out.push(tr(
+                "aligners-find-doubt-end-not-tooth",
+                &[("fdi", &f.to_string())],
+            ));
+        }
+    }
+    if c.doubts.contains(&Doubt::EmptyRidge) {
+        for &[a, b] in &c.spaces {
+            out.push(tr(
+                "aligners-find-doubt-empty-ridge",
+                &[("place", &place(a, b))],
+            ));
+        }
+    }
+    if c.doubts.contains(&Doubt::LowCrown) {
+        for &[a, b] in &c.low {
+            out.push(tr(
+                "aligners-find-doubt-low-crown",
+                &[("place", &place(a, b))],
+            ));
+        }
+    }
+    out
+}
+
+/// Where a stretch of the arch lies, by the teeth on its sides (0 where the
+/// arch ends).
+fn place(a: u8, b: u8) -> String {
+    use crate::commands::messages::tr;
+    let (sa, sb) = (a.to_string(), b.to_string());
+    match (a, b) {
+        (0, 0) => tr("aligners-find-doubt-on-the-arch", &[]),
+        (0, _) => tr("aligners-find-doubt-before", &[("b", &sb)]),
+        (_, 0) => tr("aligners-find-doubt-after", &[("a", &sa)]),
+        _ => tr("aligners-find-doubt-between", &[("a", &sa), ("b", &sb)]),
+    }
 }
 
 /// The sentence of an error, without the prefix of its kind.
@@ -781,5 +857,243 @@ pub(crate) mod tests {
         let (found, _) = exec("aligners.teeth.find", &set, params).unwrap();
         assert!(seeds_of(&found).iter().all(|s| s.fdi.get() != 45));
         assert!(seeds_of(&found).len() >= 10);
+    }
+
+    /// The data of the module in `state`.
+    fn data_of(state: &CaseState) -> AlignersState {
+        state
+            .module_data::<AlignersState>(MODULE_ID)
+            .cloned()
+            .unwrap()
+    }
+
+    /// Every doubt of the numbering on the teeth it found is said in words,
+    /// with the teeth it is about (both sides of a stretch, or the side
+    /// where the arch ends); the other reasons of its check are not doubts
+    /// on its result.
+    #[test]
+    fn the_doubts_of_the_numbering_are_said_in_words() {
+        let (_, out) = numbering(&demo_state("lower", 3), json!({})).unwrap();
+        let mut d: autoseed::Diagnostics =
+            serde_json::from_value(out["arches"][0]["diagnostics"].clone()).unwrap();
+        let check = |doubts: Vec<Doubt>, not_crowns: Vec<u8>| autoseed::Check {
+            doubts,
+            plugin_teeth: vec![38, 37],
+            spaces: vec![[31, 42], [0, 35]],
+            low: vec![[44, 0]],
+            not_crowns,
+        };
+        d.checked = Some(check(
+            vec![Doubt::EndNotTooth, Doubt::EmptyRidge, Doubt::LowCrown],
+            vec![47],
+        ));
+        let said = numbering_doubts(&d);
+        assert_eq!(said.len(), 4, "{said:?}");
+        assert!(said[0].contains("47"), "{}", said[0]);
+        assert!(
+            said[1].contains("31") && said[1].contains("42"),
+            "{}",
+            said[1]
+        );
+        assert!(
+            said[2].contains("35") && !said[2].contains(" 0"),
+            "{}",
+            said[2]
+        );
+        assert!(
+            said[3].contains("44") && !said[3].contains(" 0"),
+            "{}",
+            said[3]
+        );
+        assert!(said.iter().all(|s| !s.contains("aligners-")), "{said:?}");
+        // the base of a model left out is said without a tooth
+        d.checked = Some(check(vec![Doubt::EndNotTooth], Vec::new()));
+        let said = numbering_doubts(&d);
+        assert_eq!(said.len(), 1);
+        assert!(!said[0].chars().any(|c| c.is_ascii_digit()), "{}", said[0]);
+        // a proposal made again for other reasons leaves no doubt
+        d.checked = Some(check(
+            vec![Doubt::ThirdMolar, Doubt::ScaleLimit],
+            Vec::new(),
+        ));
+        assert!(numbering_doubts(&d).is_empty());
+        d.checked = None;
+        assert!(numbering_doubts(&d).is_empty());
+    }
+
+    /// A box of the base of a printed model (a heel) on the scan of `role`
+    /// behind each last molar of its seeds, its rough top at the height of
+    /// the seed of the molar: 10 mm long, 24 mm wide, half a millimetre
+    /// behind the distal surface of the molar (`dca-algo`
+    /// `tests/autoseed_checked.rs`, `arch_with_heels`).
+    fn with_heels(state: &CaseState, role: ScanRole) -> CaseState {
+        use glam::{DVec2, DVec3};
+        const STEP: f64 = 0.5;
+        let mut s = state.clone();
+        let scan = s.case.scan(role).unwrap().clone();
+        let old = s.blobs.require(&scan.mesh).unwrap();
+        let mut mesh = dc_mesh::TriMesh::new(old.positions.clone(), old.tris.clone());
+        let seeds: Vec<dca_model::Seed> = seeds_of(state)
+            .into_iter()
+            .filter(|x| Arch::of(x.fdi).role() == role)
+            .collect();
+        let order = dca_algo::anatomy::arch_sequence(
+            &seeds.iter().map(|x| x.fdi).collect::<Vec<_>>(),
+            Arch::of(seeds[0].fdi),
+        );
+        let pos = |f: Fdi| seeds.iter().find(|x| x.fdi == f).unwrap().position;
+        let n = order.len();
+        for (last, next) in [(0, 1), (n - 1, n - 2)] {
+            let (p, q) = (pos(order[last]), pos(order[next]));
+            let u = (p - q).truncate().normalize();
+            let w = DVec2::new(-u.y, u.x);
+            let half = 0.5 * dca_algo::anatomy::typical_diameters(order[last]).0;
+            let c = p + (u * (half + 0.5 + 5.0)).extend(0.0);
+            let (a, b, depth) = (5.0, 12.0, 12.0);
+            let (nu, nw) = ((2.0 * a / STEP) as u32 + 1, (2.0 * b / STEP) as u32 + 1);
+            let base = mesh.positions.len() as u32;
+            for k in 0..2 {
+                for i in 0..nu {
+                    for j in 0..nw {
+                        let border = i == 0 || j == 0 || i == nu - 1 || j == nw - 1;
+                        let z = match k {
+                            0 if border => 0.0,
+                            0 => 0.6 * (f64::from(i) * 1.9).sin() * (f64::from(j) * 2.3).cos(),
+                            _ => -depth,
+                        };
+                        let xy = u * (-a + f64::from(i) * STEP) + w * (-b + f64::from(j) * STEP);
+                        let v: DVec3 = c + DVec3::new(xy.x, xy.y, z);
+                        mesh.positions.push(v.as_vec3());
+                    }
+                }
+            }
+            let id = |k: u32, i: u32, j: u32| base + k * nu * nw + i * nw + j;
+            for i in 0..nu - 1 {
+                for j in 0..nw - 1 {
+                    let [p, q, r, s] = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)];
+                    mesh.tris
+                        .push([id(0, p.0, p.1), id(0, q.0, q.1), id(0, r.0, r.1)]);
+                    mesh.tris
+                        .push([id(0, p.0, p.1), id(0, r.0, r.1), id(0, s.0, s.1)]);
+                    mesh.tris
+                        .push([id(1, p.0, p.1), id(1, r.0, r.1), id(1, q.0, q.1)]);
+                    mesh.tris
+                        .push([id(1, p.0, p.1), id(1, s.0, s.1), id(1, r.0, r.1)]);
+                }
+            }
+            let mut ring: Vec<(u32, u32)> = (0..nu - 1).map(|i| (i, 0)).collect();
+            ring.extend((0..nw - 1).map(|j| (nu - 1, j)));
+            ring.extend((1..nu).rev().map(|i| (i, nw - 1)));
+            ring.extend((1..nw).rev().map(|j| (0, j)));
+            for k in 0..ring.len() {
+                let ((i0, j0), (i1, j1)) = (ring[k], ring[(k + 1) % ring.len()]);
+                let (p0, p1) = (id(0, i0, j0), id(0, i1, j1));
+                let (q0, q1) = (id(1, i0, j0), id(1, i1, j1));
+                mesh.tris.push([p0, q0, q1]);
+                mesh.tris.push([p0, q1, p1]);
+            }
+        }
+        let r = s.blobs.insert(mesh);
+        s.case
+            .scans
+            .iter_mut()
+            .find(|x| x.role == role)
+            .unwrap()
+            .mesh = r;
+        s
+    }
+
+    /// What the numbering leaves in doubt (here the base of a printed model
+    /// behind the last molars, left out) stays with the seeds: in its output
+    /// (per arch, and one warning) and in the case, first among the doubts
+    /// of the arch after the separation and after its check. It goes when
+    /// the arch is numbered again without the cause, and when its seeds or
+    /// their numbers are changed by hand (a tooth renumbered, or marked
+    /// missing), with its copies.
+    #[test]
+    fn the_doubts_of_the_numbering_stay_with_the_seeds_until_they_change() {
+        let plain = demo_state("upper", 3);
+        let heels = with_heels(&plain, ScanRole::Upper);
+        let (found, out) = exec("aligners.teeth.find", &heels, json!({})).unwrap();
+        let numbered = &out["steps"][0]["output"];
+        let said: Vec<String> =
+            serde_json::from_value(numbered["arches"][0]["doubts"].clone()).unwrap();
+        assert!(!said.is_empty(), "{numbered}");
+        assert_eq!(numbered["warnings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(data_of(&found).numbering_doubts[&ScanRole::Upper], said);
+        // first among the doubts of the arch after the separation and its check
+        let (seg, _) = exec(
+            "aligners.preparation.segmentation.automatic",
+            &found,
+            json!({}),
+        )
+        .unwrap();
+        let first = |s: &CaseState| -> Vec<String> {
+            data_of(s).segmentation_doubts[&ScanRole::Upper]
+                .iter()
+                .take(said.len())
+                .cloned()
+                .collect()
+        };
+        assert_eq!(first(&seg), said);
+        let (checked, _) = exec(
+            "aligners.preparation.segmentation.check",
+            &seg,
+            json!({ "arch": "upper", "correct": true }),
+        )
+        .unwrap();
+        assert_eq!(first(&checked), said);
+        assert_eq!(data_of(&checked).numbering_doubts[&ScanRole::Upper], said);
+        // numbered again on the scan without the heels: nothing left
+        let mut again = checked.clone();
+        let plain_mesh = plain.case.scan(ScanRole::Upper).unwrap().mesh;
+        let mesh = (**plain.blobs.require(&plain_mesh).unwrap()).clone();
+        let r = again.blobs.insert(mesh);
+        again
+            .case
+            .scans
+            .iter_mut()
+            .find(|x| x.role == ScanRole::Upper)
+            .unwrap()
+            .mesh = r;
+        let (renumbered, out) = numbering(&again, json!({ "arch": "upper" })).unwrap();
+        assert_eq!(out["warnings"], json!([]));
+        let d = data_of(&renumbered);
+        assert!(d.numbering_doubts.is_empty());
+        assert!(
+            d.segmentation_doubts
+                .get(&ScanRole::Upper)
+                .is_none_or(|x| x.iter().all(|s| !said.contains(s))),
+            "{:?}",
+            d.segmentation_doubts
+        );
+        // a tooth renumbered or marked missing by hand: they go, with their copies
+        let last = seeds_of(&checked)
+            .iter()
+            .map(|x| x.fdi.get())
+            .filter(|&f| f / 10 == 1)
+            .max()
+            .unwrap();
+        for (id, params) in [
+            (
+                "aligners.preparation.numbering.renumber",
+                json!({ "src": last, "dst": last + 1 }),
+            ),
+            (
+                "aligners.preparation.numbering.mark-missing",
+                json!({ "fdi": last, "missing": true }),
+            ),
+        ] {
+            let (edited, _) = exec(id, &checked, params).unwrap();
+            let d = data_of(&edited);
+            assert!(d.numbering_doubts.is_empty(), "{id}");
+            assert!(
+                d.segmentation_doubts
+                    .get(&ScanRole::Upper)
+                    .is_none_or(|x| x.iter().all(|s| !said.contains(s))),
+                "{id}: {:?}",
+                d.segmentation_doubts
+            );
+        }
     }
 }

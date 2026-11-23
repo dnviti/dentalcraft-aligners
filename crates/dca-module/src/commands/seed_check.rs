@@ -164,14 +164,21 @@ fn segment(
     Ok(in_cleared_order(ids))
 }
 
-/// Keeps the problems and the notes of the check of `arch` in the case (none:
-/// the arch has no doubts).
+/// Keeps the problems and the notes of the check of `arch` in the case,
+/// after what the numbering left in doubt on its teeth (none of either: the
+/// arch has no doubts).
 fn keep_doubts(state: &mut CaseState, arch: Arch, doubts: Vec<String>) -> Result<(), CommandError> {
     let mut data = aligners_data(state)?;
-    if doubts.is_empty() {
+    let mut all = data
+        .numbering_doubts
+        .get(&arch.role())
+        .cloned()
+        .unwrap_or_default();
+    all.extend(doubts);
+    if all.is_empty() {
         data.segmentation_doubts.remove(&arch.role());
     } else {
-        data.segmentation_doubts.insert(arch.role(), doubts);
+        data.segmentation_doubts.insert(arch.role(), all);
     }
     state.set_module(MODULE_ID, ModuleState::new(data));
     Ok(())

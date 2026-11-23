@@ -1091,6 +1091,12 @@ pub struct Check {
     /// ([`Doubt::LowCrown`]), 0 where the arch ends.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub low: Vec<[u8; 2]>,
+    /// The end teeth kept although the scan does not fall away on both
+    /// sides of them ([`Doubt::EndNotTooth`]): the ends of the arch found
+    /// again from the crowns did not replace them. Empty when what lay on
+    /// the base of a model behind the last molar was left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_crowns: Vec<u8>,
 }
 
 /// The checked proposal leaves out what lies beyond the end teeth when it
@@ -1298,27 +1304,31 @@ pub fn propose_checked(
     };
     let (c, c_segs, c_doubts) = check(arch, opts, &data.frame, &pr, p, segs)?;
     if ends::end_crowns(&pr, &data.heights, &c_segs) == [true; 2] {
-        return Ok(mark(c, c_doubts, plugin_teeth, &stretches));
+        return Ok(mark(c, c_doubts, plugin_teeth, &stretches, Vec::new()));
     }
     // an end tooth is no crown (the base of a model as high as the crowns):
     // the ends of the arch found again from the crowns, checked the same
-    // way; kept only when no worse, otherwise the doubt is told
+    // way; kept only when no worse, otherwise the doubt is told with the
+    // end teeth that stay
     let refit = ends::refit(arch, opts, &data.frame, &data.raw, &data.heights).and_then(
         |(r_pr, r, r_segs)| {
             check(arch, opts, &data.frame, &r_pr, r, r_segs).map(|(r, s, d)| (r_pr, r, s, d))
         },
     );
     let mut doubts = vec![Doubt::EndNotTooth];
-    let (x, more) = match refit {
+    let (x, more, kept) = match refit {
         Ok((r_pr, r, r_segs, r_doubts))
             if ends::no_worse(&pr, &c_segs, &r_pr, &r_segs, &data.heights) =>
         {
-            (r, r_doubts)
+            (r, r_doubts, Vec::new())
         }
-        _ => (c, c_doubts),
+        _ => {
+            let kept = ends::non_crown_teeth(&pr, &data.heights, &c_segs);
+            (c, c_doubts, kept)
+        }
     };
     doubts.extend(more.into_iter().filter(|d| *d != Doubt::EndNotTooth));
-    Ok(mark(x, doubts, plugin_teeth, &stretches))
+    Ok(mark(x, doubts, plugin_teeth, &stretches, kept))
 }
 
 /// The low stretches of the arch ([`ridges`]) in arc length along `curve`:
@@ -1349,13 +1359,15 @@ fn around(p: &Proposal, curve: &ArchCurve, (s0, s1): (f64, f64)) -> [u8; 2] {
 
 /// `p` with its `doubts` and `plugin_teeth`, the teeth of the plugin's
 /// proposal, in its diagnostics, with the doubts of the low `stretches` of
-/// the arch and the teeth beside them; unmarked without doubts (the
-/// plugin's proposal, [`propose_checked`]).
+/// the arch and the teeth beside them and the end teeth kept although no
+/// crown (`not_crowns`); unmarked without doubts (the plugin's proposal,
+/// [`propose_checked`]).
 fn mark(
     mut p: Proposal,
     mut doubts: Vec<Doubt>,
     plugin_teeth: Vec<u8>,
     stretches: &Stretches<'_>,
+    not_crowns: Vec<u8>,
 ) -> Proposal {
     if !stretches.empty.is_empty() {
         doubts.push(Doubt::EmptyRidge);
@@ -1373,6 +1385,7 @@ fn mark(
             plugin_teeth,
             spaces,
             low,
+            not_crowns,
         });
     }
     p
