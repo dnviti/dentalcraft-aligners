@@ -164,12 +164,14 @@ fn arch_name(arch: Arch) -> &'static str {
     if arch.is_upper() { "upper" } else { "lower" }
 }
 
+/// A note of the view: where it is, its key and its words in the language
+/// of the app (`detail`, which the app shows as it is).
 fn note_json(n: &Note) -> Value {
     json!({
         "arch": n.arch.map(arch_name),
         "stage": n.stage,
         "key": n.key,
-        "detail": n.detail,
+        "detail": dca_algo::export::text::note_text(n, super::wrappers::app_lang()),
     })
 }
 

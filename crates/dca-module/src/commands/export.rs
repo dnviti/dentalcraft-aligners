@@ -49,7 +49,7 @@ use dca_algo::anatomy::{self, Arch};
 use dca_algo::export::manifest;
 use dca_algo::export::package::{self, CaseInfo, FullParams};
 use dca_algo::export::printcheck::{self, CheckOptions};
-use dca_algo::export::provider::{MeshProvider, Note, Quality, ScanProvider};
+use dca_algo::export::provider::{MeshProvider, Note, NoteArg, Quality, ScanProvider};
 use dca_algo::export::report::Renders;
 use dca_algo::export::{self, ArchSeries, GumDeform};
 use dca_algo::schedule;
@@ -212,7 +212,7 @@ fn mesh_provider<'a>(
             aligner: false,
             passive: false,
             key: "rpt-note-scans",
-            detail: why,
+            args: NoteArg::text(why),
         };
         (Box::new(ScanProvider::new(input)), "scans", vec![note])
     };
@@ -243,10 +243,10 @@ fn mesh_provider<'a>(
                 aligner: false,
                 passive: false,
                 key: "rpt-note-shells",
-                detail: format!(
-                    "resolution {voxel} mm, tolerance {} mm",
-                    choice.quality.tolerance_mm()
-                ),
+                args: vec![
+                    NoteArg::mm(voxel),
+                    NoteArg::mm(choice.quality.tolerance_mm()),
+                ],
             };
             Ok((Box::new(p), "shells", vec![note]))
         }
@@ -363,12 +363,14 @@ fn doubt_notes(data: &AlignersState) -> Vec<Note> {
                 aligner: false,
                 passive: false,
                 key: "rpt-note-doubts",
-                detail: doubts
-                    .iter()
-                    .take(6)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("; "),
+                args: NoteArg::text(
+                    doubts
+                        .iter()
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
             })
         })
         .collect()
@@ -682,6 +684,8 @@ fn run_print_check(
         cancel: ctx.cancel_token().clone(),
     };
     let (provider, meshes, notes) = mesh_provider(state, &data, &input, &choice)?;
+    // the sentences are in the language of the app
+    let lang = super::wrappers::app_lang();
     let options = CheckOptions {
         self_intersections: params.self_intersections,
         build_plate_mm: params.build_plate_mm,
@@ -729,7 +733,7 @@ fn run_print_check(
                     "stage": k,
                     "kind": if aligner { "aligner" } else { "model" },
                     "ok": check.ok,
-                    "problems": check.problem_texts(dca_algo::schedule::Lang::En),
+                    "problems": check.problem_texts(lang),
                     "check": check,
                 }));
             }
@@ -739,7 +743,7 @@ fn run_print_check(
     let notes: Vec<String> = notes
         .iter()
         .chain(&provider.notes())
-        .map(|n| dca_algo::export::text::note(n, dca_algo::schedule::Lang::En))
+        .map(|n| dca_algo::export::text::note(n, lang))
         .collect();
     let out = serde_json::json!({
         "checked": results.len(),

@@ -37,13 +37,13 @@ static TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "chk-genus",
-        "{0} holes through the wall",
-        "{0} fori passanti nella parete",
+        "{0} hole through the wall|{0} holes through the wall",
+        "{0} foro passante nella parete|{0} fori passanti nella parete",
     ),
     (
         "chk-genus-at",
-        "{0} holes through the wall, near {1} (mm, coordinates of the file)",
-        "{0} fori passanti nella parete, vicino a {1} (mm, coordinate del file)",
+        "{0} hole through the wall, near {1} (mm, coordinates of the file)|{0} holes through the wall, near {1} (mm, coordinates of the file)",
+        "{0} foro passante nella parete, vicino a {1} (mm, coordinate del file)|{0} fori passanti nella parete, vicino a {1} (mm, coordinate del file)",
     ),
     (
         "chk-volume",
@@ -541,8 +541,8 @@ static TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "rpt-note-shells",
-        "models and aligners from the shell stage, {0}",
-        "modelli e allineatori dalla fase del guscio, {0}",
+        "models and aligners from the shell stage, resolution {0}, tolerance {1}",
+        "modelli e allineatori dalla fase del guscio, risoluzione {0}, tolleranza {1}",
     ),
     ("rpt-note-stamp", "no stamp: {0}", "senza scritta: {0}"),
     ("rpt-note-ramps", "ramps: {0}", "rampe: {0}"),
@@ -551,7 +551,26 @@ static TABLE: &[(&str, &str, &str)] = &[
         "occlusal thickness not shaped: {0}",
         "spessore occlusale non modellato: {0}",
     ),
-    ("rpt-note-trim", "trim: {0}", "bordo: {0}"),
+    (
+        "rpt-note-trim-mode",
+        "trim: other border used instead: {0}",
+        "bordo: usato al suo posto un altro bordo: {0}",
+    ),
+    (
+        "rpt-note-trim-relief",
+        "trim: border {0} above the papillae instead of {1} (a hole through the wall otherwise)",
+        "bordo: {0} sopra le papille invece di {1} (altrimenti restava un foro passante nella parete)",
+    ),
+    (
+        "rpt-note-trim-no-relief",
+        "trim: border not raised above the papillae (with {0} a hole through the wall was left)",
+        "bordo: non rialzato sopra le papille (con {0} restava un foro passante nella parete)",
+    ),
+    (
+        "rpt-note-trim-holes",
+        "trim: {0} hole through the wall left|trim: {0} holes through the wall left",
+        "bordo: resta {0} foro passante nella parete|bordo: restano {0} fori passanti nella parete",
+    ),
     (
         "rpt-note-bars",
         "joined over the space between the teeth by a bar: {0}",
@@ -594,9 +613,58 @@ pub fn fmt(lang: Lang, key: &str, args: &[String]) -> String {
     s
 }
 
+/// [`fmt`] for a text that counts: an entry `one|other` (in both languages
+/// the singular is 1, every other count takes the plural, 0 included) gives
+/// the half that suits `n`.
+pub fn fmt_n(lang: Lang, key: &str, n: u64, args: &[String]) -> String {
+    let text = tr(lang, key);
+    let (one, other) = text.split_once('|').unwrap_or((text, text));
+    let mut s = if n == 1 { one } else { other }.to_owned();
+    for (i, a) in args.iter().enumerate() {
+        s = s.replace(&format!("{{{i}}}"), a);
+    }
+    s
+}
+
+/// A length of `um` micrometres in millimetres, with the decimal mark of
+/// the language and no useless zeros (`0.5 mm`, `0,02 mm`).
+fn micrometres(lang: Lang, um: u32) -> String {
+    let s = format!("{:.3}", f64::from(um) / 1000.0);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    let s = match lang {
+        Lang::En => s.to_owned(),
+        Lang::It => s.replace('.', ","),
+    };
+    format!("{s} mm")
+}
+
+/// The words of a note, without the name of its file.
+pub fn note_text(n: &super::provider::Note, lang: Lang) -> String {
+    use super::provider::NoteArg;
+    let args: Vec<String> = n
+        .args
+        .iter()
+        .map(|a| match a {
+            NoteArg::Text(s) => s.clone(),
+            NoteArg::Count(c) => c.to_string(),
+            NoteArg::Micrometres(um) => micrometres(lang, *um),
+            NoteArg::Word(k) => tr(lang, k).to_owned(),
+        })
+        .collect();
+    // the first count picks the singular or the plural
+    let count = n.args.iter().find_map(|a| match a {
+        NoteArg::Count(c) => Some(u64::from(*c)),
+        _ => None,
+    });
+    match count {
+        Some(c) => fmt_n(lang, n.key, c, &args),
+        None => fmt(lang, n.key, &args),
+    }
+}
+
 /// The text of a note of the export, after the name of its file.
 pub fn note(n: &super::provider::Note, lang: Lang) -> String {
-    let text = fmt(lang, n.key, std::slice::from_ref(&n.detail));
+    let text = note_text(n, lang);
     match (n.arch, n.stage) {
         (Some(arch), Some(k)) => {
             let name = if n.aligner {
@@ -613,6 +681,7 @@ pub fn note(n: &super::provider::Note, lang: Lang) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::provider::NoteArg;
     use super::*;
     use std::collections::BTreeSet;
 
@@ -631,6 +700,16 @@ mod tests {
             assert!(keys.insert(*k), "duplicate key {k}");
             assert!(!en.is_empty() && !it.is_empty(), "{k}");
             assert_eq!(placeholders(en), placeholders(it), "{k}");
+            // a text that counts has its singular and its plural, in both
+            let (n_en, n_it) = (en.matches('|').count(), it.matches('|').count());
+            assert_eq!(n_en, n_it, "{k}");
+            assert!(n_en <= 1, "{k}");
+            if n_en == 1 {
+                for text in [en, it] {
+                    let (one, other) = text.split_once('|').unwrap();
+                    assert_eq!(placeholders(one), placeholders(other), "{k}");
+                }
+            }
             assert!(
                 k.starts_with("chk-") || k.starts_with("rpt-") || k.starts_with("pat-"),
                 "{k}"
@@ -659,7 +738,7 @@ mod tests {
             aligner,
             passive,
             key: "rpt-note-stamp",
-            detail: "no room".to_owned(),
+            args: NoteArg::text("no room"),
         };
         assert_eq!(
             super::note(&note(7, true, true), Lang::En),
@@ -673,6 +752,123 @@ mod tests {
             super::note(&note(0, false, false), Lang::It),
             "INF_modello_00_iniziale.stl: senza scritta: no room"
         );
+    }
+
+    fn arg_note(key: &'static str, args: Vec<NoteArg>) -> super::super::provider::Note {
+        super::super::provider::Note {
+            arch: None,
+            stage: None,
+            aligner: true,
+            passive: false,
+            key,
+            args,
+        }
+    }
+
+    /// The notes of the trim say their numbers in the language of the
+    /// report, with its decimal mark and its plural.
+    #[test]
+    fn the_trim_notes_carry_their_numbers_in_both_languages() {
+        let relief = arg_note(
+            "rpt-note-trim-relief",
+            vec![NoteArg::mm(0.5), NoteArg::mm(1.0)],
+        );
+        assert_eq!(
+            super::note(&relief, Lang::En),
+            "trim: border 0.5 mm above the papillae instead of 1 mm (a hole through the wall otherwise)"
+        );
+        assert_eq!(
+            super::note(&relief, Lang::It),
+            "bordo: 0,5 mm sopra le papille invece di 1 mm (altrimenti restava un foro passante nella parete)"
+        );
+        let none = arg_note("rpt-note-trim-no-relief", vec![NoteArg::mm(1.25)]);
+        assert_eq!(
+            super::note(&none, Lang::En),
+            "trim: border not raised above the papillae (with 1.25 mm a hole through the wall was left)"
+        );
+        assert_eq!(
+            super::note(&none, Lang::It),
+            "bordo: non rialzato sopra le papille (con 1,25 mm restava un foro passante nella parete)"
+        );
+        let mode = arg_note("rpt-note-trim-mode", vec![NoteArg::Word("rpt-trim-smooth")]);
+        assert_eq!(
+            super::note(&mode, Lang::En),
+            "trim: other border used instead: smooth on the gingival margin"
+        );
+        assert_eq!(
+            super::note(&mode, Lang::It),
+            "bordo: usato al suo posto un altro bordo: liscio sul margine gengivale"
+        );
+        for (n, en, it) in [
+            (
+                1,
+                "trim: 1 hole through the wall left",
+                "bordo: resta 1 foro passante nella parete",
+            ),
+            (
+                3,
+                "trim: 3 holes through the wall left",
+                "bordo: restano 3 fori passanti nella parete",
+            ),
+        ] {
+            let holes = arg_note("rpt-note-trim-holes", vec![NoteArg::Count(n)]);
+            assert_eq!(super::note(&holes, Lang::En), en);
+            assert_eq!(super::note(&holes, Lang::It), it);
+        }
+        let shells = arg_note("rpt-note-shells", vec![NoteArg::mm(0.1), NoteArg::mm(0.02)]);
+        assert_eq!(
+            super::note(&shells, Lang::En),
+            "models and aligners from the shell stage, resolution 0.1 mm, tolerance 0.02 mm"
+        );
+        assert_eq!(
+            super::note(&shells, Lang::It),
+            "modelli e allineatori dalla fase del guscio, risoluzione 0,1 mm, tolleranza 0,02 mm"
+        );
+    }
+
+    /// No English sentence is left in the Italian of the notes and of the
+    /// print check: none of these words belongs to the Italian entries.
+    #[test]
+    fn the_italian_notes_hold_no_english_words() {
+        const ENGLISH: &[&str] = &[
+            "the",
+            "of",
+            "hole",
+            "holes",
+            "wall",
+            "border",
+            "instead",
+            "otherwise",
+            "left",
+            "through",
+            "with",
+            "above",
+            "used",
+            "trim",
+            "raised",
+            "near",
+            "coordinates",
+            "resolution",
+            "tolerance",
+            "models",
+            "aligners",
+            "stage",
+            "not",
+            "thin",
+            "minimum",
+        ];
+        for (k, _, it) in TABLE {
+            if !(k.starts_with("rpt-note-") || k.starts_with("rpt-trim-") || k.starts_with("chk-"))
+            {
+                continue;
+            }
+            for w in it.split(|c: char| !c.is_alphabetic()) {
+                assert!(
+                    !ENGLISH.contains(&w.to_lowercase().as_str()),
+                    "{k}: English word {w:?} in {it}"
+                );
+            }
+        }
     }
 
     /// Every key used in the sources of this module is in the table.

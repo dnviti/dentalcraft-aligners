@@ -111,7 +111,7 @@ fn run_steps(
 }
 
 /// The language of the app, for what the files say.
-fn app_lang() -> Lang {
+pub(crate) fn app_lang() -> Lang {
     match dc_i18n::current() {
         UiLang::En => Lang::En,
         UiLang::It => Lang::It,

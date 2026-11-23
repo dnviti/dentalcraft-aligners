@@ -49,7 +49,7 @@ use dc_mesh::TriMesh;
 use dca_algo::aligner_bite::occlusal;
 use dca_algo::anatomy::Arch;
 use dca_algo::export::printcheck;
-use dca_algo::export::provider::{MeshProvider, Note};
+use dca_algo::export::provider::{MeshProvider, Note, NoteArg};
 use dca_algo::export::{self, ExportError};
 use dca_algo::schedule::{self, Date};
 use dca_algo::shell::{self, Design, Outputs};
@@ -123,6 +123,16 @@ struct PassiveBase {
     sites: Vec<ToothSite>,
 }
 
+/// The word of the report for the border of a trim mode.
+fn trim_mode_word(mode: trim::Mode) -> &'static str {
+    match mode {
+        trim::Mode::Equator => "rpt-trim-equator",
+        trim::Mode::Straight => "rpt-trim-straight",
+        trim::Mode::Scalloped => "rpt-trim-scalloped",
+        trim::Mode::Smooth => "rpt-trim-smooth",
+    }
+}
+
 fn rigid(m: &DMat4, mesh: &TriMesh) -> TriMesh {
     TriMesh::new(
         mesh.positions
@@ -183,7 +193,7 @@ impl<'a> ShellProvider<'a> {
                 aligner: true,
                 passive: false,
                 key: "rpt-note-bite",
-                detail: why.to_owned(),
+                args: NoteArg::text(why),
             });
         }
         let t = &data.trim;
@@ -233,7 +243,7 @@ impl<'a> ShellProvider<'a> {
 
     /// A note about the file of model or aligner `k`; an aligner after the
     /// last active stage of its arch is a passive one (its own file).
-    fn note(&self, arch: Arch, k: u32, aligner: bool, key: &'static str, detail: String) {
+    fn note(&self, arch: Arch, k: u32, aligner: bool, key: &'static str, args: Vec<NoteArg>) {
         let passive = aligner && k > self.last(arch);
         self.notes
             .lock()
@@ -244,7 +254,7 @@ impl<'a> ShellProvider<'a> {
                 aligner,
                 passive,
                 key,
-                detail,
+                args,
             });
     }
 
@@ -367,7 +377,7 @@ impl<'a> ShellProvider<'a> {
                 return Ok((r, Some(Defects::of(&c))));
             }
         }
-        self.note(arch, k, aligner, "rpt-note-reduce", format!("{tol} mm"));
+        self.note(arch, k, aligner, "rpt-note-reduce", vec![NoteArg::mm(tol)]);
         Ok((full, Some(Defects::of(&base))))
     }
 
@@ -395,7 +405,13 @@ impl<'a> ShellProvider<'a> {
         ) {
             Ok(p) => p,
             Err(e) => {
-                self.note(arch, k, aligner, "rpt-note-stamp", e.to_string());
+                self.note(
+                    arch,
+                    k,
+                    aligner,
+                    "rpt-note-stamp",
+                    NoteArg::text(e.to_string()),
+                );
                 return None;
             }
         };
@@ -437,7 +453,7 @@ impl<'a> ShellProvider<'a> {
             Ok(Outcome::Skipped { reason }) => reason,
             Err(e) => e.to_string(),
         };
-        self.note(arch, k, aligner, "rpt-note-stamp", why);
+        self.note(arch, k, aligner, "rpt-note-stamp", NoteArg::text(why));
         None
     }
 }
@@ -669,7 +685,7 @@ impl MeshProvider for ShellProvider<'_> {
                 let notes = dca_algo::ramps::apply_to_grid(&mut field, moved, by_fdi)
                     .map_err(|e| err("ramps", &e))?;
                 for n in notes {
-                    self.note(arch, k, true, "rpt-note-ramps", n);
+                    self.note(arch, k, true, "rpt-note-ramps", NoteArg::text(n));
                 }
             }
             Ok((closed, field))
@@ -738,30 +754,43 @@ impl MeshProvider for ShellProvider<'_> {
                 arch,
                 k,
                 true,
-                "rpt-note-trim",
-                format!("{:?} border used instead", done.mode).to_lowercase(),
+                "rpt-note-trim-mode",
+                vec![NoteArg::Word(trim_mode_word(done.mode))],
             );
         }
         if done.mode == trim::Mode::Smooth && done.papilla_relief_mm < self.trim.papilla_relief_mm {
-            self.note(
-                arch,
-                k,
-                true,
-                "rpt-note-trim",
-                format!(
-                    "border {} mm above the papillae instead of {} mm (a hole through the wall \
-                     otherwise)",
-                    done.papilla_relief_mm, self.trim.papilla_relief_mm
-                ),
-            );
+            // the relief was halved, or dropped: a hole through the wall
+            // stayed otherwise
+            if done.papilla_relief_mm > 0.0 {
+                self.note(
+                    arch,
+                    k,
+                    true,
+                    "rpt-note-trim-relief",
+                    vec![
+                        NoteArg::mm(done.papilla_relief_mm),
+                        NoteArg::mm(self.trim.papilla_relief_mm),
+                    ],
+                );
+            } else {
+                self.note(
+                    arch,
+                    k,
+                    true,
+                    "rpt-note-trim-no-relief",
+                    vec![NoteArg::mm(self.trim.papilla_relief_mm)],
+                );
+            }
         }
         if done.genus > 0 {
             self.note(
                 arch,
                 k,
                 true,
-                "rpt-note-trim",
-                format!("{} holes through the wall left", done.genus),
+                "rpt-note-trim-holes",
+                vec![NoteArg::Count(
+                    u32::try_from(done.genus).unwrap_or(u32::MAX),
+                )],
             );
         }
         if !done.bars.is_empty() {
@@ -770,7 +799,13 @@ impl MeshProvider for ShellProvider<'_> {
                 .iter()
                 .map(|b| format!("{}-{}", b.teeth.0, b.teeth.1))
                 .collect();
-            self.note(arch, k, true, "rpt-note-bars", pairs.join(", "));
+            self.note(
+                arch,
+                k,
+                true,
+                "rpt-note-bars",
+                NoteArg::text(pairs.join(", ")),
+            );
         }
         if !done.weak.is_empty() {
             let pairs: Vec<String> = done
@@ -778,7 +813,13 @@ impl MeshProvider for ShellProvider<'_> {
                 .iter()
                 .map(|w| format!("{}-{} ({} mm²)", w.a, w.b, w.mm2))
                 .collect();
-            self.note(arch, k, true, "rpt-note-weak", pairs.join(", "));
+            self.note(
+                arch,
+                k,
+                true,
+                "rpt-note-weak",
+                NoteArg::text(pairs.join(", ")),
+            );
         }
         let (mut mesh, base) =
             self.reduce_checked(done.mesh, &from_arch, (arch, k), true, Some(MIN_WALL_MM))?;

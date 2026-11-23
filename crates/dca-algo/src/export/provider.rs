@@ -42,8 +42,37 @@ pub struct Note {
     pub passive: bool,
     /// Key of the text (`export::text`).
     pub key: &'static str,
-    /// Details (numbers, the reason given by the step), as they are.
-    pub detail: String,
+    /// What the text of `key` says: numbers and names, worded in the
+    /// language of the report ([`super::text::note`]).
+    pub args: Vec<NoteArg>,
+}
+
+/// An argument of a [`Note`]: it is worded when the note is shown, in the
+/// language asked, so the same note reads in English and in Italian.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NoteArg {
+    /// Text as it is (the reason given by the step).
+    Text(String),
+    /// A count; the first one of a note picks the singular or the plural
+    /// of its text.
+    Count(u32),
+    /// A length in micrometres, shown in millimetres with the decimal mark
+    /// of the language.
+    Micrometres(u32),
+    /// A word of the text table, by key.
+    Word(&'static str),
+}
+
+impl NoteArg {
+    /// A length in millimetres (to the micrometre).
+    pub fn mm(x: f64) -> Self {
+        NoteArg::Micrometres((x.max(0.0) * 1000.0).round() as u32)
+    }
+
+    /// A note's text as it is.
+    pub fn text(s: impl Into<String>) -> Vec<Self> {
+        vec![NoteArg::Text(s.into())]
+    }
 }
 
 /// Source of the printable meshes of every stage, in the coordinates of the

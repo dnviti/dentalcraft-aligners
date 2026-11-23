@@ -162,23 +162,44 @@ impl Problem {
             Problem::Degenerate { count } => n("chk-degenerate", &[count.to_string()]),
             Problem::Pieces { count } => n("chk-pieces", &[count.to_string()]),
             Problem::SelfIntersections { count } => n("chk-selfint", &[count.to_string()]),
-            Problem::Genus { count, at } if at.is_empty() => n("chk-genus", &[count.to_string()]),
+            Problem::Genus { count, at } if at.is_empty() => {
+                text::fmt_n(lang, "chk-genus", *count as u64, &[count.to_string()])
+            }
             Problem::Genus { count, at } => {
+                // the decimal mark of the language; the Italian coordinates
+                // are told apart by semicolons
                 let places: Vec<String> = at
                     .iter()
-                    .map(|p| format!("({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]))
+                    .map(|p| {
+                        let c = p.map(|x| super::html::num(lang, x, 1));
+                        let sep = if lang == Lang::It { "; " } else { ", " };
+                        format!("({})", c.join(sep))
+                    })
                     .collect();
-                n("chk-genus-at", &[count.to_string(), places.join(", ")])
+                text::fmt_n(
+                    lang,
+                    "chk-genus-at",
+                    *count as u64,
+                    &[count.to_string(), places.join(", ")],
+                )
             }
             Problem::NonPositiveVolume => n("chk-volume", &[]),
             Problem::TooThin { min_mm, limit_mm } => n(
                 "chk-thin",
-                &[format!("{min_mm:.2}"), format!("{limit_mm:.2}")],
+                &[
+                    super::html::num(lang, *min_mm, 2),
+                    super::html::num(lang, *limit_mm, 2),
+                ],
             ),
             Problem::DoesNotFit { size_mm, plate_mm } => n(
                 "chk-fit",
                 &[
-                    format!("{:.1} x {:.1} x {:.1}", size_mm[0], size_mm[1], size_mm[2]),
+                    format!(
+                        "{} x {} x {}",
+                        super::html::num(lang, size_mm[0], 1),
+                        super::html::num(lang, size_mm[1], 1),
+                        super::html::num(lang, size_mm[2], 1)
+                    ),
                     format!(
                         "{:.0} x {:.0} x {:.0}",
                         plate_mm[0], plate_mm[1], plate_mm[2]
@@ -1265,20 +1286,38 @@ pub(crate) mod tests {
         assert!(q.z.abs() < 0.5 && (r < 0.5 || (r - 3.0).abs() < 0.5), "{q}");
         let en = c.problem_texts(Lang::En).join("; ");
         let it = c.problem_texts(Lang::It).join("; ");
-        let place = format!("({:.1}, {:.1}, {:.1})", at[0][0], at[0][1], at[0][2]);
+        let place = |lang, sep| {
+            let c = at[0].map(|x| crate::export::html::num(lang, x, 1));
+            format!("({})", c.join(sep))
+        };
+        // the singular, the decimal mark and the separator of each language
         assert!(
-            en.contains(&format!("1 holes through the wall, near {place}")),
+            en.contains(&format!(
+                "1 hole through the wall, near {}",
+                place(Lang::En, ", ")
+            )),
             "{en}"
         );
         assert!(
-            it.contains(&format!("1 fori passanti nella parete, vicino a {place}")),
+            it.contains(&format!(
+                "1 foro passante nella parete, vicino a {}",
+                place(Lang::It, "; ")
+            )),
             "{it}"
         );
-        // without the loops (none found) the count alone
+        assert!(!it.contains("hole") && !it.contains("coordinates"), "{it}");
+        // without the loops (none found) the count alone, in the plural
         let bare = Problem::Genus {
             count: 2,
             at: Vec::new(),
         };
         assert_eq!(bare.text(Lang::En), "2 holes through the wall");
+        assert_eq!(bare.text(Lang::It), "2 fori passanti nella parete");
+        let one = Problem::Genus {
+            count: 1,
+            at: Vec::new(),
+        };
+        assert_eq!(one.text(Lang::En), "1 hole through the wall");
+        assert_eq!(one.text(Lang::It), "1 foro passante nella parete");
     }
 }
