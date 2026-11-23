@@ -15,8 +15,12 @@
 //!    edges, normalised by its mean, `w = |e| exp(-d / sigma)`; Grady 2006),
 //!    seeded by a disk around every tooth seed and by a-priori gingival
 //!    constraints (far from the arch line, well below the crowns, the open
-//!    border of the scan; Zou 2015, Liao 2015). Repeated twice with every
-//!    seed moved to the centre of its crown as just segmented.
+//!    border of the scan; Zou 2015, Liao 2015) and, beyond the plugin, past
+//!    the distal surface of the last tooth of each side: behind the last
+//!    molar lie the tuberosity, the retromolar pad or the base of a model,
+//!    never a crown, even as high as one (the plugin lets the walk take them
+//!    into the last tooth). Repeated twice with every seed moved to the
+//!    centre of its crown as just segmented.
 //! 3. The face labels are transferred to the full-resolution vertices (label
 //!    of the exact nearest face, near-ties by one rule), cleaned (majority
 //!    filter, one connected component per label).

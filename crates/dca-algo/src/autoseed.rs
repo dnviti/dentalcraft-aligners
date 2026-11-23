@@ -25,7 +25,12 @@
 //!    its range or an end tooth that is mostly gum mean that the arch ran
 //!    past the last molars (tuberosity, retromolar pad, back wall of a
 //!    model); the teeth are then looked for again without third molars and
-//!    with the arch free to end at the last crown ([`FreeEnds`]).
+//!    with the arch free to end at the last crown ([`FreeEnds`]). An end
+//!    tooth that is no crown at all (the base of a printed model as high as
+//!    the crowns, rough where the molars are smooth) makes the ends of the
+//!    arch be found again from the crowns (`ends`). The plugin has the same
+//!    defect; here the rule that no tooth is found behind the last molars
+//!    wins over parity.
 //! 6. Upper / lower arch without cues in the file ([`detect_arch`]): file
 //!    name, scanner frame, palate, side of the highest cusps of the last
 //!    molars (curve of Wilson), tooth-width pattern.
@@ -43,6 +48,7 @@
 //! and costs are not rounded.
 
 mod dp;
+mod ends;
 mod nearest;
 pub(crate) mod numpy;
 
@@ -614,6 +620,241 @@ pub struct Profiles {
     pub vertex: Vec<usize>,
 }
 
+/// The scan points near the arch curve and their crown score along it,
+/// before the ends of the arch are chosen: what [`arch_profiles`] measures
+/// between two ends, the plugin's ([`RawProfile::crown_ends`]) or others
+/// ([`ends::refit`]).
+#[derive(Debug, Clone)]
+pub(crate) struct RawProfile {
+    /// Points within 7 mm of the arch curve ([`arch_points`]).
+    ap: ArchPoints,
+    /// Arc length of the start of bin 0.
+    s0: f64,
+    /// Bin size (mm).
+    bin_mm: f64,
+    /// Crown score 0-1 of every bin from `s0` ([`crown_score`]).
+    crown0: Vec<f64>,
+    /// The height part alone of the crown score of every bin: 1 at the
+    /// level of the crowns, 0 at that of an edentulous ridge.
+    crown_h: Vec<f64>,
+    /// The first and the last bin of the crowns of the plugin ([`arch_end`]).
+    crowns: (isize, isize),
+}
+
+impl RawProfile {
+    /// The points near `curve` (`pts`: [`arch_points`] result, computed if
+    /// `None`) and their crown score in bins of `bin_mm`: the surface
+    /// texture (dispersion of the normals within 3 mm of the top, 1 mm
+    /// windows) and the height above the occlusal plane.
+    fn new(
+        va: &[DVec3],
+        na: &[DVec3],
+        curve: &ArchCurve,
+        bin_mm: f64,
+        pts: Option<ArchPoints>,
+    ) -> Result<Self, AutoseedError> {
+        const MAX_OFF: f64 = 7.0;
+        const TEX_DEPTH: f64 = 3.0;
+        const TEX_MM: f64 = 1.0;
+        let ap = pts.unwrap_or_else(|| arch_points(va, na, curve, MAX_OFF, 150_000));
+        if ap.points.is_empty() {
+            return Err(AutoseedError::ArchNotFound);
+        }
+        let s0 = ap.s.iter().copied().fold(f64::INFINITY, f64::min);
+        let s_hi = ap.s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let nb0 = ((s_hi - s0) / bin_mm).ceil() as usize + 1;
+        let b0: Vec<usize> =
+            ap.s.iter()
+                .map(|s| (((s - s0) / bin_mm) as usize).min(nb0 - 1))
+                .collect();
+        let mut h0 = vec![f64::NEG_INFINITY; nb0];
+        for (p, &b) in ap.points.iter().zip(&b0) {
+            h0[b] = h0[b].max(p.z);
+        }
+        // texture: mean of the unit normals of the points near the top, 1 mm windows
+        let mut sn = [vec![0.0; nb0], vec![0.0; nb0], vec![0.0; nb0]];
+        let mut cnt = vec![0.0; nb0];
+        for (i, &b) in b0.iter().enumerate() {
+            if ap.points[i].z >= h0[b] - TEX_DEPTH {
+                let nn = ap.normals[i];
+                sn[0][b] += nn.x;
+                sn[1][b] += nn.y;
+                sn[2][b] += nn.z;
+                cnt[b] += 1.0;
+            }
+        }
+        let w = (round_even(TEX_MM / bin_mm)).max(1) as usize;
+        let snw: Vec<Vec<f64>> = sn.iter().map(|v| moving_sum_same(v, w)).collect();
+        let cw = moving_sum_same(&cnt, w);
+        // sparse bins (edge of the scan) are unreliable: treated as smooth.
+        // Relative to the scan density only, so that coarse scans keep their crowns
+        let pos: Vec<f64> = cw.iter().copied().filter(|c| *c > 0.0).collect();
+        let dense_min = 0.15 * median(&pos);
+        let tex: Vec<f64> = (0..nb0)
+            .map(|k| {
+                if cw[k] >= dense_min {
+                    let l = (snw[0][k] * snw[0][k] + snw[1][k] * snw[1][k] + snw[2][k] * snw[2][k])
+                        .sqrt();
+                    1.0 - l / cw[k].max(1.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        // crown score from the texture and the height above the occlusal plane
+        let xy0: Vec<DVec2> = (0..nb0)
+            .map(|k| curve.point(s0 + (k as f64 + 0.5) * bin_mm))
+            .collect();
+        let crownish: Vec<bool> = tex.iter().map(|t| *t >= TEXTURE_GUM).collect();
+        let rh = occlusal_residual(&h0, &xy0, &crownish);
+        let crown0: Vec<f64> = (0..nb0).map(|k| crown_score(tex[k], rh[k])).collect();
+        let crown_h: Vec<f64> = rh
+            .iter()
+            .map(|r| ((r - CROWN_LOW.0) / (CROWN_LOW.1 - CROWN_LOW.0)).clamp(0.0, 1.0))
+            .collect();
+        let c0 = round_even((0.0 - s0) / bin_mm).clamp(0, nb0 as i64 - 1) as usize;
+        let crowns = (
+            arch_end(&crown0, c0, -1, bin_mm),
+            arch_end(&crown0, c0, 1, bin_mm),
+        );
+        Ok(Self {
+            ap,
+            s0,
+            bin_mm,
+            crown0,
+            crown_h,
+            crowns,
+        })
+    }
+
+    /// Arc length of the first and of the last bin: every point.
+    fn extent(&self) -> (f64, f64) {
+        let last = (self.crown0.len() - 1) as f64;
+        (self.s0, self.s0 + last * self.bin_mm)
+    }
+
+    /// The plugin's ends: where the crown score ends ([`arch_end`]), with
+    /// [`END_ZONE`] mm of margin, where leaving smooth (gingival) surface
+    /// unassigned costs nothing (the exact end is left to the dynamic
+    /// programming).
+    fn crown_ends(&self) -> (f64, f64) {
+        let (s0, bin_mm, nb0) = (self.s0, self.bin_mm, self.crown0.len());
+        let (lo_end, hi_end) = self.crowns;
+        let s_min = s0.max(s0 + lo_end as f64 * bin_mm - END_ZONE);
+        let s_max =
+            (s0 + (nb0 - 1) as f64 * bin_mm).min(s0 + (hi_end + 1) as f64 * bin_mm + END_ZONE);
+        (s_min, s_max)
+    }
+
+    /// The profiles of the arch between the arc lengths `s_min` and `s_max`,
+    /// with the crown score of the plugin or, `by_height`, its height part
+    /// alone ([`ends::refit`]): the texture is what put the plugin's ends in
+    /// the wrong place (the crowns of a model can be smooth and its base
+    /// rough), and on such a model it does not tell a crown from a space
+    /// inside the arch either.
+    fn between(&self, s_min: f64, s_max: f64, by_height: bool) -> Result<Profiles, AutoseedError> {
+        const CROWN_DEPTH: f64 = 4.5;
+        let (ap, s0, bin_mm, nb0) = (&self.ap, self.s0, self.bin_mm, self.crown0.len());
+        let inside: Vec<usize> = (0..ap.s.len())
+            .filter(|&i| ap.s[i] >= s_min && ap.s[i] <= s_max)
+            .collect();
+        if inside.is_empty() {
+            return Err(AutoseedError::ArchNotFound);
+        }
+        let points: Vec<DVec3> = inside.iter().map(|&i| ap.points[i]).collect();
+        let s: Vec<f64> = inside.iter().map(|&i| ap.s[i]).collect();
+        let off: Vec<f64> = inside.iter().map(|&i| ap.off[i]).collect();
+        let vertex: Vec<usize> = inside.iter().map(|&i| ap.vertex[i]).collect();
+        let nb = ((s_max - s_min) / bin_mm).ceil() as usize + 1;
+        let bins: Vec<usize> = s
+            .iter()
+            .map(|v| (((v - s_min) / bin_mm) as usize).min(nb - 1))
+            .collect();
+        let mut hraw = vec![f64::NAN; nb];
+        for (p, &b) in points.iter().zip(&bins) {
+            // numpy.fmax: NaN loses
+            hraw[b] = if hraw[b].is_nan() {
+                p.z
+            } else {
+                hraw[b].max(p.z)
+            };
+        }
+        let hfill = fill_nan(&hraw).ok_or(AutoseedError::ArchNotFound)?;
+        let hs = moving_average(&hfill, 2);
+        let r = round_even(2.0 / bin_mm) as isize;
+        let dip: Vec<f64> = (0..nb as isize)
+            .map(|i| {
+                let m = (i - r..=i + r)
+                    .map(|k| hs[k.clamp(0, nb as isize - 1) as usize])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                m - hs[i as usize]
+            })
+            .collect();
+        let mut bl = vec![f64::NAN; nb];
+        let mut dh_bl = vec![f64::NAN; nb];
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); nb];
+        for (i, &b) in bins.iter().enumerate() {
+            if points[i].z >= hs[b] - CROWN_DEPTH {
+                groups[b].push(i);
+            }
+        }
+        for (k, g) in groups.iter().enumerate() {
+            if g.len() >= 6 {
+                let og: Vec<f64> = g.iter().map(|&i| off[i]).collect();
+                let mut sorted = og.clone();
+                sorted.sort_by(f64::total_cmp);
+                bl[k] = percentile_sorted(&sorted, 97.0) - percentile_sorted(&sorted, 3.0);
+                let med = median(&og);
+                let top_of = |buccal: bool| {
+                    g.iter()
+                        .zip(&og)
+                        .filter(|(_, o)| (**o > med) == buccal)
+                        .map(|(&i, _)| points[i].z)
+                        .fold(None, |m: Option<f64>, z| Some(m.map_or(z, |m| m.max(z))))
+                };
+                if let (Some(bu), Some(li)) = (top_of(true), top_of(false)) {
+                    dh_bl[k] = bu - li;
+                }
+            }
+        }
+        let bl = moving_average(&fill_nan(&bl).unwrap_or_else(|| vec![0.0; nb]), 2);
+        // bucco-lingual offset of the highest point of every bin (ties: the last)
+        let mut off_top = vec![f64::NAN; nb];
+        let mut top_z = vec![f64::NEG_INFINITY; nb];
+        for (i, &b) in bins.iter().enumerate() {
+            if points[i].z >= top_z[b] {
+                top_z[b] = points[i].z;
+                off_top[b] = off[i];
+            }
+        }
+        let crown: Vec<f64> = (0..nb)
+            .map(|i| {
+                let k = round_even((s_min + i as f64 * bin_mm - s0) / bin_mm);
+                let k = k.clamp(0, nb0 as i64 - 1) as usize;
+                if by_height {
+                    self.crown_h[k]
+                } else {
+                    self.crown0[k]
+                }
+            })
+            .collect();
+        Ok(Profiles {
+            s_min,
+            s_max,
+            nb,
+            bins,
+            points,
+            h: hs,
+            dip,
+            bl,
+            crown,
+            off_top,
+            dh_bl,
+            vertex,
+        })
+    }
+}
+
 /// Profiles along the arch (bins of `bin_mm`): crown top height, depth of
 /// the interproximal valleys, bucco-lingual width of the crowns (spread of
 /// the points within 4.5 mm of the local crown top), crown score 0-1 from
@@ -628,161 +869,9 @@ pub fn arch_profiles(
     bin_mm: f64,
     pts: Option<ArchPoints>,
 ) -> Result<Profiles, AutoseedError> {
-    const CROWN_DEPTH: f64 = 4.5;
-    const MAX_OFF: f64 = 7.0;
-    const TEX_DEPTH: f64 = 3.0;
-    const TEX_MM: f64 = 1.0;
-    let ap = pts.unwrap_or_else(|| arch_points(va, na, curve, MAX_OFF, 150_000));
-    if ap.points.is_empty() {
-        return Err(AutoseedError::ArchNotFound);
-    }
-    let s0 = ap.s.iter().copied().fold(f64::INFINITY, f64::min);
-    let s_hi = ap.s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let nb0 = ((s_hi - s0) / bin_mm).ceil() as usize + 1;
-    let b0: Vec<usize> =
-        ap.s.iter()
-            .map(|s| (((s - s0) / bin_mm) as usize).min(nb0 - 1))
-            .collect();
-    let mut h0 = vec![f64::NEG_INFINITY; nb0];
-    for (p, &b) in ap.points.iter().zip(&b0) {
-        h0[b] = h0[b].max(p.z);
-    }
-    // texture: mean of the unit normals of the points near the top, 1 mm windows
-    let mut sn = [vec![0.0; nb0], vec![0.0; nb0], vec![0.0; nb0]];
-    let mut cnt = vec![0.0; nb0];
-    for (i, &b) in b0.iter().enumerate() {
-        if ap.points[i].z >= h0[b] - TEX_DEPTH {
-            let nn = ap.normals[i];
-            sn[0][b] += nn.x;
-            sn[1][b] += nn.y;
-            sn[2][b] += nn.z;
-            cnt[b] += 1.0;
-        }
-    }
-    let w = (round_even(TEX_MM / bin_mm)).max(1) as usize;
-    let snw: Vec<Vec<f64>> = sn.iter().map(|v| moving_sum_same(v, w)).collect();
-    let cw = moving_sum_same(&cnt, w);
-    // sparse bins (edge of the scan) are unreliable: treated as smooth.
-    // Relative to the scan density only, so that coarse scans keep their crowns
-    let pos: Vec<f64> = cw.iter().copied().filter(|c| *c > 0.0).collect();
-    let dense_min = 0.15 * median(&pos);
-    let tex: Vec<f64> = (0..nb0)
-        .map(|k| {
-            if cw[k] >= dense_min {
-                let l =
-                    (snw[0][k] * snw[0][k] + snw[1][k] * snw[1][k] + snw[2][k] * snw[2][k]).sqrt();
-                1.0 - l / cw[k].max(1.0)
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    // crown score from the texture and the height above the occlusal plane
-    let xy0: Vec<DVec2> = (0..nb0)
-        .map(|k| curve.point(s0 + (k as f64 + 0.5) * bin_mm))
-        .collect();
-    let crownish: Vec<bool> = tex.iter().map(|t| *t >= TEXTURE_GUM).collect();
-    let rh = occlusal_residual(&h0, &xy0, &crownish);
-    let crown0: Vec<f64> = (0..nb0).map(|k| crown_score(tex[k], rh[k])).collect();
-    let c0 = round_even((0.0 - s0) / bin_mm).clamp(0, nb0 as i64 - 1) as usize;
-    let lo_end = arch_end(&crown0, c0, -1, bin_mm);
-    let hi_end = arch_end(&crown0, c0, 1, bin_mm);
-    // the exact end is left to the dynamic programming: END_ZONE mm of
-    // margin, where leaving smooth (gingival) surface unassigned costs nothing
-    let s_min = s0.max(s0 + lo_end as f64 * bin_mm - END_ZONE);
-    let s_max = (s0 + (nb0 - 1) as f64 * bin_mm).min(s0 + (hi_end + 1) as f64 * bin_mm + END_ZONE);
-    let inside: Vec<usize> = (0..ap.s.len())
-        .filter(|&i| ap.s[i] >= s_min && ap.s[i] <= s_max)
-        .collect();
-    if inside.is_empty() {
-        return Err(AutoseedError::ArchNotFound);
-    }
-    let points: Vec<DVec3> = inside.iter().map(|&i| ap.points[i]).collect();
-    let s: Vec<f64> = inside.iter().map(|&i| ap.s[i]).collect();
-    let off: Vec<f64> = inside.iter().map(|&i| ap.off[i]).collect();
-    let vertex: Vec<usize> = inside.iter().map(|&i| ap.vertex[i]).collect();
-    let nb = ((s_max - s_min) / bin_mm).ceil() as usize + 1;
-    let bins: Vec<usize> = s
-        .iter()
-        .map(|v| (((v - s_min) / bin_mm) as usize).min(nb - 1))
-        .collect();
-    let mut hraw = vec![f64::NAN; nb];
-    for (p, &b) in points.iter().zip(&bins) {
-        // numpy.fmax: NaN loses
-        hraw[b] = if hraw[b].is_nan() {
-            p.z
-        } else {
-            hraw[b].max(p.z)
-        };
-    }
-    let hfill = fill_nan(&hraw).ok_or(AutoseedError::ArchNotFound)?;
-    let hs = moving_average(&hfill, 2);
-    let r = round_even(2.0 / bin_mm) as isize;
-    let dip: Vec<f64> = (0..nb as isize)
-        .map(|i| {
-            let m = (i - r..=i + r)
-                .map(|k| hs[k.clamp(0, nb as isize - 1) as usize])
-                .fold(f64::NEG_INFINITY, f64::max);
-            m - hs[i as usize]
-        })
-        .collect();
-    let mut bl = vec![f64::NAN; nb];
-    let mut dh_bl = vec![f64::NAN; nb];
-    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); nb];
-    for (i, &b) in bins.iter().enumerate() {
-        if points[i].z >= hs[b] - CROWN_DEPTH {
-            groups[b].push(i);
-        }
-    }
-    for (k, g) in groups.iter().enumerate() {
-        if g.len() >= 6 {
-            let og: Vec<f64> = g.iter().map(|&i| off[i]).collect();
-            let mut sorted = og.clone();
-            sorted.sort_by(f64::total_cmp);
-            bl[k] = percentile_sorted(&sorted, 97.0) - percentile_sorted(&sorted, 3.0);
-            let med = median(&og);
-            let top_of = |buccal: bool| {
-                g.iter()
-                    .zip(&og)
-                    .filter(|(_, o)| (**o > med) == buccal)
-                    .map(|(&i, _)| points[i].z)
-                    .fold(None, |m: Option<f64>, z| Some(m.map_or(z, |m| m.max(z))))
-            };
-            if let (Some(bu), Some(li)) = (top_of(true), top_of(false)) {
-                dh_bl[k] = bu - li;
-            }
-        }
-    }
-    let bl = moving_average(&fill_nan(&bl).unwrap_or_else(|| vec![0.0; nb]), 2);
-    // bucco-lingual offset of the highest point of every bin (ties: the last)
-    let mut off_top = vec![f64::NAN; nb];
-    let mut top_z = vec![f64::NEG_INFINITY; nb];
-    for (i, &b) in bins.iter().enumerate() {
-        if points[i].z >= top_z[b] {
-            top_z[b] = points[i].z;
-            off_top[b] = off[i];
-        }
-    }
-    let crown: Vec<f64> = (0..nb)
-        .map(|i| {
-            let k = round_even((s_min + i as f64 * bin_mm - s0) / bin_mm);
-            crown0[k.clamp(0, nb0 as i64 - 1) as usize]
-        })
-        .collect();
-    Ok(Profiles {
-        s_min,
-        s_max,
-        nb,
-        bins,
-        points,
-        h: hs,
-        dip,
-        bl,
-        crown,
-        off_top,
-        dh_bl,
-        vertex,
-    })
+    let raw = RawProfile::new(va, na, curve, bin_mm, pts)?;
+    let (s_min, s_max) = raw.crown_ends();
+    raw.between(s_min, s_max, false)
 }
 
 /// Arch frame, arch curve and profiles of a scan, shared by the arch
@@ -795,6 +884,11 @@ pub struct ArchData {
     pub curve: ArchCurve,
     /// Profiles along the curve.
     pub profiles: Profiles,
+    /// What the profiles are measured from, for other ends of the arch
+    /// ([`propose_checked`]).
+    raw: RawProfile,
+    /// The scan seen from its occlusal side (arch coordinates).
+    heights: ends::HeightMap,
 }
 
 /// [`ArchData`] of a scan (vertices in scan coordinates).
@@ -839,11 +933,15 @@ pub fn arch_data_oriented(
         .map(|p| p.truncate())
         .collect();
     let curve = arch_polyline(&b)?;
-    let profiles = arch_profiles(&va, &na, &curve, BIN_MM, None)?;
+    let raw = RawProfile::new(&va, &na, &curve, BIN_MM, None)?;
+    let (s_min, s_max) = raw.crown_ends();
+    let profiles = raw.between(s_min, s_max, false)?;
     Ok(ArchData {
         frame: m,
         curve,
         profiles,
+        raw,
+        heights: ends::HeightMap::new(&va),
     })
 }
 
@@ -960,6 +1058,11 @@ pub enum Doubt {
     ScaleLimit,
     /// The first or the last tooth is mostly gingiva-like surface.
     EndNotCrown,
+    /// The first or the last tooth is no crown: the scan does not fall
+    /// away on both sides of it across the arch (the base of a model, a
+    /// heel or a back wall as high as the crowns). The ends of the arch
+    /// are found again from the crowns ([`WALL_DROP_MM`]).
+    EndNotTooth,
 }
 
 /// The check of a doubtful proposal ([`Diagnostics::checked`]).
@@ -983,6 +1086,20 @@ pub const TAIL_GUARD_MM: f64 = 1.0;
 /// An end tooth whose mean crown score is below this is doubtful
 /// ([`Doubt::EndNotCrown`]).
 pub const END_CROWN_MIN: f64 = 0.75;
+/// A crown stands above what is next to it across the arch: the scan falls
+/// this much (mm) under its top on both sides within [`WALL_REACH_MM`] of
+/// the centre of its top, the two walls at most [`CROWN_WIDTH_MM`] apart
+/// (the walls of the crown down to the gum: on the last molars of real
+/// scans of a patient and of a model, 2.0-7.0 mm on either side and
+/// 10.75-11.5 mm apart). The base of a model behind the last molar, a heel
+/// or a slope as high as the crowns, stays as high on one side at least
+/// (7.75 mm or more, or not at all, or the walls 13.75 mm apart)
+/// ([`Doubt::EndNotTooth`]).
+pub const WALL_DROP_MM: f64 = 2.5;
+/// See [`WALL_DROP_MM`].
+pub const WALL_REACH_MM: f64 = 7.5;
+/// See [`WALL_DROP_MM`].
+pub const CROWN_WIDTH_MM: f64 = 12.5;
 
 /// One seed per tooth found.
 #[derive(Debug, Clone, PartialEq)]
@@ -1035,7 +1152,7 @@ pub fn propose(
             &owned
         }
     };
-    propose_in(arch, opts, data, false).map(|(p, _)| p)
+    propose_in(arch, opts, &data.frame, &data.profiles, false).map(|(p, _)| p)
 }
 
 /// The scales of the typical tooth widths tried along the arch.
@@ -1060,6 +1177,15 @@ fn width_scales() -> Vec<f64> {
 /// crowns). When only one side has such a crown, the plugin's proposal
 /// stands without the third molar of the other side, which lies on gum,
 /// unless it stands at the level of that crown ([`paired_crowns`]).
+///
+/// The end teeth of that proposal must then be crowns: the scan falls on
+/// both sides of them across the arch ([`WALL_DROP_MM`]). When one is not
+/// (the base of a printed model as high as the crowns behind the last
+/// molar, [`Doubt::EndNotTooth`]), the arch is profiled again over the
+/// whole scan and cut back past its last crowns (`ends::refit`), and the
+/// teeth are found and checked again on it. That proposal replaces the
+/// first one only when it is no worse (`ends::no_worse`); otherwise the
+/// first one stays, with the doubt.
 pub fn propose_checked(
     v: &[DVec3],
     t: &[[u32; 3]],
@@ -1081,34 +1207,79 @@ pub fn propose_checked(
             &owned
         }
     };
-    let (p, segs) = propose_in(arch, opts, data, false)?;
+    let (p, segs) = propose_in(arch, opts, &data.frame, &data.profiles, false)?;
     if opts.force_ends.is_some() {
         return Ok(p);
     }
-    let doubts = doubts(&p, &segs, &data.profiles, opts);
-    if doubts.is_empty() {
-        return Ok(p);
+    let plugin_teeth: Vec<u8> = p.seeds.iter().map(|s| s.fdi.get()).collect();
+    let (c, c_segs, c_doubts) = check(arch, opts, &data.frame, &data.profiles, p, segs)?;
+    if ends::end_crowns(&data.profiles, &data.heights, &c_segs) == [true; 2] {
+        return Ok(mark(c, c_doubts, plugin_teeth));
     }
-    let plugin_teeth = p.seeds.iter().map(|s| s.fdi.get()).collect();
-    let (q, q_segs) = propose_in(arch, opts, data, true)?;
-    let kept = third_molar_crowns(&p, &segs, &q, &q_segs, &data.profiles.h);
+    // an end tooth is no crown (the base of a model as high as the crowns):
+    // the ends of the arch found again from the crowns, checked the same
+    // way; kept only when no worse, otherwise the doubt is told
+    let refit = ends::refit(arch, opts, &data.frame, &data.raw, &data.heights).and_then(
+        |(pr, r, r_segs)| {
+            check(arch, opts, &data.frame, &pr, r, r_segs).map(|(r, s, d)| (pr, r, s, d))
+        },
+    );
+    let mut doubts = vec![Doubt::EndNotTooth];
+    let (x, more) = match refit {
+        Ok((pr, r, r_segs, r_doubts))
+            if ends::no_worse(&data.profiles, &c_segs, &pr, &r_segs, &data.heights) =>
+        {
+            (r, r_doubts)
+        }
+        _ => (c, c_doubts),
+    };
+    doubts.extend(more.into_iter().filter(|d| *d != Doubt::EndNotTooth));
+    Ok(mark(x, doubts, plugin_teeth))
+}
+
+/// `p` with its `doubts` and `plugin_teeth`, the teeth of the plugin's
+/// proposal, in its diagnostics; unmarked without doubts (the plugin's
+/// proposal, [`propose_checked`]).
+fn mark(mut p: Proposal, doubts: Vec<Doubt>, plugin_teeth: Vec<u8>) -> Proposal {
+    if !doubts.is_empty() {
+        p.diagnostics.checked = Some(Check {
+            doubts,
+            plugin_teeth,
+        });
+    }
+    p
+}
+
+/// The check of the plugin's proposal `p` on the profiles `pr` (its teeth
+/// on the bins `segs`): with doubts it is made again without third molars
+/// (unless looked for) and with free ends ([`propose_checked`]). Returns the
+/// proposal, the bins of its teeth and its doubts: none when it is `p`.
+fn check(
+    arch: Arch,
+    opts: &Options,
+    frame: &DMat4,
+    pr: &Profiles,
+    p: Proposal,
+    segs: ToothBins,
+) -> Result<(Proposal, ToothBins, Vec<Doubt>), AutoseedError> {
+    let doubts = doubts(&p, &segs, pr, opts);
+    if doubts.is_empty() {
+        return Ok((p, segs, doubts));
+    }
+    let (q, q_segs) = propose_in(arch, opts, frame, pr, true)?;
+    let kept = third_molar_crowns(&p, &segs, &q, &q_segs, &pr.h);
     // a third molar of the plugin's proposal on a side whose third molar
     // is not a crown: gum, left out
-    let on_gum = p
-        .seeds
-        .iter()
-        .any(|s| anatomy::index(s.fdi) == 8 && !kept[side(s.fdi)]);
-    let mut q = match kept {
-        [false, false] => q,
+    let on_gum = |f: Fdi| anatomy::index(f) == 8 && !kept[side(f)];
+    Ok(match kept {
+        [false, false] => (q, q_segs, doubts),
         // both crowns, or nothing to leave out: the plugin's proposal
-        _ if !on_gum => return Ok(p),
-        _ => without_third_molar(p, kept),
-    };
-    q.diagnostics.checked = Some(Check {
-        doubts,
-        plugin_teeth,
-    });
-    Ok(q)
+        _ if !p.seeds.iter().any(|s| on_gum(s.fdi)) => (p, segs, Vec::new()),
+        _ => {
+            let segs = segs.into_iter().filter(|(f, _)| !on_gum(*f)).collect();
+            (without_third_molar(p, kept), segs, doubts)
+        }
+    })
 }
 
 /// The side of a tooth: 0 right, 1 left (the order of [`Candidate::ends`]).
@@ -1231,10 +1402,10 @@ type ToothBins = Vec<(Fdi, (usize, usize))>;
 fn propose_in(
     arch: Arch,
     opts: &Options,
-    data: &ArchData,
+    frame: &DMat4,
+    pr: &Profiles,
     checked: bool,
 ) -> Result<(Proposal, ToothBins), AutoseedError> {
-    let pr = &data.profiles;
     let nb = pr.nb;
     // the teeth are counted from the midline, like a clinician: the contact
     // between the central incisors lies near the middle of the most anterior
@@ -1357,7 +1528,7 @@ fn propose_in(
                 k = i;
             }
         }
-        found.insert(*f, transform(&data.frame, sel[k]));
+        found.insert(*f, transform(frame, sel[k]));
     }
     let seeds: Vec<Seed> = anatomy::arch_order(arch)
         .into_iter()
@@ -1391,7 +1562,7 @@ fn propose_in(
                 checked: None,
             },
             seeds,
-            frame: data.frame,
+            frame: *frame,
         },
         present,
     ))
