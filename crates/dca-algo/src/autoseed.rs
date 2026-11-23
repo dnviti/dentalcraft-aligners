@@ -980,10 +980,6 @@ pub const TAIL_COST: f64 = 2.0;
 pub const TAIL_DROP_MM: f64 = 0.5;
 /// See [`TAIL_COST`].
 pub const TAIL_GUARD_MM: f64 = 1.0;
-/// A third molar whose partner on the other side is a crown is taken as a
-/// crown too when its top is at most this below the crown next to it
-/// ([`propose_checked`]).
-pub const PAIRED_DROP_MM: f64 = 1.0;
 /// An end tooth whose mean crown score is below this is doubtful
 /// ([`Doubt::EndNotCrown`]).
 pub const END_CROWN_MIN: f64 = 0.75;
@@ -1062,7 +1058,8 @@ fn width_scales() -> Vec<f64> {
 /// or with forced ends, is the plugin's; so is one whose third molars the
 /// new proposal cannot leave out on both sides (erupted third molars,
 /// crowns). When only one side has such a crown, the plugin's proposal
-/// stands without the third molar of the other side, which lies on gum.
+/// stands without the third molar of the other side, which lies on gum,
+/// unless it stands at the level of that crown ([`paired_crowns`]).
 pub fn propose_checked(
     v: &[DVec3],
     t: &[[u32; 3]],
@@ -1172,10 +1169,7 @@ fn doubts(
 /// The sides (right, left) whose third molar of the plugin's proposal `p`
 /// was a crown, not gum: the checked proposal `q` has fewer teeth and
 /// reaches over most of it (its teeth stretched to cover it, since a crown
-/// cannot be left out), and its top is as high as the crown next to it
-/// (within [`TAIL_DROP_MM`]). Once one side has such a crown, the third
-/// molar of the other side is one too when its top is within
-/// [`PAIRED_DROP_MM`] (third molars erupt in pairs more often than alone).
+/// cannot be left out), and its top stands as [`paired_crowns`] asks.
 /// There the plugin's third molar stands. `h`: crown top height of every
 /// bin.
 fn third_molar_crowns(
@@ -1206,10 +1200,26 @@ fn third_molar_crowns(
             drop[side(f)] = top(p_segs[next].1) - top((a, b));
         }
     }
-    if drop.iter().all(|&d| d > TAIL_DROP_MM) {
+    paired_crowns(drop)
+}
+
+/// The sides (right, left) whose third molar is a crown, from the drop of
+/// its top under the crown next to it (`INFINITY`: no third molar, or one
+/// the checked proposal leaves out). A third molar within [`TAIL_DROP_MM`]
+/// of its neighbour is a crown. Once one side has such a crown, the third
+/// molar of the other side is one too when its top is within
+/// [`TAIL_DROP_MM`] of the level of that crown: third molars erupt in pairs,
+/// to about the same height. The level of the partner and not a fixed
+/// height, because the drop alone does not tell a lower crown from the gum:
+/// on real scans the gum behind the last molars stood less than 1 mm under
+/// them, and last molars more than 1 mm under their neighbours.
+fn paired_crowns(drop: [f64; 2]) -> [bool; 2] {
+    let partner = drop[0].min(drop[1]);
+    if partner > TAIL_DROP_MM {
         return [false; 2];
     }
-    drop.map(|d| d <= PAIRED_DROP_MM)
+    let level = TAIL_DROP_MM.max(partner + TAIL_DROP_MM);
+    drop.map(|d| d <= level)
 }
 
 /// The bins `[a, b)` of every tooth of a proposal, in the order of the
@@ -1933,6 +1943,34 @@ mod tests {
             arch_data_oriented(&v, &d.mesh.tris, false).unwrap().frame,
             auto.frame
         );
+    }
+
+    /// A third molar is a crown within 0.5 mm of its neighbour, and the
+    /// one of the other side only at the level of that crown: the gum
+    /// behind the last molars of a real scan stood 0.97 mm under them, an
+    /// erupted third molar of a demo arch 0.50 mm with its partner at 0.20.
+    #[test]
+    fn a_paired_third_molar_is_kept_only_at_the_level_of_its_partner() {
+        let none = f64::INFINITY;
+        // no crown on either side: the gum of the real scan, both sides
+        assert_eq!(paired_crowns([1.04, 0.97]), [false, false]);
+        assert_eq!(paired_crowns([none, none]), [false, false]);
+        // a crown and that gum on the other side: the crown alone
+        assert_eq!(paired_crowns([0.2, 0.97]), [true, false]);
+        assert_eq!(paired_crowns([0.97, -0.8]), [false, true]);
+        assert_eq!(paired_crowns([0.0, 0.97]), [true, false]);
+        // the other third molar a little lower than its partner: both
+        assert_eq!(paired_crowns([0.503, 0.201]), [true, true]);
+        assert_eq!(paired_crowns([0.45, 0.94]), [true, true]);
+        // a crown above its neighbour: the other one needs its own 0.5 mm
+        assert_eq!(paired_crowns([-0.8, 0.45]), [true, true]);
+        assert_eq!(paired_crowns([-0.8, 0.6]), [true, false]);
+        // no third molar on the other side, or one left out as gum
+        assert_eq!(paired_crowns([0.1, none]), [true, false]);
+        // the demo bulges of gum behind the last molar
+        for (crown, bulge) in [(-0.863, 1.259), (0.251, 1.534), (0.475, 1.577)] {
+            assert_eq!(paired_crowns([crown, bulge]), [true, false], "{bulge}");
+        }
     }
 
     #[test]
