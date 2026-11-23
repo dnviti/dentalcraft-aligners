@@ -1,4 +1,4 @@
-//! The plan under noise of the segmentation of a last molar.
+//! The plan under noise of the segmentation.
 //!
 //! On a real two-arch case (2026-11-23) a new segmentation relabelled 9
 //! vertices of a lower arch: four of the last molar given to its neighbour
@@ -27,13 +27,25 @@
 //! search (before 21db055) 46 of the 64 noisy plans jumped on the strict
 //! criterion (any IPR difference, more collisions), 17 among the moving
 //! teeth in 40 of them; 18 with the new search, 16 once the collision check
-//! uses every crown point, [`JUMPS_NOW`] once a tooth is derotated only by
-//! the excess over its tolerance (eddf352). 11 of those are the molar 17
-//! in or out of the moving teeth: its two cusps are single highest points,
-//! which swap under the noise, so its measured rotation crosses the 5
-//! degree tolerance (and the 0.5 degree smallest turn beyond it). The goal
-//! is none even on the strict criterion, and
+//! uses every crown point, 15 once a tooth is derotated only by the excess
+//! over its tolerance (eddf352), [`JUMPS_NOW`] once a delay is kept only
+//! when it lowers the worst overlap of its pair (fa0cd85). 11 of those are
+//! the molar 17 in or out of the moving teeth: its two cusps are single
+//! highest points, which swap under the noise, so its measured rotation
+//! crosses the 5 degree tolerance (and the 0.5 degree smallest turn beyond
+//! it). The goal is none even on the strict criterion, and
 //! [`a_last_molar_moved_by_noise_never_jumps_the_plan`] holds it.
+//!
+//! The six demo arches are planned the same way with the default settings
+//! (the anterior teeth to align), then again under the 9 flips at each of
+//! their two last molars and under 5 to 10 vertices anywhere on a border
+//! given the label across it, 16 seeds each: 384 noisy plans. On the
+//! user's criterion 53 of them jumped before 41ccdab, 24 after it, 28 after
+//! eddf352, 27 after fa0cd85 and [`FAMILY_JUMPS_NOW`] once the robust arch
+//! line takes its scale once from the canines and premolars (5bdaa21). All
+//! of those are border flips; the 9 flips at the molars move no plan. 16 of
+//! them are the lower moderate and severe arches, whose front teeth collide
+//! in the staging: more or fewer aligners, or another collision listed.
 
 mod golden_case;
 
@@ -49,12 +61,17 @@ use dca_model::{SetupScope, SetupSettings};
 use glam::DVec3;
 use golden_case::Case;
 
-/// Noisy plans that still jump (of 64; on the strict criterion 46 with the
-/// plugin's mirror search, 18 with its sample of the crowns in the collision
-/// check, 16 with the plugin's derotation).
-const JUMPS_NOW: usize = 15;
+/// Noisy plans of the fixture that still jump (of 64; on the strict
+/// criterion 46 with the plugin's mirror search, 18 with its sample of the
+/// crowns in the collision check, 16 with the plugin's derotation, 15 with
+/// the plugin's delays).
+const JUMPS_NOW: usize = 14;
 /// Seeds of each family of noise.
 const SEEDS: u64 = 32;
+/// Noisy plans of the six demo arches that still jump (of 384).
+const FAMILY_JUMPS_NOW: usize = 21;
+/// Seeds of each family of noise at each last molar of the six demo arches.
+const FAMILY_SEEDS: u64 = 16;
 
 const CASE: &str = "demo_upper_mild";
 
@@ -69,18 +86,27 @@ struct Plan {
     unresolved: BTreeSet<(Fdi, Fdi)>,
 }
 
-/// Teeth, final position (every tooth to align) and aligners of the arch
-/// with `labels`.
-fn plan(case: &Case, labels: &[u16]) -> Plan {
+/// Teeth, final position and aligners of the arch with `labels` and the
+/// setup `settings`.
+fn plan(case: &Case, labels: &[u16], settings: &SetupSettings) -> Plan {
+    let arch = if case.teeth["arch"] == "UPPER" {
+        Arch::Upper
+    } else {
+        Arch::Lower
+    };
     let geo = teeth::run(
         &teeth::Input {
-            arch: Arch::Upper,
+            arch,
             vertices: &case.vertices,
             tris: &case.tris,
             labels,
         },
         &teeth::Params {
-            arch: Which::Upper,
+            arch: if arch.is_upper() {
+                Which::Upper
+            } else {
+                Which::Lower
+            },
             ..teeth::Params::default()
         },
     )
@@ -90,13 +116,9 @@ fn plan(case: &Case, labels: &[u16]) -> Plan {
         .iter()
         .map(|(f, t)| (*f, ToothInput::from(t)))
         .collect();
-    let settings = SetupSettings {
-        align_scope: SetupScope::All,
-        ..SetupSettings::default()
-    };
     let out = setup::run(
         &setup::Input {
-            arch: Arch::Upper,
+            arch,
             vertices: &case.vertices,
             labels,
             sequence: &geo.sequence,
@@ -105,7 +127,7 @@ fn plan(case: &Case, labels: &[u16]) -> Plan {
             fixed: &[],
             poses: &BTreeMap::new(),
         },
-        &setup::Params::from_settings(&settings),
+        &setup::Params::from_settings(settings),
     )
     .unwrap();
     let r = &out.result;
@@ -250,6 +272,23 @@ fn local(case: &Case, labels: &[u16], m: Fdi, nb: Fdi, seed: u64) -> Vec<u16> {
     out
 }
 
+/// 5 to 10 vertices anywhere on a border of their label, drawn by `seed`,
+/// given the label across the border.
+fn flips(case: &Case, labels: &[u16], seed: u64) -> Vec<u16> {
+    let b: Vec<(u32, u16)> = borders(case, labels).into_iter().collect();
+    let mut rng = Rng::new(seed ^ 0x5151);
+    let n = 5 + rng.below(6);
+    let mut out = labels.to_vec();
+    let mut done = BTreeSet::new();
+    while done.len() < n {
+        let (i, o) = b[rng.below(b.len())];
+        if done.insert(i) {
+            out[i as usize] = o;
+        }
+    }
+    out
+}
+
 /// How the noisy plan `b` jumps from the plan `a` (empty: it holds). The
 /// criterion the user chose (2026-11-23): the same moving teeth, the IPR
 /// of every contact within one 0.05 mm step, the aligners within one, and
@@ -296,11 +335,15 @@ fn jumps(a: &Plan, b: &Plan, strict: bool) -> Vec<String> {
     out
 }
 
-/// The jumps of the 64 noisy plans, one line each.
+/// The jumps of the 64 noisy plans of the fixture, one line each.
 fn noisy_jumps(strict: bool) -> Vec<String> {
     let case = Case::load(CASE);
     let (m, nb) = (fdi(17), fdi(16));
-    let base = plan(&case, &case.labels);
+    let settings = SetupSettings {
+        align_scope: SetupScope::All,
+        ..SetupSettings::default()
+    };
+    let base = plan(&case, &case.labels, &settings);
     let mut out = Vec::new();
     for seed in 1..=SEEDS {
         for (family, labels) in [
@@ -313,7 +356,7 @@ fn noisy_jumps(strict: bool) -> Vec<String> {
                 .filter(|(a, b)| a != b)
                 .count();
             assert!((5..=10).contains(&flipped), "{family} {seed}: {flipped}");
-            let j = jumps(&base, &plan(&case, &labels), strict);
+            let j = jumps(&base, &plan(&case, &labels, &settings), strict);
             if !j.is_empty() {
                 out.push(format!(
                     "{family}, seed {seed} ({flipped} vertices): {}",
@@ -323,6 +366,47 @@ fn noisy_jumps(strict: bool) -> Vec<String> {
         }
     }
     out
+}
+
+/// The jumps of the 384 noisy plans of the six demo arches, one line each:
+/// each arch with the default settings, then under the 9 flips at each of
+/// its two last molars and 5 to 10 border flips anywhere (one arch a
+/// thread).
+fn family_jumps(strict: bool) -> Vec<String> {
+    std::thread::scope(|s| {
+        let arches: Vec<_> = golden_case::CASES
+            .iter()
+            .map(|&name| {
+                s.spawn(move || {
+                    let case = Case::load(name);
+                    let settings = SetupSettings::default();
+                    let base = plan(&case, &case.labels, &settings);
+                    let seq = case.fdis();
+                    let ends = [(seq[0], seq[1]), (seq[seq.len() - 1], seq[seq.len() - 2])];
+                    let mut out = Vec::new();
+                    for (m, nb) in ends {
+                        for seed in 1..=FAMILY_SEEDS {
+                            let border = seed * 7919 + u64::from(m.get());
+                            for (family, labels) in [
+                                ("9 flips", nine(&case, &case.labels, m, nb, seed)),
+                                ("border flips", flips(&case, &case.labels, border)),
+                            ] {
+                                let j = jumps(&base, &plan(&case, &labels, &settings), strict);
+                                if !j.is_empty() {
+                                    out.push(format!(
+                                        "{name}, {family} at {m}, seed {seed}: {}",
+                                        j.join("; ")
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        arches.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
 }
 
 #[test]
@@ -352,4 +436,21 @@ fn a_last_molar_moved_by_noise_jumps_the_plan_less_often() {
 fn a_last_molar_moved_by_noise_never_jumps_the_plan() {
     let j = noisy_jumps(true);
     assert!(j.is_empty(), "noisy plans that jump:\n{}", j.join("\n"));
+}
+
+#[test]
+#[cfg_attr(
+    not(optimized),
+    ignore = "slow without optimisations: cargo test --release"
+)]
+fn the_demo_arches_under_noise_jump_the_plan_less_often() {
+    let j = family_jumps(false);
+    let total = golden_case::CASES.len() as u64 * 2 * 2 * FAMILY_SEEDS;
+    eprintln!("{} of {total} noisy plans jump:\n{}", j.len(), j.join("\n"));
+    assert!(
+        j.len() <= FAMILY_JUMPS_NOW,
+        "{} of {total} noisy plans jump, at most {FAMILY_JUMPS_NOW} expected:\n{}",
+        j.len(),
+        j.join("\n")
+    );
 }
