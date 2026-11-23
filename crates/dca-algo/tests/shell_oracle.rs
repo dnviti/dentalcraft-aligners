@@ -218,6 +218,8 @@ fn check(name: &str, k: Option<usize>, params: &Params, thickness_tol: f64) -> f
     let design = Design {
         thickness_mm: 1.0,
         clearance_mm: 0.0,
+        // the plugin's shell lies on the gingiva
+        gum_clearance_mm: 0.0,
     };
     let input = Input {
         to_arch: st.to_arch,

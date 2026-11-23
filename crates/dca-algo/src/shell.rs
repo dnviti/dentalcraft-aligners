@@ -19,7 +19,11 @@
 //!   model, `max(S − outer, inner − S)` on the same field, so the shell is
 //!   the shape of a sheet of uniform thickness laid on the model. Without
 //!   the trim solid (B5) it is a closed hollow solid: an outer surface and
-//!   the inner (fitting) surface around the whole model.
+//!   the inner (fitting) surface around the whole model. Over the gingiva
+//!   it stands `gum_clearance` farther out, its wall as thick
+//!   ([`gum_relieved`]: the closed field with the region within that of the
+//!   gingiva added; not in the plugin, whose shell lies on the gingiva and
+//!   presses on the papillae between the teeth).
 //! * **Blockout model**: the closed model with every undercut relative to
 //!   the insertion axis filled, i.e. its sweep along the axis away from the
 //!   occlusal side `{p : p + t·a ∈ M for some t ≥ 0}`, built exactly as the
@@ -147,6 +151,10 @@ pub const GUM_TUCK_MM: f64 = 0.1;
 /// (`GUM_TUCK_SCALES`).
 pub const GUM_TUCK_SCALES: [f64; 7] = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
 
+/// Largest space between the shell and the gingiva it covers
+/// ([`Design::gum_clearance_mm`], mm).
+pub const GUM_CLEARANCE_MAX_MM: f64 = 1.0;
+
 /// Errors of the shell stage.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ShellError {
@@ -220,6 +228,9 @@ pub struct Params {
     /// Internal clearance between model and shell (mm); default the case
     /// setting.
     pub clearance_mm: Option<f64>,
+    /// Space between the shell and the gingiva it covers (mm, 0 to
+    /// [`GUM_CLEARANCE_MAX_MM`]; [`gum_relieved`]); default the case setting.
+    pub gum_clearance_mm: Option<f64>,
     /// Detail of the model and of the blockout (mm).
     pub model_voxel_mm: f64,
     /// Detail of the shell (mm).
@@ -242,6 +253,7 @@ impl Default for Params {
             stages: Vec::new(),
             thickness_mm: None,
             clearance_mm: None,
+            gum_clearance_mm: None,
             model_voxel_mm: MODEL_VOXEL_MM,
             shell_voxel_mm: SHELL_VOXEL_MM,
             blockout_mm: BLOCKOUT_MM,
@@ -252,21 +264,26 @@ impl Default for Params {
     }
 }
 
-/// Thickness and clearance of the shell actually used.
+/// Thickness and clearances of the shell actually used.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Design {
     /// Wall thickness (mm).
     pub thickness_mm: f64,
     /// Internal clearance (mm).
     pub clearance_mm: f64,
+    /// Space between the shell and the gingiva it covers, added to the
+    /// clearance there (mm; [`gum_relieved`]).
+    pub gum_clearance_mm: f64,
 }
 
 impl Params {
-    /// The wall thickness and clearance: the parameters, else the settings.
+    /// The wall thickness and the clearances: the parameters, else the
+    /// settings.
     pub fn design(&self, settings: &Settings) -> Design {
         Design {
             thickness_mm: self.thickness_mm.unwrap_or(settings.shell_thickness_mm),
             clearance_mm: self.clearance_mm.unwrap_or(settings.clearance_mm),
+            gum_clearance_mm: self.gum_clearance_mm.unwrap_or(settings.gum_clearance_mm),
         }
     }
 
@@ -295,12 +312,19 @@ impl Params {
             ("blockout_mm", self.blockout_mm),
             ("tolerance_mm", self.tolerance_mm),
             ("clearance_mm", design.clearance_mm),
+            ("gum_clearance_mm", design.gum_clearance_mm),
         ] {
             if !(v.is_finite() && v >= 0.0) {
                 return Err(ShellError::Invalid(format!(
                     "{what} must be zero or positive, got {v}"
                 )));
             }
+        }
+        if design.gum_clearance_mm > GUM_CLEARANCE_MAX_MM {
+            return Err(ShellError::Invalid(format!(
+                "gum_clearance_mm must be at most {GUM_CLEARANCE_MAX_MM}, got {}",
+                design.gum_clearance_mm
+            )));
         }
         let a = DVec3::from(self.insertion_axis);
         if !(a.is_finite() && a.length() > 1e-9) {
@@ -389,6 +413,8 @@ pub struct Report {
     pub thickness_mm: f64,
     /// Clearance used (mm).
     pub clearance_mm: f64,
+    /// Space over the gingiva used (mm).
+    pub gum_clearance_mm: f64,
 }
 
 /// The solids of a stage (case coordinates).
@@ -779,6 +805,64 @@ pub fn shell_grid(closed: &SdfGrid, design: &Design) -> Result<SdfGrid, ShellErr
     fitting.shift(inner).map_err(geom)?;
     out.subtract(&fitting).map_err(geom)?;
     Ok(out)
+}
+
+/// The gingiva of `input` the shell keeps [`Design::gum_clearance_mm`]
+/// away from ([`gum_relieved`]), in arch coordinates: its faces not under
+/// the crowns ([`Input::cover`]: those lie inside the teeth).
+pub fn gum_surface(input: &Input<'_>) -> TriMesh {
+    let a = input.to_arch;
+    let mut slot = vec![u32::MAX; input.gingiva.positions.len()];
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut tris = Vec::new();
+    for (f, t) in input.gingiva.tris.iter().enumerate() {
+        if input.cover.get(f).copied().unwrap_or(false) {
+            continue;
+        }
+        tris.push(t.map(|v| {
+            let s = &mut slot[v as usize];
+            if *s == u32::MAX {
+                *s = positions.len() as u32;
+                let p = input.gingiva.positions[v as usize].as_dvec3();
+                positions.push(a.transform_point3(p).as_vec3());
+            }
+            *s
+        }));
+    }
+    TriMesh::new(positions, tris)
+}
+
+/// The closed field `closed` of the model with the region within `gap` of
+/// the gingiva `gum` (an open surface, in the coordinates of the field)
+/// added to it, on the same voxels and band: the shell read from it
+/// ([`shell_grid`]) stands `gap` farther from the gingiva, the papillae
+/// between the teeth too, its wall as thick; on the teeth it fits as
+/// before, but within `gap` of the gingival margin, round which it turns
+/// off the tooth with that radius. The printed model keeps the field
+/// without it. `None` for no gap or no gingiva.
+///
+/// # Errors
+/// [`ShellError::Geometry`] when a field operation fails.
+pub fn gum_relieved(
+    closed: &SdfGrid,
+    gum: &TriMesh,
+    gap: f64,
+) -> Result<Option<SdfGrid>, ShellError> {
+    if gap <= 0.0 || gum.tris.is_empty() {
+        return Ok(None);
+    }
+    let mut relief = SdfGrid::from_mesh(
+        gum,
+        &SdfParams {
+            voxel_size: closed.voxel_size,
+            band: closed.band(),
+        },
+    )
+    .map_err(geom)?;
+    relief.offset(gap as f32).map_err(geom)?;
+    let mut out = closed.clone();
+    out.union(&relief).map_err(geom)?;
+    Ok(Some(out))
 }
 
 /// A rotation taking `axis` to `+Z`.
@@ -1349,6 +1433,7 @@ pub fn run(
     let mut report = Report {
         thickness_mm: design.thickness_mm,
         clearance_mm: design.clearance_mm,
+        gum_clearance_mm: design.gum_clearance_mm,
         ..Report::default()
     };
     let t = Instant::now();
@@ -1422,9 +1507,13 @@ pub fn run(
                 &own
             }
         };
-        // the untrimmed shell: the outer surface and the fitting surface
+        // the untrimmed shell: the outer surface and the fitting surface,
+        // over the gingiva the space asked for
+        let relieved = gum_relieved(closed, &gum_surface(input), design.gum_clearance_mm)?;
         let solid = finish(
-            shell_grid(closed, design)?.to_mesh().map_err(geom)?,
+            shell_grid(relieved.as_ref().unwrap_or(closed), design)?
+                .to_mesh()
+                .map_err(geom)?,
             2,
             tol,
             &from_arch,
@@ -1785,6 +1874,7 @@ mod tests {
         let design = Design {
             thickness_mm: 0.8,
             clearance_mm: 0.1,
+            gum_clearance_mm: 0.0,
         };
         let a = shell_grid(&wide, &design).unwrap().to_mesh().unwrap();
         let b = shell_grid(&g, &design).unwrap().to_mesh().unwrap();
@@ -1818,6 +1908,7 @@ mod tests {
         let design = Design {
             thickness_mm: 0.8,
             clearance_mm: 0.1,
+            gum_clearance_mm: 0.0,
         };
         let shell = shell_grid(&g, &design).unwrap().to_mesh().unwrap();
         let rep = shell.validate();
@@ -1941,6 +2032,7 @@ mod tests {
         let thin = Design {
             thickness_mm: 0.5,
             clearance_mm: 0.0,
+            gum_clearance_mm: 0.0,
         };
         assert_eq!(
             p.check(&thin),

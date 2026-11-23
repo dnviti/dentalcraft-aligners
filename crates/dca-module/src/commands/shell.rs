@@ -325,9 +325,15 @@ fn stage_report(out: &StageSolids, design: &Design) -> Result<Value, CommandErro
         let (lo, hi) = outer
             .iter()
             .fold((f64::INFINITY, 0.0f64), |(a, b), x| (a.min(*x), b.max(*x)));
+        // over the gingiva the outer side stands the space over it farther out
         rep.insert(
             "wall_mm".to_owned(),
-            json!({ "target": design.clearance_mm + design.thickness_mm, "min": lo, "max": hi }),
+            json!({
+                "target": design.clearance_mm + design.thickness_mm,
+                "over_gum": design.clearance_mm + design.gum_clearance_mm + design.thickness_mm,
+                "min": lo,
+                "max": hi,
+            }),
         );
     }
     rep.insert(
@@ -394,7 +400,11 @@ fn run_print(
     }
     out.insert(
         "design".to_owned(),
-        json!({ "thickness_mm": design.thickness_mm, "clearance_mm": design.clearance_mm }),
+        json!({
+            "thickness_mm": design.thickness_mm,
+            "clearance_mm": design.clearance_mm,
+            "gum_clearance_mm": design.gum_clearance_mm,
+        }),
     );
     // nothing is stored: the case is returned as it was
     Ok((state.clone(), Value::Object(out)))
@@ -577,7 +587,11 @@ mod tests {
             assert_eq!(st["model"]["watertight"], true, "{st}");
             assert_eq!(st["model"]["components"], 1, "{st}");
             let wall = &st["wall_mm"];
-            assert!((wall["max"].as_f64().unwrap() - 1.0).abs() < 0.1, "{wall}");
+            let over_gum = wall["over_gum"].as_f64().unwrap();
+            assert!(
+                (wall["max"].as_f64().unwrap() - over_gum).abs() < 0.1,
+                "{wall}"
+            );
             assert!((wall["min"].as_f64().unwrap() - 1.0).abs() < 0.1, "{wall}");
         }
         let (_, out) = run("aligners.production.blockout", &state, params).unwrap();

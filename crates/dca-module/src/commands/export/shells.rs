@@ -13,7 +13,8 @@
 //! * **aligner** `k`: the closed field of the same parts (the blockout of the
 //!   trim mode: 0.8 mm for the smooth border, `SMOOTH_BLOCKOUT_MM`; its band
 //!   reaching `clearance + wall`, [`shell::closed_grid_for`]), the shell
-//!   field between its levels at `clearance` and `clearance + wall`, the
+//!   field between its levels at `clearance` and `clearance + wall`, over
+//!   the gingiva `gum_clearance` farther out ([`shell::gum_relieved`]), the
 //!   ramps united with it on the field and the cavity of their tooth cut
 //!   again ([`dca_algo::ramps::apply_to_grid`]), the trim (cutter, reach of
 //!   the crowns, rounded rim: [`dca_algo::trim::run`]), and in it, after the
@@ -654,8 +655,16 @@ impl MeshProvider for ShellProvider<'_> {
             .map_err(|e| err("shell", &e))?;
             drop(parts);
             self.stop()?;
-            let mut field =
-                shell::shell_grid(&closed, &self.design).map_err(|e| err("shell", &e))?;
+            // over the gingiva the shell stands the space asked for farther out
+            let relieved = shell::gum_relieved(
+                &closed,
+                &shell::gum_surface(&input),
+                self.design.gum_clearance_mm,
+            )
+            .map_err(|e| err("shell", &e))?;
+            let mut field = shell::shell_grid(relieved.as_ref().unwrap_or(&closed), &self.design)
+                .map_err(|e| err("shell", &e))?;
+            drop(relieved);
             if let Some((moved, by_fdi)) = &ramps {
                 let notes = dca_algo::ramps::apply_to_grid(&mut field, moved, by_fdi)
                     .map_err(|e| err("ramps", &e))?;

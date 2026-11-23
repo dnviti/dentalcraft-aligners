@@ -112,8 +112,10 @@ pub(super) struct DemoArch {
     pub voxel: f32,
     /// The closed model the shell is laid on ...
     pub model: TriMesh,
-    /// ... with crevices narrower than twice this filled (mm).
+    /// ... with crevices narrower than twice this filled (mm) ...
     pub blockout: f64,
+    /// ... standing this far off the gingiva (mm; `shell::gum_relieved`).
+    pub gum_clearance: f64,
 }
 
 pub(super) fn demo_arch(arch: Arch, wall: f64, voxel: f32) -> DemoArch {
@@ -164,7 +166,7 @@ pub(super) fn demo_arch_without(
     );
     // the shell: a sheet of `wall` on the closed model (crevices under twice
     // the blockout filled)
-    let shell = model::untrimmed_shell(&m, f64::from(voxel), blockout, 0.0, wall).unwrap();
+    let shell = model::untrimmed_shell(&m, f64::from(voxel), blockout, 0.0, wall, None).unwrap();
     DemoArch {
         teeth_mesh: parts.teeth_mesh,
         gingiva: parts.gingiva,
@@ -175,6 +177,7 @@ pub(super) fn demo_arch_without(
         voxel,
         model: m,
         blockout,
+        gum_clearance: 0.0,
     }
 }
 
@@ -210,6 +213,7 @@ impl DemoArch {
             self.blockout,
             0.0,
             self.wall,
+            Some((&self.gingiva, self.gum_clearance)),
         )
         .map_err(|e| e.to_string())
     }
@@ -616,6 +620,125 @@ fn the_smooth_border_goes_round_every_papilla() {
     let (t, t0) = (thin(&out), thin(&plugin));
     eprintln!("thinnest wall {t:.3} mm (plugin {t0:.3})");
     assert!(t >= t0.min(0.5 * a.wall) - 0.05, "{t} < {t0}");
+}
+
+/// How near the trimmed aligner `mesh` comes to the gingiva of `a`: the
+/// smallest distance of its vertices from the surface of the gingiva, and
+/// the smallest distance of the interdental gingiva (its vertices within
+/// 1.5 mm, plan, of two crowns: the papillae) from the aligner.
+fn gum_distances(a: &DemoArch, mesh: &TriMesh) -> (f64, f64) {
+    let gum = Bvh::build(&a.gingiva).unwrap();
+    let all = gum
+        .closest_points(&mesh.positions, 5.0)
+        .iter()
+        .flatten()
+        .map(|h| f64::from(h.distance))
+        .fold(f64::INFINITY, f64::min);
+    let crowns: Vec<Vec<DVec2>> = a
+        .teeth
+        .iter()
+        .map(|t| t.crown.iter().map(|p| p.truncate()).collect())
+        .collect();
+    let interdental: Vec<Vec3> = a
+        .gingiva
+        .positions
+        .iter()
+        .copied()
+        .filter(|p| {
+            let q = p.as_dvec3().truncate();
+            crowns
+                .iter()
+                .filter(|c| c.iter().any(|x| x.distance(q) < 1.5))
+                .count()
+                >= 2
+        })
+        .collect();
+    assert!(
+        interdental.len() >= 20,
+        "{} interdental points",
+        interdental.len()
+    );
+    let aligner = Bvh::build(mesh).unwrap();
+    let papillae = aligner
+        .closest_points(&interdental, 5.0)
+        .iter()
+        .flatten()
+        .map(|h| f64::from(h.distance))
+        .fold(f64::INFINITY, f64::min);
+    (all, papillae)
+}
+
+#[test]
+fn the_aligner_stands_off_the_gingiva() {
+    // the user's rule: where the aligner covers the gingiva it does not press
+    // on it, the papillae between the teeth too: its fitting surface stands
+    // gum_clearance_mm off the gingiva, with a wall as thick (the border 1 mm
+    // on the gingiva, so that the aligner covers a band of it)
+    let mut a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let tol = 0.5 * f64::from(a.voxel);
+    let p = Params {
+        margin_gap_mm: -1.0,
+        papilla_relief_mm: 0.0,
+        ..Params::default()
+    };
+    // the plugin's shell lies on the gingiva
+    let plugin = run(&a.input(), &p).unwrap();
+    let (all, papillae) = gum_distances(&a, &plugin.mesh);
+    assert!(all < 0.1 && papillae < 0.1, "{all} {papillae}");
+    // 0.3 mm off it, as the case settings ask by default
+    let gap = dca_model::Settings::default().gum_clearance_mm;
+    assert_eq!(gap, 0.3);
+    a.gum_clearance = gap;
+    a.shell = a.shell_with(&[]).unwrap();
+    let out = run(&a.input(), &p).unwrap();
+    let (all, papillae) = gum_distances(&a, &out.mesh);
+    eprintln!(
+        "off the gingiva: {all:.3} mm, the papillae {papillae:.3} mm; genus {} plugs {} slots {} \
+         (lying on it: {} {} {})",
+        out.genus,
+        out.plugs,
+        out.slots.len(),
+        plugin.genus,
+        plugin.plugs,
+        plugin.slots.len()
+    );
+    assert!(all >= gap - tol, "the aligner {all} mm from the gingiva");
+    assert!(
+        papillae >= gap - tol,
+        "the aligner {papillae} mm from a papilla"
+    );
+    // closed and manifold, no hole more than lying on the gingiva (a border
+    // 1 mm on the flat gum tube of the demo leaves holes of its own)
+    check_solid(&out);
+    assert!(
+        out.genus <= plugin.genus,
+        "{} > {}",
+        out.genus,
+        plugin.genus
+    );
+    assert!(out.plugs <= plugin.plugs && out.slots.len() <= plugin.slots.len());
+    // the wall keeps its thickness, as the print check measures it
+    let options = crate::export::printcheck::CheckOptions {
+        min_thickness_mm: Some(0.5 * a.wall),
+        build_plate_mm: None,
+        ..crate::export::printcheck::CheckOptions::default()
+    };
+    let thin = |o: &Output| {
+        crate::export::printcheck::check(&o.mesh, &options)
+            .min_thickness_mm
+            .unwrap()
+    };
+    let (t, t0) = (thin(&out), thin(&plugin));
+    eprintln!("thinnest wall {t:.3} mm (lying on the gingiva {t0:.3})");
+    assert!(t >= t0.min(0.5 * a.wall) - 0.05, "{t} < {t0}");
+    // with the default border (round the papillae) the aligner is one closed
+    // surface without a hole, as it is lying on the gingiva
+    // (`the_smooth_border_goes_round_every_papilla`)
+    raise_papillae(&mut a, 3.0);
+    let out = run(&a.input(), &Params::default()).unwrap();
+    check_solid(&out);
+    assert_eq!(out.genus, 0);
+    assert_eq!((out.plugs, out.slots.len()), (0, 0));
 }
 
 #[test]

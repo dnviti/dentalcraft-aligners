@@ -95,6 +95,9 @@ pub(crate) struct ShellPatch {
     shell_thickness_mm: Option<f64>,
     /// Inner clearance between tooth and shell (0 to 0.3 mm).
     clearance_mm: Option<f64>,
+    /// Space between the shell and the gingiva it covers, the papillae too
+    /// (0 to 1 mm; 0: the shell lies on the gingiva).
+    gum_clearance_mm: Option<f64>,
 }
 
 /// The identification text (the plugin's `stamp_*`).
