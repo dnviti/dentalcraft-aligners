@@ -1208,6 +1208,139 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A real export of the demo case with the stamp on and two passive
+    /// aligners at least: the arch that ends first repeats the shell of its
+    /// last stage until the other one ends, each passive file stamped on it
+    /// with its own number, the `P` and its date, as the plugin's
+    /// `case_export.passive_files` makes them ("never a copy of the last
+    /// one's"). One file per passive aligner, each different from the others
+    /// and from the last active one, closed and manifold, no stamp left out,
+    /// and every hash of the manifest verifies.
+    #[test]
+    #[ignore = "two demo arches, the pipeline and the shells of every stage: run with --release --ignored"]
+    fn every_passive_aligner_is_a_closed_file_with_its_own_stamp() {
+        let s = super::super::occlusion::tests::two_demo_arches();
+        let t = std::time::Instant::now();
+        let (mut s, _) = exec("aligners.auto", &s, json!({ "start_date": "2026-11-02" })).unwrap();
+        eprintln!("pipeline: {:.1} s", t.elapsed().as_secs_f64());
+        let count = |s: &CaseState, role: ScanRole| {
+            aligners_data(s).unwrap().staging_results[&role].aligners
+        };
+        // the upper arch slowed tooth by tooth until it ends two aligners
+        // after the lower one at least: the lower arch has passive aligners
+        let upper: Vec<u8> = aligners_data(&s)
+            .unwrap()
+            .tooth_frames
+            .keys()
+            .filter(|f| Arch::of(**f) == Arch::Upper)
+            .map(|f| f.get())
+            .collect();
+        for f in upper {
+            if count(&s, ScanRole::Upper) >= count(&s, ScanRole::Lower) + 2 {
+                break;
+            }
+            s = exec(
+                "aligners.planning.tooth-speed",
+                &s,
+                json!({ "fdi": f, "speed": 0.5 }),
+            )
+            .unwrap()
+            .0;
+        }
+        let (nu, nl) = (count(&s, ScanRole::Upper), count(&s, ScanRole::Lower));
+        eprintln!("aligners: {nu} upper, {nl} lower");
+        assert!(nu >= nl + 2, "{nu} upper and {nl} lower aligners");
+
+        let dir = temp("passive");
+        let t = std::time::Instant::now();
+        let (_, out) = exec(
+            "aligners.output.report",
+            &s,
+            json!({
+                "dir": dir.display().to_string(),
+                "workflow": "direct",
+                "shells": true,
+                "stamp": true,
+                "stamp_code": "PAS-1",
+                "quality": "draft",
+                "generated": "2026-11-02",
+                "embed_renders": false,
+            }),
+        )
+        .unwrap();
+        eprintln!("export: {:.1} s", t.elapsed().as_secs_f64());
+        eprintln!("notes: {:#}", out["notes"]);
+        assert_eq!(out["meshes"], "shells");
+
+        // one file per passive aligner, the lower ones after the last active
+        let mut passive: Vec<&str> = out["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .filter(|n| n.ends_with("_passivo.stl"))
+            .collect();
+        passive.sort_unstable();
+        let want: Vec<String> = (nl + 1..=nu)
+            .map(|k| format!("stampa_resina/INF_allineatore_{k:02}_passivo.stl"))
+            .collect();
+        assert_eq!(passive, want);
+        let last =
+            std::fs::read(dir.join(format!("stampa_resina/INF_allineatore_{nl:02}.stl"))).unwrap();
+        let files: Vec<Vec<u8>> = want
+            .iter()
+            .map(|n| std::fs::read(dir.join(n)).unwrap())
+            .collect();
+        let options = CheckOptions {
+            self_intersections: false,
+            min_thickness_mm: None,
+            build_plate_mm: None,
+            ..CheckOptions::default()
+        };
+        for (i, (name, bytes)) in want.iter().zip(&files).enumerate() {
+            // its own stamp: not a copy of the last active aligner or of another passive one
+            assert_ne!(bytes, &last, "{name} is the last active aligner");
+            for (other, b) in want.iter().zip(&files).skip(i + 1) {
+                assert_ne!(bytes, b, "{name} and {other} are the same file");
+            }
+            // a closed solid: watertight, manifold, oriented, in one piece
+            let mesh = dc_mesh::io::read(dir.join(name)).unwrap();
+            let c = printcheck::check(&mesh, &options);
+            assert_eq!(
+                (
+                    c.boundary_edges,
+                    c.nonmanifold_edges,
+                    c.flipped_edges,
+                    c.pieces
+                ),
+                (0, 0, 0, 1),
+                "{name}"
+            );
+        }
+        // no passive aligner lost its stamp (a note would name its file)
+        let notes = out["notes"].as_array().unwrap();
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.as_str().is_some_and(|n| n.contains("_passivo"))),
+            "{notes:#?}"
+        );
+
+        // every hash of the manifest verifies
+        let (_, v) = exec(
+            "aligners.output.manifest",
+            &s,
+            json!({ "dir": dir.display().to_string() }),
+        )
+        .unwrap();
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(
+            v["verification"]["verified"].as_u64().unwrap() as usize,
+            out["files"].as_array().unwrap().len()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The golden scans of both arches as the app imports them (STL files in
     /// a new case), through the automatic pipeline up to the bite.
     pub(crate) fn golden_pipeline() -> CaseState {
