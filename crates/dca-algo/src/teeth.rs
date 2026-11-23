@@ -17,6 +17,22 @@
 //! * Mesio-distal axis: the line through the two interproximal contacts, the
 //!   incisal edge for incisors, otherwise the mirror-symmetry plane of the
 //!   crown, otherwise the arch tangent.
+//!
+//!   Departure from the plugin (2026-11-23): its mirror-symmetry search
+//!   (`symmetry_md_axis`) tests the mirror on every k-th point of the crown,
+//!   takes the best angle of a coarse grid and keeps the arch direction when
+//!   the best plane improves it by less than 5 %. One point less renews
+//!   every sample, and on a crown whose profile of symmetry is nearly flat
+//!   the best angle and the 5 % test jump with it: 9 vertices relabelled by
+//!   the segmentation turned the axis of a real last molar by 6.7 degrees,
+//!   and with it the plan of the whole arch. [`symmetry_md_axis`] is
+//!   continuous in its data instead: the points are chosen by where they
+//!   lie, the angle is the soft minimum of the basin of the best plane, the
+//!   turn fades out where another basin is as good (the data cannot tell
+//!   them apart) and grows gradually with the improvement over the arch
+//!   direction. Against the true rotations of the demo generator it is as
+//!   accurate as the plugin's search (`tests/teeth_oracle.rs` lists the
+//!   teeth that changed).
 //! * CEJ = cusp tip − anatomical crown length; apex = CEJ − root length
 //!   (Wheeler / Nelson 2019). Alveolar crest = gingival margin − 2.73 mm
 //!   (Gargiulo et al. 1961). Centre of resistance at 42% of the alveolar
@@ -419,12 +435,43 @@ fn wall_axis_with(
     normalize(ax)
 }
 
+/// Side (mm) of the cells of the case that choose the points of the mirror
+/// test of [`symmetry_md_axis`] ([`stable_sample`]).
+const SYM_CELL_MM: f64 = 0.2;
+/// Angle step of the mirror profile (degrees).
+const SYM_STEP_DEG: f64 = 2.0;
+/// Offset step of the planes tried at each angle (mm), four steps each way:
+/// the ±0.8 mm the plugin's search reaches.
+const SYM_OFFSET_MM: f64 = 0.2;
+/// Softness of the minimum of the mirror profile, as a fraction of the best
+/// score: angles scoring within about this much of the best weigh in, and a
+/// rival basin this much worse no longer fades the turn.
+const SYM_SOFT: f64 = 0.02;
+/// Height of the barrier (in softnesses) that separates two basins of the
+/// mirror profile; the weights of the soft minimum fall to zero at it.
+const SYM_BARRIER: f64 = 3.0;
+
 /// Mesio-distal axis as the normal of the crown's best mirror-symmetry plane
 /// that contains the long axis (crowns are approximately symmetric about
 /// their bucco-lingual plane). Searches `±max_angle` degrees around `guess`
 /// with a small penalty per degree of deviation (prior: tooth aligned with
-/// the arch). If the best plane improves the guess by less than
-/// `keep_ratio`, the guess is kept. Returns the axis and the score (mm).
+/// the arch). Returns the axis and the score of the best plane (mm).
+///
+/// Continuous in its data, unlike the plugin (see the module documentation):
+/// * the about `n_samples` mirrored points are those of [`stable_sample`];
+/// * the score of an angle (every [`SYM_STEP_DEG`] degrees) is that of its
+///   best plane: the least over the offsets, refined at the vertex of the
+///   parabola through the least and its neighbours;
+/// * the angle is the soft minimum of the basin of the best angle (the
+///   angles around it scoring within [`SYM_BARRIER`] softnesses of it),
+///   with weights `exp(-(score - best) / soft)` that fall to zero at the
+///   barrier;
+/// * where another basin scores within one softness of the best the data
+///   cannot tell the two apart: the turn fades to none as they tie, so the
+///   axis never jumps from one to the other;
+/// * where the plugin keeps the guess when the plane improves it by less
+///   than `keep_ratio`, the turn grows from none at half that improvement to
+///   all of it at one and a half: a flat profile keeps the arch direction.
 ///
 /// The nearest-point distances come from a single-precision k-d tree, like
 /// the plugin's `mathutils.kdtree`.
@@ -444,10 +491,9 @@ pub fn symmetry_md_axis(
     let Ok(kd) = KnnIndex::build(&pts) else {
         return (guess, f64::INFINITY);
     };
-    let s = subsample(p, n_samples);
+    let s = stable_sample(p, n_samples);
     let c = mean(p);
     let b = normalize(e_ax.cross(guess));
-    let lim = max_angle.to_radians();
 
     let raw = |theta: f64, off: f64| -> f64 {
         let n = theta.cos() * guess + theta.sin() * b;
@@ -461,50 +507,105 @@ pub fn symmetry_md_axis(
         }
         tot / s.len() as f64
     };
-    let score = |theta: f64, off: f64| -> f64 {
-        if theta.abs() > lim {
-            return f64::INFINITY;
+    // the score of the best plane at an angle (degrees)
+    let at = |deg: f64| -> f64 {
+        let th = deg.to_radians();
+        let f: Vec<f64> = (-4..=4)
+            .map(|j| raw(th, SYM_OFFSET_MM * f64::from(j)))
+            .collect();
+        let j = (0..f.len()).fold(0, |m, i| if f[i] < f[m] { i } else { m });
+        if j == 0 || j + 1 == f.len() {
+            return f[j];
         }
-        raw(theta, off) + penalty * theta.to_degrees().abs()
+        let curv = f[j + 1] - 2.0 * f[j] + f[j - 1];
+        if curv <= 1e-12 {
+            return f[j];
+        }
+        let vertex = SYM_OFFSET_MM * ((j as f64 - 4.0) - (f[j + 1] - f[j - 1]) / (2.0 * curv));
+        f[j].min(raw(th, vertex))
     };
+    let steps = (max_angle / SYM_STEP_DEG).floor() as i32;
+    let profile: Vec<(f64, f64)> = (-steps..=steps)
+        .map(|k| {
+            let deg = f64::from(k) * SYM_STEP_DEG;
+            (deg, at(deg) + penalty * deg.abs())
+        })
+        .collect();
+    let kb = (0..profile.len()).fold(0, |m, i| if profile[i].1 < profile[m].1 { i } else { m });
+    let best = profile[kb].1;
+    if !best.is_finite() {
+        return (guess, f64::INFINITY);
+    }
+    let soft = (SYM_SOFT * best).max(1e-9);
+    let barrier = SYM_BARRIER * soft;
+    // the basin of the best angle and its soft minimum
+    let (mut lo, mut hi) = (kb, kb);
+    while lo > 0 && profile[lo - 1].1 < best + barrier {
+        lo -= 1;
+    }
+    while hi + 1 < profile.len() && profile[hi + 1].1 < best + barrier {
+        hi += 1;
+    }
+    let floor = (-SYM_BARRIER).exp();
+    let (mut sw, mut sd) = (0.0, 0.0);
+    for &(deg, sc) in &profile[lo..=hi] {
+        let w = ((-(sc - best) / soft).exp() - floor).max(0.0);
+        sw += w;
+        sd += w * deg;
+    }
+    let angle = sd / sw;
+    // another basin about as good fades the turn
+    let rival = profile[..lo]
+        .iter()
+        .chain(&profile[hi + 1..])
+        .map(|&(_, sc)| sc - best)
+        .fold(soft, f64::min);
+    let alone = rival / soft;
+    // the plugin's keep rule, made gradual
+    let turn = if keep_ratio > 0.0 {
+        let base = at(0.0);
+        let gain = if base > 0.0 {
+            1.0 - at(angle) / base
+        } else {
+            0.0
+        };
+        ((gain - 0.5 * keep_ratio) / keep_ratio).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let th = (turn * alone * angle).to_radians();
+    (normalize(th.cos() * guess + th.sin() * b), best)
+}
 
-    let mut best = (f64::INFINITY, 0.0, 0.0);
-    // numpy.arange(-max_angle, max_angle + 0.1, 3.0)
-    let count = ((2.0 * max_angle + 0.1) / 3.0).ceil() as usize;
-    for k in 0..count {
-        let th = (-max_angle + 3.0 * k as f64).to_radians();
-        for off in [-0.4, 0.0, 0.4] {
-            let sc = score(th, off);
-            if sc < best.0 {
-                best = (sc, th, off);
-            }
-        }
+/// About `n` of the points `p`, chosen by where they lie: a point is taken
+/// when the hash of its cell of [`SYM_CELL_MM`] (case coordinates) falls
+/// under `n / len`. A point more or less changes the choice only in its own
+/// cell, where taking every k-th point of the list ([`subsample`]) renews
+/// them all. All of them when there are at most `n`.
+pub fn stable_sample(p: &[DVec3], n: usize) -> Vec<DVec3> {
+    if p.len() <= n {
+        return p.to_vec();
     }
-    let (_, mut th0, mut o0) = best;
-    for (step_t, step_o) in [(1.0f64.to_radians(), 0.1), (0.3f64.to_radians(), 0.03)] {
-        for i in -3..=3 {
-            let th = th0 + step_t * f64::from(i);
-            for j in -3..=3 {
-                let off = o0 + step_o * f64::from(j);
-                let sc = score(th, off);
-                if sc < best.0 {
-                    best = (sc, th, off);
-                }
-            }
-        }
-        (_, th0, o0) = best;
+    let frac = n as f64 / p.len() as f64;
+    p.iter()
+        .copied()
+        .filter(|q| {
+            let cell = (*q / SYM_CELL_MM).floor();
+            unit_hash([cell.x as i64, cell.y as i64, cell.z as i64]) < frac
+        })
+        .collect()
+}
+
+/// A number in `[0, 1)` from a cell (splitmix64 of its indices).
+fn unit_hash(cell: [i64; 3]) -> f64 {
+    let mut h: u64 = 0;
+    for k in cell {
+        let mut z = (h ^ k as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        h = z ^ (z >> 31);
     }
-    if keep_ratio > 0.0 {
-        let base = [-0.4, -0.2, 0.0, 0.2, 0.4]
-            .into_iter()
-            .map(|o| raw(0.0, o))
-            .fold(f64::INFINITY, f64::min);
-        if raw(th0, o0) > (1.0 - keep_ratio) * base {
-            return (guess, base);
-        }
-    }
-    let n = th0.cos() * guess + th0.sin() * b;
-    (normalize(n), best.0)
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Vertices on the border between two labels: for each `(own, other)` pair
@@ -1262,5 +1363,101 @@ mod tests {
         assert_eq!(sign_or_one(0.0), 1.0);
         assert_eq!(sign_or_one(-0.0), 1.0);
         assert_eq!(sign_or_one(-3.0), -1.0);
+    }
+
+    /// The upper part of a crown of nearly even mirror symmetry: an elliptical
+    /// dome (5.8 x 5.0 x 3.0 mm) turned `turn_deg` from `+X`, with seeded waves
+    /// of relative height `waves` around it, listed ring by ring as a scan
+    /// lists its vertices.
+    fn uneven_dome(seed: u64, waves: f64, turn_deg: f64) -> Vec<DVec3> {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut draw = || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            (x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let wave: Vec<(f64, f64, f64)> = (0..6)
+            .map(|k| {
+                let phase = draw() * std::f64::consts::TAU;
+                (f64::from(k + 2), phase, waves * (0.5 + draw()))
+            })
+            .collect();
+        let (sin, cos) = turn_deg.to_radians().sin_cos();
+        let mut out = Vec::new();
+        for iv in 0..40 {
+            let v = (f64::from(iv) + 0.5) / 40.0 * std::f64::consts::FRAC_PI_2;
+            let nu = (180.0 * v.cos()).max(12.0) as usize;
+            for iu in 0..nu {
+                let u = (iu as f64 + 0.5 * f64::from(iv % 2)) / nu as f64 * std::f64::consts::TAU;
+                let r = 1.0
+                    + v.cos()
+                        * wave
+                            .iter()
+                            .map(|(m, ph, a)| a * (m * u + ph).sin())
+                            .sum::<f64>();
+                let (px, py) = (5.8 * r * v.cos() * u.cos(), 5.0 * r * v.cos() * u.sin());
+                out.push(DVec3::new(
+                    px * cos - py * sin,
+                    px * sin + py * cos,
+                    3.0 * v.sin(),
+                ));
+            }
+        }
+        out
+    }
+
+    fn mirror_axis(p: &[DVec3]) -> DVec3 {
+        symmetry_md_axis(p, DVec3::Z, DVec3::X, 30.0, 250, 0.001, 0.05).0
+    }
+
+    #[test]
+    fn the_mirror_axis_holds_when_a_few_points_go() {
+        // crowns of nearly even symmetry where the plugin's search (every k-th point, the best
+        // angle of a grid, the arch direction kept under 5 % of improvement) turned the axis by
+        // 21 and 18.3 degrees when 5 of about 4600 points went
+        for (seed, waves) in [(3, 0.03), (5, 0.05)] {
+            let p = uneven_dome(seed, waves, 7.0);
+            let whole = mirror_axis(&p);
+            for k in 1..=4 {
+                let mut q = p.clone();
+                let at = (k * 997) % (q.len() - 10);
+                q.drain(at..at + 5);
+                let turned = angle_deg(whole.dot(mirror_axis(&q)));
+                assert!(
+                    turned < 1.0,
+                    "seed {seed}, 5 points less at {at}: {turned} degrees"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_mirror_axis_follows_a_clear_plane() {
+        // a crown symmetric about +X keeps it; one turned well away from the guess is followed
+        let a = mirror_axis(&uneven_dome(1, 0.0, 0.0));
+        assert!(angle_deg(a.dot(DVec3::X)) < 0.5, "{a}");
+        let a = mirror_axis(&uneven_dome(1, 0.0, 12.0));
+        assert!((a.y.atan2(a.x).to_degrees() - 12.0).abs() < 1.0, "{a}");
+        // few points: the guess
+        assert_eq!(mirror_axis(&[DVec3::Y; 20]), DVec3::X);
+    }
+
+    #[test]
+    fn the_stable_sample_changes_only_where_points_go() {
+        let p = uneven_dome(3, 0.03, 7.0);
+        let s = stable_sample(&p, 250);
+        assert!((200..300).contains(&s.len()), "{}", s.len());
+        // 5 points less: the sample keeps all its other points
+        let mut q = p.clone();
+        q.drain(997..1002);
+        let t = stable_sample(&q, 250);
+        let gone: Vec<&DVec3> = s.iter().filter(|x| !t.contains(x)).collect();
+        assert!(
+            gone.len() <= 5 && t.iter().all(|x| s.contains(x)),
+            "{gone:?}"
+        );
+        // few points: all of them
+        assert_eq!(stable_sample(&p[..100], 250), p[..100].to_vec());
     }
 }
