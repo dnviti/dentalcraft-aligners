@@ -20,8 +20,9 @@
 //!   the crowns, rounded rim: [`dca_algo::trim::run`]), and in it, after the
 //!   rim is rounded, the occlusal thickness and the grinding of the bite with
 //!   the aligners worn cut from the field, its crease blended
-//!   ([`occlusal::shape_cutter`], when the case asks for it and both arches
-//!   are there), the reduction within the mesh tolerance
+//!   ([`occlusal::shape_cutter`] on the closed field with the gum relief, the
+//!   one the shell is the offset of, when the case asks for it and both
+//!   arches are there), the reduction within the mesh tolerance
 //!   ([`shell::reduce_to`]), then the stamp engraved inside the wall.
 //!
 //! The reduction and the stamp are checked as the print check would, in
@@ -671,16 +672,11 @@ impl MeshProvider for ShellProvider<'_> {
             .map_err(|e| err("shell", &e))?;
             drop(parts);
             self.stop()?;
-            // over the gingiva the shell stands the space asked for farther out
-            let relieved = shell::gum_relieved(
-                &closed,
-                &shell::gum_surface(&input),
-                self.design.gum_clearance_mm,
-            )
-            .map_err(|e| err("shell", &e))?;
-            let mut field = shell::shell_grid(relieved.as_ref().unwrap_or(&closed), &self.design)
-                .map_err(|e| err("shell", &e))?;
-            drop(relieved);
+            // over the gingiva the shell stands the space asked for farther
+            // out; the occlusal shaping measures from the field with it
+            let (closed, mut field) =
+                shell::relieved_shell(closed, &shell::gum_surface(&input), &self.design)
+                    .map_err(|e| err("shell", &e))?;
             if let Some((moved, by_fdi)) = &ramps {
                 let notes = dca_algo::ramps::apply_to_grid(&mut field, moved, by_fdi)
                     .map_err(|e| err("ramps", &e))?;

@@ -865,6 +865,30 @@ pub fn gum_relieved(
     Ok(Some(out))
 }
 
+/// The closed field a shell is the offset of, `closed` with the region
+/// within [`Design::gum_clearance_mm`] of the gingiva `gum` added
+/// ([`gum_relieved`]; `closed` itself without a gap), and the untrimmed shell
+/// field read from it ([`shell_grid`]). Whatever measures from the fitting
+/// surface of the shell takes the first one (the occlusal shaping,
+/// [`crate::aligner_bite::occlusal::shape_cutter`]): its level at the
+/// clearance is that surface, over the gingiva too. From `closed`, the
+/// allowed top of the shaping lay the gap too low over the gingiva: it
+/// shaved the wall there into a thin lip that the rounded rim broke into
+/// hooks a printer cannot support (behind the last molars of a real case).
+///
+/// # Errors
+/// [`ShellError::Geometry`] when a field operation fails;
+/// [`ShellError::Invalid`] for a wall thinner than two voxels.
+pub fn relieved_shell(
+    closed: SdfGrid,
+    gum: &TriMesh,
+    design: &Design,
+) -> Result<(SdfGrid, SdfGrid), ShellError> {
+    let closed = gum_relieved(&closed, gum, design.gum_clearance_mm)?.unwrap_or(closed);
+    let shell = shell_grid(&closed, design)?;
+    Ok((closed, shell))
+}
+
 /// A rotation taking `axis` to `+Z`.
 fn rotation_to_z(axis: DVec3) -> DMat3 {
     let a = axis.normalize();
@@ -1954,6 +1978,77 @@ mod tests {
         }
         assert!(inner > 0 && outer > 0);
         assert!(at_clearance * 10 > inner * 8, "{at_clearance} of {inner}");
+    }
+
+    /// The field handed on with the shell (the occlusal shaping measures from
+    /// its level at the clearance) is the one the shell is the offset of, the
+    /// gum relief in it: on the demo arch every vertex of the fitting surface,
+    /// over the gingiva too, lies on its level at the clearance. Handed on
+    /// without the relief, the field put the fitting surface over the gingiva
+    /// the gum clearance too low, and the shaping shaved the wall there (behind
+    /// the last molars of a real case, into a lip the rim broke into hooks).
+    #[test]
+    fn the_shell_is_handed_on_with_the_field_it_is_the_offset_of() {
+        let d = crate::demo::run(&crate::demo::Params {
+            arch: crate::anatomy::Arch::Upper,
+            ..crate::demo::Params::default()
+        });
+        let labels = d.mesh.vertex_labels.as_ref().unwrap();
+        let gum = TriMesh::new(
+            d.mesh.positions.clone(),
+            d.mesh
+                .tris
+                .iter()
+                .filter(|t| t.iter().all(|&v| labels[v as usize] == 0))
+                .copied()
+                .collect(),
+        );
+        let voxel = 0.25;
+        let design = Design {
+            thickness_mm: 0.6,
+            clearance_mm: 0.1,
+            gum_clearance_mm: 0.3,
+        };
+        let (cl, gap) = (design.clearance_mm as f32, design.gum_clearance_mm as f32);
+        let reach = design.clearance_mm + design.thickness_mm;
+        let closed = closed_grid_for(&d.mesh, voxel, BLOCKOUT_MM, reach).unwrap();
+        let (fitting, shell) = relieved_shell(closed.clone(), &gum, &design).unwrap();
+        let mesh = shell.to_mesh().unwrap();
+        let normals = mesh.compute_vertex_normals();
+        let (mut on_teeth, mut on_gum, mut off) = (0, 0, Vec::new());
+        for (p, n) in mesh.positions.iter().zip(&normals) {
+            // the fitting side faces the model, at most the clearance and the
+            // gum relief off it (the outer side: at least the wall more)
+            let bare = closed.sample(*p);
+            let facing = n.dot(closed.gradient(*p).normalize_or_zero()) < -0.5;
+            if !facing || bare > cl + gap + 0.25 * design.thickness_mm as f32 {
+                continue;
+            }
+            if bare > cl + 0.5 * gap {
+                on_gum += 1;
+            } else {
+                on_teeth += 1;
+            }
+            let v = fitting.sample(*p);
+            if (v - cl).abs() > 0.25 * voxel as f32 {
+                off.push((*p, bare, v));
+            }
+        }
+        eprintln!("fitting vertices: {on_teeth} on the teeth, {on_gum} over the gingiva");
+        assert!(on_teeth > 1000 && on_gum > 1000, "{on_teeth} {on_gum}");
+        assert!(
+            off.is_empty(),
+            "{} fitting vertices off the level {cl} of the field handed on, e.g. {:?}",
+            off.len(),
+            &off[..off.len().min(3)]
+        );
+        // without a gap the field is the closed one
+        let flat = Design {
+            gum_clearance_mm: 0.0,
+            ..design
+        };
+        let (same, _) = relieved_shell(closed.clone(), &gum, &flat).unwrap();
+        assert_eq!(same.to_mesh().unwrap(), closed.to_mesh().unwrap());
     }
 
     #[test]
