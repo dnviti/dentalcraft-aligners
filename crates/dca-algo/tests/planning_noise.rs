@@ -20,16 +20,20 @@
 //! * 5 to 10 vertices anywhere on the borders of 17 and 16 given the label
 //!   across the border.
 //!
-//! A noisy plan jumps when the moving teeth differ, the IPR of a contact
-//! differs (after the rounding to 0.05 mm), the number of aligners differs by
-//! more than one, or more collisions are left. With the plugin's mirror search
-//! (before 21db055) 46 of the 64 noisy plans jumped, 17 among the moving teeth
-//! in 40 of them; 18 with the new search, [`JUMPS_NOW`] once the collision
-//! check uses every crown point. The goal is none: what still jumps
-//! comes from the thresholds downstream of the axis (the cusps of the molar
-//! taken as single highest points, the tolerances of the evaluation, the
-//! rounding of the IPR, the anti-collision delays), and
-//! [`a_last_molar_moved_by_noise_never_jumps_the_plan`] holds the goal.
+//! A noisy plan jumps, on the criterion the user chose (2026-11-23), when
+//! the moving teeth differ, the IPR of a contact differs by more than one
+//! 0.05 mm step, the number of aligners differs by more than one, or a
+//! collision is left between a pair that had none. With the plugin's mirror
+//! search (before 21db055) 46 of the 64 noisy plans jumped on the strict
+//! criterion (any IPR difference, more collisions), 17 among the moving
+//! teeth in 40 of them; 18 with the new search, 16 once the collision check
+//! uses every crown point, [`JUMPS_NOW`] once a tooth is derotated only by
+//! the excess over its tolerance (eddf352). 11 of those are the molar 17
+//! in or out of the moving teeth: its two cusps are single highest points,
+//! which swap under the noise, so its measured rotation crosses the 5
+//! degree tolerance (and the 0.5 degree smallest turn beyond it). The goal
+//! is none even on the strict criterion, and
+//! [`a_last_molar_moved_by_noise_never_jumps_the_plan`] holds it.
 
 mod golden_case;
 
@@ -45,9 +49,10 @@ use dca_model::{SetupScope, SetupSettings};
 use glam::DVec3;
 use golden_case::Case;
 
-/// Noisy plans that still jump (of 64; 46 with the plugin's mirror search, 18
-/// with its sample of the crowns in the collision check).
-const JUMPS_NOW: usize = 16;
+/// Noisy plans that still jump (of 64; on the strict criterion 46 with the
+/// plugin's mirror search, 18 with its sample of the crowns in the collision
+/// check, 16 with the plugin's derotation).
+const JUMPS_NOW: usize = 15;
 /// Seeds of each family of noise.
 const SEEDS: u64 = 32;
 
@@ -61,7 +66,7 @@ struct Plan {
     moved: BTreeSet<Fdi>,
     ipr: BTreeMap<(Fdi, Fdi), f64>,
     aligners: u32,
-    unresolved: usize,
+    unresolved: BTreeSet<(Fdi, Fdi)>,
 }
 
 /// Teeth, final position (every tooth to align) and aligners of the arch
@@ -144,7 +149,7 @@ fn plan(case: &Case, labels: &[u16]) -> Plan {
         moved: r.moved.iter().copied().collect(),
         ipr: r.ipr.clone(),
         aligners: staged.n_stages,
-        unresolved: staged.unresolved.len(),
+        unresolved: staged.unresolved.iter().map(|u| (u.a, u.b)).collect(),
     }
 }
 
@@ -245,8 +250,12 @@ fn local(case: &Case, labels: &[u16], m: Fdi, nb: Fdi, seed: u64) -> Vec<u16> {
     out
 }
 
-/// How the noisy plan `b` jumps from the plan `a` (empty: it holds).
-fn jumps(a: &Plan, b: &Plan) -> Vec<String> {
+/// How the noisy plan `b` jumps from the plan `a` (empty: it holds). The
+/// criterion the user chose (2026-11-23): the same moving teeth, the IPR
+/// of every contact within one 0.05 mm step, the aligners within one, and
+/// no collision left between a pair that had none; `strict`: the IPR of
+/// every contact the same and no more collisions left.
+fn jumps(a: &Plan, b: &Plan, strict: bool) -> Vec<String> {
     let mut out = Vec::new();
     if a.moved != b.moved {
         let list = |s: BTreeSet<&Fdi>| {
@@ -259,22 +268,28 @@ fn jumps(a: &Plan, b: &Plan) -> Vec<String> {
         let new = list(b.moved.difference(&a.moved).collect());
         out.push(format!("moving teeth -[{gone}] +[{new}]"));
     }
+    let step = if strict { 1e-9 } else { 0.05 + 1e-9 };
     let contacts: BTreeSet<&(Fdi, Fdi)> = a.ipr.keys().chain(b.ipr.keys()).collect();
     for c in contacts {
         let (x, y) = (
             a.ipr.get(c).copied().unwrap_or(0.0),
             b.ipr.get(c).copied().unwrap_or(0.0),
         );
-        if (x - y).abs() > 1e-9 {
+        if (x - y).abs() > step {
             out.push(format!("IPR {}|{} {x:.2} -> {y:.2} mm", c.0, c.1));
         }
     }
     if a.aligners.abs_diff(b.aligners) > 1 {
         out.push(format!("aligners {} -> {}", a.aligners, b.aligners));
     }
-    if b.unresolved > a.unresolved {
+    let more = if strict {
+        b.unresolved.len() > a.unresolved.len()
+    } else {
+        !b.unresolved.is_subset(&a.unresolved)
+    };
+    if more {
         out.push(format!(
-            "collisions left {} -> {}",
+            "collisions left {:?} -> {:?}",
             a.unresolved, b.unresolved
         ));
     }
@@ -282,7 +297,7 @@ fn jumps(a: &Plan, b: &Plan) -> Vec<String> {
 }
 
 /// The jumps of the 64 noisy plans, one line each.
-fn noisy_jumps() -> Vec<String> {
+fn noisy_jumps(strict: bool) -> Vec<String> {
     let case = Case::load(CASE);
     let (m, nb) = (fdi(17), fdi(16));
     let base = plan(&case, &case.labels);
@@ -298,7 +313,7 @@ fn noisy_jumps() -> Vec<String> {
                 .filter(|(a, b)| a != b)
                 .count();
             assert!((5..=10).contains(&flipped), "{family} {seed}: {flipped}");
-            let j = jumps(&base, &plan(&case, &labels));
+            let j = jumps(&base, &plan(&case, &labels), strict);
             if !j.is_empty() {
                 out.push(format!(
                     "{family}, seed {seed} ({flipped} vertices): {}",
@@ -316,7 +331,7 @@ fn noisy_jumps() -> Vec<String> {
     ignore = "slow without optimisations: cargo test --release"
 )]
 fn a_last_molar_moved_by_noise_jumps_the_plan_less_often() {
-    let j = noisy_jumps();
+    let j = noisy_jumps(false);
     eprintln!(
         "{} of {} noisy plans jump:\n{}",
         j.len(),
@@ -333,8 +348,8 @@ fn a_last_molar_moved_by_noise_jumps_the_plan_less_often() {
 }
 
 #[test]
-#[ignore = "the goal: 16 of 64 noisy plans still jump until the thresholds downstream of the axis are redesigned"]
+#[ignore = "the goal: no noisy plan jumps even on the strict criterion (every IPR the same)"]
 fn a_last_molar_moved_by_noise_never_jumps_the_plan() {
-    let j = noisy_jumps();
+    let j = noisy_jumps(true);
     assert!(j.is_empty(), "noisy plans that jump:\n{}", j.join("\n"));
 }
