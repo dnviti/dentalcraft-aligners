@@ -172,6 +172,8 @@ fn smooth_border_matches_the_plugin() {
             num(&case["outer"]),
             num(&case["gap"]),
             num(&case["scallop"]),
+            // the plugin's border: no relief round the papillae
+            0.0,
         )
         .unwrap();
         let what = format!("smooth {covered:?}");

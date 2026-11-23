@@ -4,11 +4,21 @@
 //! line without steps with gentle scallops, `gap` mm above the margin; round
 //! the distal face of the last tooth covered of each side; nothing kept
 //! behind it and over the teeth left out.
+//!
+//! Papillae (not in the plugin): the scallops are held within
+//! `±scallop / 2` of the smoothed margin, but a papilla rises 1-4 mm above
+//! it, so the border of the plugin comes down between the teeth onto the
+//! tip of every papilla (a real case: 0.4-0.9 mm above it, or up to 0.6 mm
+//! on it, against 2 mm above the margin in the middle of the teeth). With a
+//! `relief` the border is raised wherever it is less than that above the
+//! margin, in a rounded notch round the papilla ([`papilla_lift`]), never
+//! within [`PAPILLA_NECK_MM`] of the contact of the two crowns.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
-use glam::{DVec2, DVec3};
+use dc_geom::knn::KnnIndex;
+use glam::{DVec2, DVec3, Vec3};
 
 use super::survey::median;
 use crate::reconstruct::TAPER_RIM_MM;
@@ -39,6 +49,25 @@ pub const SMOOTH_NEAR_MM: f64 = 3.5;
 /// ... from the crown of the last tooth covered of each side only this (no
 /// papilla under a contact past it; `trim::smooth_near`).
 pub const SMOOTH_END_NEAR_MM: f64 = 1.0;
+/// Default of [`super::Params::papilla_relief_mm`]: the edge stays this far
+/// above the gingival margin (mm) all along the arch, round every papilla.
+pub const PAPILLA_RELIEF_MM: f64 = 1.0;
+/// The border raised round a papilla falls back to its own height this far
+/// (mm, along the arch) from where the lift is needed, as the bump
+/// [`notch`]: a notch with a rounded top and no step at its feet.
+pub const PAPILLA_NOTCH_HALF_MM: f64 = 2.5;
+/// The raised border stays this far (mm) under the contact of the two
+/// crowns, so that their caps stay joined round it ...
+pub const PAPILLA_NECK_MM: f64 = 0.5;
+/// ... the limit rising away from it along the arch as a rounded V
+/// ([`soft_abs`] with this radius, mm; one mm per mm far from it) ...
+pub const PAPILLA_CAP_ROUND_MM: f64 = 1.0;
+/// ... and the raised border meeting that limit in a round of this width
+/// (mm, [`smooth_min`]), never a sharp corner the rim could not round.
+pub const PAPILLA_ROUND_MM: f64 = 0.5;
+/// Two neighbouring crowns whose scanned points come closer than this (mm)
+/// have a contact; farther apart, nothing holds the border down.
+pub const PAPILLA_CONTACT_MM: f64 = 2.0;
 
 /// `y` smoothed by a gaussian of `sigma` samples, the weights renormalised
 /// at the ends (`_gauss_rows`).
@@ -53,6 +82,117 @@ pub fn gauss_rows(y: &[f64], sigma: f64) -> Vec<f64> {
                 den += w;
             }
             num / den
+        })
+        .collect()
+}
+
+/// The bump of the rounded notch `t` half-widths from its top: `(1 − t²)²`,
+/// 1 at the top, 0 with a flat tangent at its feet (`|t| ≥ 1`).
+pub fn notch(t: f64) -> f64 {
+    let u = 1.0 - t * t;
+    if u > 0.0 { u * u } else { 0.0 }
+}
+
+/// The weights of the notch ([`notch`], half-width
+/// [`PAPILLA_NOTCH_HALF_MM`]) at 0, 1, 2 ... samples `step` mm apart.
+pub fn notch_weights(step: f64) -> Vec<f64> {
+    let n = (PAPILLA_NOTCH_HALF_MM / step.max(1e-3)).ceil() as usize;
+    (0..=n)
+        .map(|k| notch(k as f64 * step / PAPILLA_NOTCH_HALF_MM))
+        .collect()
+}
+
+/// `|x|` rounded at 0 with the radius `r`: `√(x² + r²) − r`.
+pub fn soft_abs(x: f64, r: f64) -> f64 {
+    (x * x + r * r).sqrt() - r
+}
+
+/// The smaller of `a` and `b`, their corner rounded over `k` (the
+/// polynomial smooth minimum): `min(a, b)` when they are `k` or more apart,
+/// never above it and never more than `k / 4` under it.
+pub fn smooth_min(a: f64, b: f64, k: f64) -> f64 {
+    let m = if a < b { a } else { b };
+    if k <= 0.0 {
+        return m;
+    }
+    let d = k - (a - b).abs();
+    let h = if d > 0.0 { d / k } else { 0.0 };
+    m - h * h * k * 0.25
+}
+
+/// The border `z` (heights of samples along the arch) raised where it is
+/// under `need` (the margin plus the relief), at most to `cap` (under the
+/// contact of two crowns): every sample short of its target `min(need,
+/// cap)` lifts the samples round it by that much times the notch `weights`
+/// ([`notch_weights`], 1 at its own sample), the highest lift is kept, the
+/// sample's own target reached, then the border is held under `cap` (unless
+/// it was already above it) by a [`smooth_min`] over [`PAPILLA_ROUND_MM`]:
+/// where the notch meets the limit the line turns round, never in a corner.
+///
+/// Never lowers the border; reaches `min(need, cap)` at every sample, less
+/// at most a quarter of the round; never passes `max(z, cap)`; a border at
+/// or above `need` everywhere is left as it is (the Kani laws below). `need`
+/// may be `−∞` (no margin there) and `cap` `+∞` (no contact near).
+pub fn papilla_lift(z: &[f64], need: &[f64], cap: &[f64], weights: &[f64]) -> Vec<f64> {
+    let n = z.len();
+    if weights.is_empty() || need.len() != n || cap.len() != n {
+        return z.to_vec();
+    }
+    // the height every sample must reach (never under the border)
+    let target: Vec<f64> = (0..n)
+        .map(|i| {
+            let t = if need[i] < cap[i] { need[i] } else { cap[i] };
+            if t > z[i] { t } else { z[i] }
+        })
+        .collect();
+    let lift: Vec<f64> = (0..n).map(|i| target[i] - z[i]).collect();
+    let k = weights.len();
+    (0..n)
+        .map(|i| {
+            let mut l = 0.0;
+            let lo = i.saturating_sub(k - 1);
+            let hi = (i + k).min(n);
+            for (j, &lj) in lift.iter().enumerate().take(hi).skip(lo) {
+                let v = lj * weights[i.abs_diff(j)];
+                if v > l {
+                    l = v;
+                }
+            }
+            let raised = z[i] + l;
+            let raised = if target[i] > raised {
+                target[i]
+            } else {
+                raised
+            };
+            let ceiling = if cap[i] > z[i] { cap[i] } else { z[i] };
+            let held = smooth_min(raised, ceiling, PAPILLA_ROUND_MM);
+            if held > z[i] { held } else { z[i] }
+        })
+        .collect()
+}
+
+/// The contacts of the neighbouring crowns of `marg` (arch order): the
+/// middle of the closest two scanned points of every two consecutive teeth
+/// closer than [`PAPILLA_CONTACT_MM`].
+fn contacts(marg: &[(Fdi, Vec<DVec3>)], crowns: &BTreeMap<Fdi, Vec<DVec3>>) -> Vec<DVec3> {
+    marg.windows(2)
+        .filter_map(|w| {
+            let (a, b) = (crowns.get(&w[0].0)?, crowns.get(&w[1].0)?);
+            let pb: Vec<Vec3> = b.iter().map(|p| p.as_vec3()).collect();
+            let index = KnnIndex::build(&pb).ok()?;
+            let mut best: Option<(f64, DVec3)> = None;
+            for p in a {
+                let Some(nb) = index.nearest(p.as_vec3()) else {
+                    continue;
+                };
+                let q = b[nb.index as usize];
+                let d = p.distance(q);
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, (*p + q) * 0.5));
+                }
+            }
+            best.filter(|(d, _)| *d <= PAPILLA_CONTACT_MM)
+                .map(|(_, c)| c)
         })
         .collect()
 }
@@ -219,11 +359,14 @@ fn gum_ends(
 /// `crowns`: the crown points of every tooth of the case; `covered`: the
 /// teeth the aligner covers; `outer`: clearance + wall; `gap`: the border
 /// above the margin (towards the crown; negative on the gingiva);
-/// `scallop`: the height of the scallops. The distal half of the last tooth
-/// of each side counts only its margin at the gum ([`gum_ends`]). Returns
-/// the border points and the high points (nothing kept under them), or
-/// `None` with fewer than two teeth with a margin.
-#[allow(clippy::too_many_lines)]
+/// `scallop`: the height of the scallops; `relief`: the border raised to at
+/// least this above the margin all along the arch, in a rounded notch round
+/// every papilla and never within [`PAPILLA_NECK_MM`] of a contact
+/// ([`papilla_lift`]; `0`: the plugin's border). The distal half of the
+/// last tooth of each side counts only its margin at the gum
+/// ([`gum_ends`]). Returns the border points and the high points (nothing
+/// kept under them), or `None` with fewer than two teeth with a margin.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn smooth_border(
     marg: &[(Fdi, Vec<DVec3>)],
     crowns: &BTreeMap<Fdi, Vec<DVec3>>,
@@ -231,6 +374,7 @@ pub fn smooth_border(
     outer: f64,
     gap: f64,
     scallop: f64,
+    relief: f64,
 ) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
     if marg.len() < 2 {
         return None;
@@ -256,6 +400,17 @@ pub fn smooth_border(
             *n = -*n; // +N: labial (out of the arch)
         }
     }
+    // the contacts of the neighbours (arc length, height): the border raised
+    // round a papilla stays under them
+    let touch: Vec<(f64, f64)> = if relief > 0.0 {
+        contacts(marg, crowns)
+            .iter()
+            .map(|c| (u[nearest(&l, c.truncate())], c.z))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let weights = notch_weights(SMOOTH_STEP_MM);
     let marg = &gum_ends(marg, &l, &u, &cen);
     let m: Vec<DVec3> = marg.iter().flat_map(|(_, p)| p.iter().copied()).collect();
     let near_m: Vec<usize> = m.iter().map(|p| nearest(&l, p.truncate())).collect();
@@ -341,6 +496,27 @@ pub fn smooth_border(
             .collect();
         let wave = gauss_rows(&dev, SMOOTH_WAVE_SIGMA_MM / step);
         let zb: Vec<f64> = base.iter().zip(&wave).map(|(a, w)| a + w + gap).collect();
+        // round every papilla: the border at least `relief` above the highest
+        // margin point of every bin (the tip of a papilla), under the contacts
+        let zb = if relief > 0.0 {
+            let mut need = vec![f64::NEG_INFINITY; g.len()];
+            for (&bi, ix) in &bins {
+                if let Some(v) = bi.checked_sub(lo_i).and_then(|k| need.get_mut(k)) {
+                    *v = ix.iter().map(|&i| m[i].z).fold(f64::NEG_INFINITY, f64::max) + relief;
+                }
+            }
+            let cap: Vec<f64> = g
+                .iter()
+                .map(|&s| {
+                    touch.iter().fold(f64::INFINITY, |c, &(sc, zc)| {
+                        c.min(zc - PAPILLA_NECK_MM + soft_abs(s - sc, PAPILLA_CAP_ROUND_MM))
+                    })
+                })
+                .collect();
+            papilla_lift(&zb, &need, &cap, &weights)
+        } else {
+            zb
+        };
         let db = gauss_rows(&d, SMOOTH_DEPTH_SIGMA_MM / step);
         let nb = zb.len();
         side_ends.insert(sign as i8, ((zb[0], db[0]), (zb[nb - 1], db[nb - 1])));
@@ -464,4 +640,88 @@ pub fn smooth_border(
         }
     }
     Some((out, high))
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{PAPILLA_NOTCH_HALF_MM, PAPILLA_ROUND_MM, SMOOTH_STEP_MM, notch, papilla_lift};
+
+    /// Three heights in tenths of a millimetre within ±4 mm (not exact in
+    /// binary: the rounding of the arithmetic is part of what is proved).
+    fn heights() -> [f64; 3] {
+        let a: [i8; 3] = kani::any();
+        a.map(|v| {
+            kani::assume((-40..=40).contains(&v));
+            f64::from(v) / 10.0
+        })
+    }
+
+    /// The margin plus the relief: a height, or none (`−∞`, no margin there).
+    fn needs() -> [f64; 3] {
+        let (h, none): ([f64; 3], [bool; 3]) = (heights(), kani::any());
+        [0, 1, 2].map(|i| if none[i] { f64::NEG_INFINITY } else { h[i] })
+    }
+
+    /// The limit under a contact: a height, or none (`+∞`, no contact near).
+    fn caps() -> [f64; 3] {
+        let (h, none): ([f64; 3], [bool; 3]) = (heights(), kani::any());
+        [0, 1, 2].map(|i| if none[i] { f64::INFINITY } else { h[i] })
+    }
+
+    /// The weights of the notch at 0, 1 and 2 samples, as the border uses them.
+    fn weights() -> [f64; 3] {
+        [0.0, 1.0, 2.0].map(|k| notch(k * SMOOTH_STEP_MM / PAPILLA_NOTCH_HALF_MM))
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_never_lowers_the_border() {
+        // The border raised round the papillae is nowhere lower than the
+        // border it starts from.
+        let (z, need, cap) = (heights(), needs(), caps());
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] >= z[i]);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_reaches_the_relief_or_the_cap() {
+        // At every sample the raised border is at least the margin plus the
+        // relief, or the limit under the contact where that is lower, less at
+        // most a quarter of the round where the notch meets that limit.
+        let (z, need, cap) = (heights(), needs(), caps());
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] >= need[i].min(cap[i]) - 0.25 * PAPILLA_ROUND_MM);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_never_passes_the_cap() {
+        // The raised border never goes above the limit under a contact,
+        // unless the border was already above it (it is never lowered).
+        let (z, need, cap) = (heights(), needs(), caps());
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] <= z[i].max(cap[i]));
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_leaves_a_clear_border_alone() {
+        // A border already at least the relief above the margin everywhere
+        // is left exactly as it is.
+        let (z, need, cap) = (heights(), needs(), caps());
+        for i in 0..3 {
+            kani::assume(need[i] <= z[i]);
+        }
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] == z[i]);
+        }
+    }
 }

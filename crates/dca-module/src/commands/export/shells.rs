@@ -733,6 +733,19 @@ impl MeshProvider for ShellProvider<'_> {
                 format!("{:?} border used instead", done.mode).to_lowercase(),
             );
         }
+        if done.mode == trim::Mode::Smooth && done.papilla_relief_mm < self.trim.papilla_relief_mm {
+            self.note(
+                arch,
+                k,
+                true,
+                "rpt-note-trim",
+                format!(
+                    "border {} mm above the papillae instead of {} mm (a hole through the wall \
+                     otherwise)",
+                    done.papilla_relief_mm, self.trim.papilla_relief_mm
+                ),
+            );
+        }
         if done.genus > 0 {
             self.note(
                 arch,

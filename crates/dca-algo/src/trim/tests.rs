@@ -465,6 +465,159 @@ fn smooth_border_on_the_demo_arch() {
     assert_eq!(out.lines.len(), m.len());
 }
 
+/// The demo arch with a papilla between every two neighbours (its gum is
+/// flat between the teeth): every margin point within 2 mm (plan) of
+/// another crown raised by up to `rise` mm, the most next to that crown.
+fn raise_papillae(a: &mut DemoArch, rise: f64) {
+    let crowns: Vec<(Fdi, Vec<DVec2>)> = a
+        .teeth
+        .iter()
+        .map(|t| (t.fdi, t.crown.iter().map(|p| p.truncate()).collect()))
+        .collect();
+    for t in &mut a.teeth {
+        for q in &mut t.margin {
+            let d = crowns
+                .iter()
+                .filter(|(f, _)| *f != t.fdi)
+                .flat_map(|(_, c)| c.iter().map(|p| p.distance(q.truncate())))
+                .fold(f64::INFINITY, f64::min);
+            let w = (1.0 - d / 2.0).max(0.0);
+            q.z += rise * w * w;
+        }
+    }
+}
+
+/// At every margin point within 1 mm (plan) of another crown (the top of a
+/// papilla of [`raise_papillae`]): how far the edge of the trimmed aligner
+/// (its lowest point within 0.35 mm, plan) stands above the height it must
+/// reach, `relief` above the point or [`smooth::PAPILLA_NECK_MM`] under the
+/// contact of the two crowns when that is lower. The smallest, and how many
+/// points were measured.
+fn papilla_slack(a: &DemoArch, out: &Output, relief: f64) -> (f64, usize) {
+    let flat: Vec<Vec3> = out
+        .mesh
+        .positions
+        .iter()
+        .map(|p| Vec3::new(p.x, p.y, 0.0))
+        .collect();
+    let index = dc_geom::knn::KnnIndex::build(&flat).unwrap();
+    let contact = |f: Fdi, g: Fdi| -> Option<DVec3> {
+        let (ca, cb) = (
+            &a.teeth.iter().find(|t| t.fdi == f)?.crown,
+            &a.teeth.iter().find(|t| t.fdi == g)?.crown,
+        );
+        let mut best = (f64::INFINITY, DVec3::ZERO);
+        for p in ca {
+            for q in cb {
+                if p.distance(*q) < best.0 {
+                    best = (p.distance(*q), (*p + *q) * 0.5);
+                }
+            }
+        }
+        (best.0 <= smooth::PAPILLA_CONTACT_MM).then_some(best.1)
+    };
+    let (mut slack, mut n) = (f64::INFINITY, 0);
+    for t in a.teeth.iter().filter(|t| t.covered) {
+        for q in &t.margin {
+            // the crown nearest to the point, of another covered tooth
+            let Some((g, d)) = a
+                .teeth
+                .iter()
+                .filter(|u| u.fdi != t.fdi && u.covered)
+                .map(|u| {
+                    let d = u
+                        .crown
+                        .iter()
+                        .map(|p| p.truncate().distance(q.truncate()))
+                        .fold(f64::INFINITY, f64::min);
+                    (u.fdi, d)
+                })
+                .min_by(|x, y| x.1.total_cmp(&y.1))
+            else {
+                continue;
+            };
+            if d > 1.0 {
+                continue;
+            }
+            let edge = index
+                .within_radius(Vec3::new(q.x as f32, q.y as f32, 0.0), 0.35)
+                .iter()
+                .map(|nb| f64::from(out.mesh.positions[nb.index as usize].z))
+                .fold(f64::INFINITY, f64::min);
+            if !edge.is_finite() {
+                continue;
+            }
+            let cap = contact(t.fdi, g).map_or(f64::INFINITY, |c| c.z - smooth::PAPILLA_NECK_MM);
+            slack = slack.min(edge - (q.z + relief).min(cap));
+            n += 1;
+        }
+    }
+    (slack, n)
+}
+
+#[test]
+fn the_smooth_border_goes_round_every_papilla() {
+    // the user's rule: the edge of the aligner never comes down onto a
+    // papilla between two teeth; it stays papilla_relief_mm above the margin
+    // (or 0.5 mm under the contact of the two crowns), in a rounded notch
+    let mut a = demo_arch(Arch::Lower, 0.6, 0.25);
+    raise_papillae(&mut a, 3.0);
+    let tol = f64::from(a.voxel) + 0.05;
+    let run_with = |relief: f64| {
+        let p = Params {
+            papilla_relief_mm: relief,
+            ..Params::default()
+        };
+        run(&a.input(), &p).unwrap()
+    };
+    // the plugin's border (no relief) comes down onto the papillae
+    let plugin = run_with(0.0);
+    let (slack, n) = papilla_slack(&a, &plugin, smooth::PAPILLA_RELIEF_MM);
+    assert!(n >= 20, "{n} papilla points measured");
+    assert!(
+        slack < -tol,
+        "the plugin's border clears the papillae: {slack}"
+    );
+    // the default goes round them, the aligner a closed solid as before
+    let p = Params::default();
+    assert_eq!(p.papilla_relief_mm, smooth::PAPILLA_RELIEF_MM);
+    let out = run(&a.input(), &p).unwrap();
+    let (slack, n) = papilla_slack(&a, &out, p.papilla_relief_mm);
+    eprintln!(
+        "papillae: {n} points, slack {slack:.3} mm (plugin {:.3}); genus {} plugs {} slots {} \
+         (plugin {} {} {})",
+        papilla_slack(&a, &plugin, p.papilla_relief_mm).0,
+        out.genus,
+        out.plugs,
+        out.slots.len(),
+        plugin.genus,
+        plugin.plugs,
+        plugin.slots.len()
+    );
+    assert!(n >= 20, "{n} papilla points measured");
+    assert!(slack >= -tol, "the edge comes down onto a papilla: {slack}");
+    assert_eq!(out.mode, Mode::Smooth);
+    assert_eq!(out.papilla_relief_mm, p.papilla_relief_mm);
+    check_solid(&out);
+    assert_eq!(out.genus, 0);
+    assert!(out.plugs <= plugin.plugs && out.slots.len() <= plugin.slots.len());
+    // the wall keeps its thickness, as the print check measures it (the
+    // concave corners of the rim within its limit are not walls)
+    let options = crate::export::printcheck::CheckOptions {
+        min_thickness_mm: Some(0.5 * a.wall),
+        build_plate_mm: None,
+        ..crate::export::printcheck::CheckOptions::default()
+    };
+    let thin = |o: &Output| {
+        crate::export::printcheck::check(&o.mesh, &options)
+            .min_thickness_mm
+            .unwrap()
+    };
+    let (t, t0) = (thin(&out), thin(&plugin));
+    eprintln!("thinnest wall {t:.3} mm (plugin {t0:.3})");
+    assert!(t >= t0.min(0.5 * a.wall) - 0.05, "{t} < {t0}");
+}
+
 #[test]
 fn fills_only_for_a_thin_wall() {
     // the 0.5 mm wall rounded by 0.15: 0.2 mm left, the fills are tried
@@ -841,9 +994,16 @@ fn the_border_rounds_the_last_tooth_at_the_gum_not_on_a_flange() {
     let a = demo_arch(Arch::Lower, 0.6, 0.25);
     let p = Params::default();
     let (marg, crowns, covered, ends) = demo_flanged(&a, 0.5);
-    let (border, high) =
-        smooth::smooth_border(&marg, &crowns, &covered, 0.6, p.margin_gap_mm, p.scallop_mm)
-            .unwrap();
+    let (border, high) = smooth::smooth_border(
+        &marg,
+        &crowns,
+        &covered,
+        0.6,
+        p.margin_gap_mm,
+        p.scallop_mm,
+        p.papilla_relief_mm,
+    )
+    .unwrap();
     for (f, c, t) in &ends {
         let crown = &crowns[f];
         let top = crown.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max);

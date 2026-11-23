@@ -76,6 +76,9 @@ pub(crate) struct TrimPatch {
     recess_mm: Option<f64>,
     /// Height of the scallops (0 to 4 mm).
     scallop_mm: Option<f64>,
+    /// Smooth edge: least height above the gingival margin, so round every
+    /// papilla (0 to 3 mm; 0: the edge may come down onto the papilla).
+    papilla_relief_mm: Option<f64>,
     /// Edge beyond the equator (-2 to 1.5 mm).
     equator_offset_mm: Option<f64>,
     /// Edge extension (0 to 4 mm).

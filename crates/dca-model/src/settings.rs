@@ -215,6 +215,9 @@ pub struct TrimParams {
     pub recess_mm: f64,
     /// Height of the scallops (mm).
     pub scallop_mm: f64,
+    /// Smooth edge: least height above the gingival margin, so round every
+    /// papilla (mm; 0: the edge may come down onto the papilla).
+    pub papilla_relief_mm: f64,
     /// Edge beyond the equator (mm).
     pub equator_offset_mm: f64,
     /// Edge extension (mm).
@@ -230,6 +233,7 @@ impl Default for TrimParams {
             margin_gap_mm: 1.5,
             recess_mm: 1.6,
             scallop_mm: 1.5,
+            papilla_relief_mm: 1.0,
             equator_offset_mm: 0.0,
             extension_mm: 2.0,
             insertion_axis: InsertionAxis::PerTooth,
@@ -452,10 +456,11 @@ pub const PRODUCTION_GROUPS: [&str; 6] = ["trim", "shell", "stamp", "bite", "ram
 
 /// The numeric production settings with the range of the plugin's slider
 /// (`props.py:537-661`): group, field, smallest and largest value.
-pub const PRODUCTION_NUMBERS: [(&str, &str, f64, f64); 21] = [
+pub const PRODUCTION_NUMBERS: [(&str, &str, f64, f64); 22] = [
     ("trim", "margin_gap_mm", -2.0, 5.0),
     ("trim", "recess_mm", 0.6, 2.5),
     ("trim", "scallop_mm", 0.0, 4.0),
+    ("trim", "papilla_relief_mm", 0.0, 3.0),
     ("trim", "equator_offset_mm", -2.0, 1.5),
     ("trim", "extension_mm", 0.0, 4.0),
     ("shell", "shell_thickness_mm", 0.3, 2.0),
