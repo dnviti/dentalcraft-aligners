@@ -22,9 +22,12 @@
 //! creation, alignment, then vertical movements), auto (from the case
 //! complexity). Adjacent crowns are checked for interpenetration at every
 //! stage and the movement of the tooth that moves into its neighbour is
-//! delayed (collision-free staging). Against a neighbour that never moves
-//! nothing is delayed (unlike the plugin, [`Params::delay_against_still`]):
-//! a delay would only move the same contact to a later aligner, so the
+//! delayed (collision-free staging), when the delay lowers the worst
+//! interpenetration of the two over the whole plan. A delay that does not
+//! (the plugin keeps it, [`Params::delay_without_gain`]) only moves the
+//! contact to a later aligner and lengthens the plan; against a neighbour
+//! that never moves no delay can (the plugin tries,
+//! [`Params::delay_against_still`]). Then nothing is delayed and the
 //! collision is left in [`Plan::unresolved`] for the clinician.
 //!
 //! # Coordinates and conventions
@@ -243,6 +246,15 @@ pub struct Params {
     /// plan, so the collision is left and listed in [`Plan::unresolved`];
     /// against a neighbour that moves the delays stay.
     pub delay_against_still: bool,
+    /// Keep a delay that does not lower the worst interpenetration of the
+    /// pair over the whole plan, as the plugin does: it keeps a delay
+    /// whenever the interpenetration goes down at the aligner where the
+    /// contact collides, even when the same contact collides again later.
+    /// Off by default (2026-11-23): such a delay only moves the collision to
+    /// a later aligner and lengthens the plan, so nothing is delayed and the
+    /// collision is left and listed in [`Plan::unresolved`]; a delay that
+    /// lowers the worst interpenetration of the pair stays.
+    pub delay_without_gain: bool,
 }
 
 impl Default for Params {
@@ -265,6 +277,7 @@ impl Default for Params {
             max_iter: 300,
             sample_points: None,
             delay_against_still: false,
+            delay_without_gain: false,
         }
     }
 }
@@ -504,7 +517,9 @@ pub struct IprStage {
 }
 
 /// A collision that no delay could solve, or that the staging does not delay
-/// because the neighbour never moves ([`Params::delay_against_still`]).
+/// because the neighbour never moves ([`Params::delay_against_still`]) or
+/// because no delay lowers the worst interpenetration of the pair over the
+/// whole plan ([`Params::delay_without_gain`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Unresolved {
     /// Aligner.
@@ -1193,6 +1208,19 @@ fn ipr_mm(ipr: &[IprPlan], a: Fdi, b: Fdi) -> f64 {
         .map_or(0.0, |r| r.mm)
 }
 
+/// Least lowering of the worst interpenetration of a pair (mm) that keeps a
+/// delay ([`Params::delay_without_gain`]): anything above the rounding of
+/// the metric.
+const GAIN_MM: f64 = 1e-6;
+
+/// The worst interpenetration of the crowns of `a` and `b` over the whole
+/// plan `sch`, every aligner.
+fn worst_overlap(cc: &mut CollisionChecker<'_>, sch: &Schedule, a: Fdi, b: Fdi) -> f64 {
+    (1..=sch.n_stages())
+        .map(|k| cc.penetration(a, b, &sch.q_at(a, k), &sch.q_at(b, k)))
+        .fold(0.0, f64::max)
+}
+
 // ---- the plan ----------------------------------------------------------------------------------------------
 
 /// Plans the aligners of the teeth (`staging.plan`).
@@ -1296,6 +1324,9 @@ pub fn run_with_progress(
                 .max((pen / (0.5 * p.step_linear_mm).max(0.05)).ceil())
                 .min(8.0) as i64;
             let mut best: Option<(f64, i64, Fdi)> = None;
+            // the worst interpenetration of the pair over the whole plan, which a delay must
+            // lower to be kept (`delay_without_gain` off)
+            let mut worst_now: Option<f64> = None;
             for x in [a, b] {
                 let movable = sch.tracks[&x].phases.iter().any(|ph| ph.n > 0);
                 let other = if x == a { b } else { a };
@@ -1305,6 +1336,14 @@ pub fn run_with_progress(
                     || !(other_moves || p.delay_against_still)
                 {
                     continue;
+                }
+                if !p.delay_without_gain {
+                    let now = *worst_now.get_or_insert_with(|| worst_overlap(&mut cc, &sch, a, b));
+                    let mut delayed = sch.clone();
+                    delayed.delay(x, dly);
+                    if worst_overlap(&mut cc, &delayed, a, b) >= now - GAIN_MM {
+                        continue;
+                    }
                 }
                 let qa = sch.q_at(a, if x == a { k - dly } else { k });
                 let qb = sch.q_at(b, if x == b { k - dly } else { k });
@@ -1801,6 +1840,20 @@ mod tests {
         .unwrap();
         assert_eq!(free.phases[&fdi(15)][0].start, 0);
         assert!(plan.n_stages >= free.n_stages);
+        // each delay of 15 lowers the worst overlap of the pair over the whole plan, so
+        // every one stays: the plan is the plugin's, which keeps a delay whenever the
+        // overlap goes down at the aligner where the contact collides
+        let plugin = run(
+            &input,
+            &Params {
+                delay_without_gain: true,
+                ..p.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(plugin.phases, plan.phases);
+        assert_eq!(plugin.q, plan.q);
+        assert_eq!(plugin.log, plan.log);
         // a contact that stays overlapped in the final setup is reported
         let moves = [
             tooth(15, -7.0, [0.0; 6]),
@@ -1871,11 +1924,23 @@ mod tests {
             ..p.clone()
         };
         assert_eq!(plan.n_stages, run(&input, &unchecked).unwrap().n_stages);
-        // the plugin delays 12 all the same: a longer plan with the same collision left
+        // the plugin delays 12 all the same: a longer plan with the same collision left (a
+        // delay against a still neighbour never lowers the worst overlap of the pair, so
+        // only both of the plugin's rules together keep it)
         let plugin = Params {
             delay_against_still: true,
+            delay_without_gain: true,
             ..p.clone()
         };
+        let still_only = run(
+            &input,
+            &Params {
+                delay_against_still: true,
+                ..p.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(still_only.n_stages, plan.n_stages, "{:?}", still_only.log);
         let delayed = run(&input, &plugin).unwrap();
         assert!(
             delayed.log.iter().any(|l| l.contains("delays")),
@@ -1897,6 +1962,90 @@ mod tests {
         .unwrap();
         assert!(calm.unresolved.is_empty());
         assert!(!calm.log.iter().any(|l| l.contains("Collision left")));
+    }
+
+    /// A box-shaped crown like [`tooth`], its points every 0.25 mm up the long axis:
+    /// moved up or down by a multiple of 0.25 mm, it keeps the same columns facing a
+    /// neighbour in every cell of the collision metric.
+    fn tall_tooth(n: u8, x: f64, q: Q6) -> ToothMove {
+        let mut pts = Vec::new();
+        for i in 0..8 {
+            for j in 0..8 {
+                for k in 0..33 {
+                    pts.push(DVec3::new(
+                        -3.5 + i as f64 * 1.0,
+                        -3.5 + j as f64 * 1.0,
+                        -1.0 + k as f64 * 0.25,
+                    ));
+                }
+            }
+        }
+        let frame = DMat4::from_translation(DVec3::new(x, 0.0, 0.0));
+        ToothMove::new(fdi(n), frame, q, pts, 1)
+    }
+
+    #[test]
+    fn a_delay_that_only_moves_a_collision_later_is_not_kept() {
+        // 12 turns 60 degrees about its long axis beside 11, which moves 1 mm up: half way a
+        // corner of 12 sweeps into 11 whatever the height of 11, so delaying either tooth
+        // only moves the sweep to a later aligner, and the worst overlap of the pair over
+        // the plan stays the same
+        let turn = 60.0_f64.to_radians();
+        let moves = [
+            tall_tooth(12, -7.0, [0.0, 0.0, 0.0, 0.0, 0.0, turn]),
+            tall_tooth(11, 0.0, [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        ];
+        let input = Input {
+            moves: &moves,
+            ipr: &[],
+            complexity: Complexity::default(),
+        };
+        let p = Params::default();
+        let plan = run(&input, &p).unwrap();
+        // nothing is delayed (11 moves, so it is not the rule of a still neighbour), the
+        // plan is as long as without the check, and the collision is listed
+        assert!(
+            !plan.log.iter().any(|l| l.contains("delays")),
+            "{:?}",
+            plan.log
+        );
+        let unchecked = Params {
+            collision: false,
+            ..p.clone()
+        };
+        assert_eq!(plan.n_stages, run(&input, &unchecked).unwrap().n_stages);
+        assert_eq!(plan.unresolved.len(), 1, "{:?}", plan.log);
+        let u = plan.unresolved[0];
+        assert_eq!((u.a, u.b), (fdi(12), fdi(11)));
+        assert!(u.penetration_mm > u.allowed_mm, "{u:?}");
+        assert!(
+            plan.log
+                .iter()
+                .any(|l| l.starts_with(&format!("Collision left at aligner {} 12|11", u.stage))),
+            "{:?}",
+            plan.log
+        );
+        // the plugin keeps every delay that lowers the overlap at the colliding aligner:
+        // a longer plan, with the same collision left
+        let plugin = run(
+            &input,
+            &Params {
+                delay_without_gain: true,
+                ..p.clone()
+            },
+        )
+        .unwrap();
+        assert!(
+            plugin.log.iter().any(|l| l.contains("delays")),
+            "{:?}",
+            plugin.log
+        );
+        assert!(plugin.n_stages > plan.n_stages, "{}", plugin.n_stages);
+        assert_eq!(plugin.unresolved.len(), 1, "{:?}", plugin.log);
+        assert_eq!(
+            (plugin.unresolved[0].a, plugin.unresolved[0].b),
+            (fdi(12), fdi(11))
+        );
     }
 
     #[test]

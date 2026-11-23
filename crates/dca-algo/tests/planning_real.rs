@@ -425,11 +425,13 @@ fn plan(s: &Scan, moves: &[ToothMove]) -> staging::Plan {
             ipr: &ipr,
             complexity,
         },
-        // the plugin's sample of the crowns and its delays against a still neighbour (the
-        // port's defaults use every point and list such a collision instead)
+        // the plugin's sample of the crowns and its delays against a still neighbour or
+        // without gain (the port's defaults use every point and list such a collision
+        // instead)
         &Params {
             sample_points: Some(2500),
             delay_against_still: true,
+            delay_without_gain: true,
             ..Params::default()
         },
     )
