@@ -13,6 +13,15 @@
 //! hand) the problems are only reported. `aligners.auto` runs it after the
 //! segmentation, correcting the arches whose seeds it proposed.
 //!
+//! Beyond the plugin, two teeth are merged only with positive evidence that
+//! they are two parts of one crown ([`seed_check::vetted`]): a boundary with
+//! no groove alone (the fused contacts of a printed model) keeps both teeth
+//! and is a doubt (`kept_apart` in the output). After a correction the
+//! numbers change only where the corrections changed the seeds, from the
+//! most mesial seed changed distally in its quadrant
+//! ([`seed_check::renumber_touched`]); a renumbering that would change
+//! other teeth is not applied, and a note says so.
+//!
 //! New seeds drop what was computed from the old ones
 //! ([`dca_model::AlignersState::replace_arch_seeds`]), as the automatic
 //! numbering does, and the separations run with the parameters of the case
@@ -23,6 +32,8 @@
 //!
 //! An arch with no arch curve (not a dental arch) is not checked: it is
 //! reported in `skipped` and the command goes on, as in the plugin.
+
+use std::collections::BTreeMap;
 
 use dc_case::{CaseState, Fdi, ModuleState};
 use dc_command::{CommandError, JobCtx};
@@ -178,10 +189,23 @@ fn describe_action(a: &Action) -> String {
     }
 }
 
-/// A problem in words.
-fn describe_issue(i: &Issue) -> String {
+/// A problem in words. A boundary with no groove between two teeth that
+/// are not two parts of one crown ([`seed_check::one_crown`]) kept both
+/// teeth: it says so.
+fn describe_issue(i: &Issue, rep: &Report, arch: Arch) -> String {
     let mm = |x: f64| format!("{x:.1}");
     match *i {
+        Issue::NoFold { a, b, .. } if kept_apart(rep, arch).contains(&(a, b)) => {
+            let (sa, sb) = (rep.spans[&a], rep.spans[&b]);
+            tr(
+                "aligners-check-issue-kept-apart",
+                &[
+                    ("a", &a.to_string()),
+                    ("b", &b.to_string()),
+                    ("mm", &mm(sa.1.max(sb.1) - sa.0.min(sb.0))),
+                ],
+            )
+        }
         Issue::NoFold { a, b, len_mm } => tr(
             "aligners-check-issue-no-fold",
             &[
@@ -199,6 +223,20 @@ fn describe_issue(i: &Issue) -> String {
             &[("fdi", &fdi.to_string()), ("mm", &mm(width_mm))],
         ),
     }
+}
+
+/// The teeth with a boundary with no groove between them that are not two
+/// parts of one crown ([`seed_check::one_crown`]): never merged, a doubt.
+fn kept_apart(rep: &Report, arch: Arch) -> Vec<(u16, u16)> {
+    rep.weak
+        .iter()
+        .filter(|w| {
+            rep.spans.contains_key(&w.a)
+                && rep.spans.contains_key(&w.b)
+                && !seed_check::one_crown(rep, w, arch)
+        })
+        .map(|w| (w.a, w.b))
+        .collect()
 }
 
 /// A note on the numbering in words.
@@ -276,12 +314,15 @@ fn check_arch(
     let mut done: Vec<String> = Vec::new();
     let mut renumbered: Vec<(u16, u16)> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    // per quadrant, the position of the most mesial seed a correction changed
+    let mut touched: BTreeMap<u16, u8> = BTreeMap::new();
     let mut rounds = 0;
     let mut k = 0;
     if params.correct {
         for _ in 0..SEG_ROUNDS {
             ctx.check_cancelled()?;
-            let acts = seed_check::plan_corrections(&rep);
+            // only two parts of one crown are merged, never two teeth
+            let acts = seed_check::plan_corrections(&seed_check::vetted(&rep, arch));
             if acts.is_empty() {
                 break;
             }
@@ -289,6 +330,14 @@ fn check_arch(
             let seeds = seeds_of(state, arch)?;
             let new =
                 seed_check::apply_corrections(&cur.vertices, &cur.labels, &seeds, &acts, &data);
+            let changed = seeds
+                .iter()
+                .filter(|s| !new.contains(s))
+                .chain(new.iter().filter(|s| !seeds.contains(s)));
+            for (f, _) in changed {
+                let m = touched.entry(u16::from(f.get() / 10)).or_insert(u8::MAX);
+                *m = (*m).min(f.get() % 10);
+            }
             invalidated.extend(put_seeds(state, arch, &new)?);
             done.extend(acts.iter().map(describe_action));
             actions.extend(acts);
@@ -303,49 +352,58 @@ fn check_arch(
             notes.push(tr("aligners-check-note-not-renumbered", &[]));
         } else if !done.is_empty() {
             let missing = missing_of(state, params)?;
-            let (new, more) =
+            let (all, more) =
                 seed_check::renumber_spans(&rep.spans, arch, params.third_molars, &missing);
-            notes.extend(more.iter().map(describe_note));
-            let seeds = seeds_of(state, arch)?;
-            let renamed: Vec<(Fdi, DVec3)> = seeds
-                .iter()
-                .filter_map(|&(f, p)| {
-                    let g = new.get(&u16::from(f.get()))?;
-                    let g = u8::try_from(*g).ok().and_then(|n| Fdi::new(n).ok())?;
-                    Some((g, p))
-                })
-                .collect();
-            let same_teeth = {
-                let mut a: Vec<Fdi> = renamed.iter().map(|s| s.0).collect();
-                let mut b: Vec<Fdi> = seeds.iter().map(|s| s.0).collect();
-                a.sort_unstable();
-                b.sort_unstable();
-                a == b
-            };
-            if !same_teeth || new.iter().any(|(f, g)| f != g) {
-                renumbered = new
-                    .iter()
-                    .filter(|(f, g)| f != g)
-                    .map(|(f, g)| (*f, *g))
-                    .collect();
-                if !renumbered.is_empty() {
-                    let list: Vec<String> = renumbered
+            // the teeth the corrections did not touch keep their numbers
+            match seed_check::renumber_touched(&all, &touched) {
+                None => notes.push(tr("aligners-check-note-renumber-refused", &[])),
+                Some(new) => {
+                    notes.extend(more.iter().map(describe_note));
+                    let seeds = seeds_of(state, arch)?;
+                    let renamed: Vec<(Fdi, DVec3)> = seeds
                         .iter()
-                        .map(|(f, g)| format!("{f}->{g}"))
+                        .filter_map(|&(f, p)| {
+                            let g = new.get(&u16::from(f.get()))?;
+                            let g = u8::try_from(*g).ok().and_then(|n| Fdi::new(n).ok())?;
+                            Some((g, p))
+                        })
                         .collect();
-                    done.push(tr(
-                        "aligners-check-act-renumbered",
-                        &[("list", &list.join(", "))],
-                    ));
+                    let same_teeth = {
+                        let mut a: Vec<Fdi> = renamed.iter().map(|s| s.0).collect();
+                        let mut b: Vec<Fdi> = seeds.iter().map(|s| s.0).collect();
+                        a.sort_unstable();
+                        b.sort_unstable();
+                        a == b
+                    };
+                    if !same_teeth || new.iter().any(|(f, g)| f != g) {
+                        renumbered = new
+                            .iter()
+                            .filter(|(f, g)| f != g)
+                            .map(|(f, g)| (*f, *g))
+                            .collect();
+                        if !renumbered.is_empty() {
+                            let list: Vec<String> = renumbered
+                                .iter()
+                                .map(|(f, g)| format!("{f}->{g}"))
+                                .collect();
+                            done.push(tr(
+                                "aligners-check-act-renumbered",
+                                &[("list", &list.join(", "))],
+                            ));
+                        }
+                        invalidated.extend(put_seeds(state, arch, &renamed)?);
+                        invalidated.extend(segment(state, arch, k, ctx)?);
+                        rep = check(&scan_of(state, arch)?.expect("segmented"), arch, &data);
+                    }
                 }
-                invalidated.extend(put_seeds(state, arch, &renamed)?);
-                invalidated.extend(segment(state, arch, k, ctx)?);
-                rep = check(&scan_of(state, arch)?.expect("segmented"), arch, &data);
             }
         }
     }
     let issues = seed_check::report_issues(&rep);
-    let problems: Vec<String> = issues.iter().map(describe_issue).collect();
+    let problems: Vec<String> = issues
+        .iter()
+        .map(|i| describe_issue(i, &rep, arch))
+        .collect();
     // what is left implausible stays in the case, for the export to warn
     let doubts = problems.iter().chain(&notes).cloned().collect();
     keep_doubts(state, arch, doubts)?;
@@ -355,6 +413,7 @@ fn check_arch(
         "renumbered": renumbered,
         "corrections": done,
         "issues": issues,
+        "kept_apart": kept_apart(&rep, arch),
         "problems": problems,
         "notes": notes,
         "spans": rep.spans,
@@ -629,5 +688,50 @@ mod tests {
         assert!(d.crowns.is_empty());
         assert!(next.blobs.get(&crown).is_none());
         assert!(!crate::done::leaf_done(&next, "aligners.teeth.build"));
+    }
+
+    /// Two neighbours whose contact has a shallow fold (the fused contacts
+    /// of a printed model: 15 and 16 of the test piece) are not merged: the
+    /// check keeps both teeth and says so in the doubts.
+    #[test]
+    fn a_shallow_contact_between_two_teeth_is_a_doubt_not_a_merge() {
+        let spans: std::collections::BTreeMap<u16, seed_check::Span> = [
+            (14, (-34.93, -28.58)),
+            (15, (-40.48, -35.04)),
+            (16, (-48.83, -40.53)),
+            (13, (-28.18, -20.03)),
+        ]
+        .into_iter()
+        .collect();
+        let rep = Report {
+            spans,
+            weak: vec![seed_check::Weak {
+                a: 15,
+                b: 16,
+                len_mm: 23.9,
+                fold: 1.45,
+                s: (-41.0, -39.5),
+            }],
+            molar: seed_check::arch_widths(Arch::Upper)[5],
+            slivers: Vec::new(),
+            wide: Vec::new(),
+        };
+        assert_eq!(
+            seed_check::plan_corrections(&rep),
+            vec![Action::Merge { keep: 15, drop: 16 }],
+            "the plugin's plan"
+        );
+        assert!(seed_check::plan_corrections(&seed_check::vetted(&rep, Arch::Upper)).is_empty());
+        assert_eq!(kept_apart(&rep, Arch::Upper), vec![(15, 16)]);
+        let issues = seed_check::report_issues(&rep);
+        let text = describe_issue(&issues[0], &rep, Arch::Upper);
+        assert!(text.contains("15") && text.contains("16"), "{text}");
+        assert_eq!(
+            text,
+            tr(
+                "aligners-check-issue-kept-apart",
+                &[("a", "15"), ("b", "16"), ("mm", "13.8")]
+            )
+        );
     }
 }
