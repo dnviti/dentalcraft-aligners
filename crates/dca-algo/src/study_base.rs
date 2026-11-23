@@ -54,13 +54,17 @@
 //!     (or `eu_side_angle_deg`), optional heels; upper front tip on the
 //!     raphe with the lateral corners at the canines, lower front flat with
 //!     the corners at the canines; clearance `vestibule_clear_mm`.
-//! * Solid: the scan of the protected anatomy thickened by a fraction of a
-//!   voxel and swept down (its undercuts filled), cut by the outline prism
-//!   from the base plane, joined to the slab of the outline from the base
-//!   plane up to the land (the art portion `z = −A`, or [`LAND_GAP_MM`]
-//!   under the deepest protected point when that is higher, so that the
-//!   walls rise to the land without burying the sulcus); the narrow-band SDF of `dc_geom` meshes it closed and
-//!   manifold. Optional hollowing and drain holes are not built.
+//! * Solid: the scan of the protected anatomy as it is, undercuts included
+//!   (nothing of it is filled or moved): its holes capped, its open border
+//!   walled straight down into the slab of the outline, from the base plane
+//!   up to the land (the art portion `z = −A`, or [`LAND_GAP_MM`] under the
+//!   deepest protected point when that is higher, so that the walls rise to
+//!   the land without burying the sulcus), a piece with no open border
+//!   standing on the land on its lowest [`LAND_GAP_MM`]; thickened into a
+//!   shell, filled where it encloses and brought back onto the scan, cut by
+//!   the outline prism from the base plane; the narrow-band SDF of `dc_geom`
+//!   meshes it closed and manifold. Optional hollowing and drain holes are
+//!   not built.
 //!
 //! The report gives the frame, the planes, the outline, the design angles
 //! and the angles and heights measured back on the meshes.
@@ -69,7 +73,7 @@ mod outline;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use dc_geom::sdf::{SdfGrid, SdfParams};
 use dc_mesh::TriMesh;
@@ -860,6 +864,166 @@ fn prism(poly: &[DVec2], z0: f64, z1: f64) -> TriMesh {
     TriMesh::new(positions, tris)
 }
 
+/// A loop of the border of the protected scan shorter than this fraction of
+/// the longest one of its piece is a hole of the scan (closed with a cap);
+/// a longer one is an open border (walled down), such as the lingual
+/// border of a lower arch whose protected scan goes round the tongue.
+const HOLE_FRACTION: f64 = 0.25;
+
+/// The protected scan, the triangles `tris` on the points `v` (working
+/// frame, `+Z` occlusal), with what closes it as it is: nothing of it moves
+/// and its undercuts stay. The points that share a position are joined, so
+/// that only the real border is open. Each hole of a piece (a closed loop
+/// of its border shorter than [`HOLE_FRACTION`] of its longest one) gets a
+/// cap, a fan from its middle point; every other border edge (the open
+/// border, and any chain that does not close) gets a wall straight down to
+/// `floor`, the quad between the edge and its copy, as the plugin's
+/// `make_base` walls a scan. An open surface, without a side: the caller
+/// thickens it into a shell, ends the walls in the slab of the land and
+/// fills what they enclose.
+///
+/// Also gives the feet of the pieces with no open border (a closed model,
+/// e.g. the demo typodont, which nothing walls down): the triangles of each
+/// within `band` of its lowest point, for the caller to stand it on the
+/// land.
+fn walled_anatomy(
+    v: &[DVec3],
+    tris: &[[u32; 3]],
+    floor: f64,
+    band: f64,
+) -> (TriMesh, Vec<[u32; 3]>) {
+    let key = |i: u32| {
+        let p = v[i as usize];
+        (p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+    };
+    let mut order: Vec<u32> = (0..v.len() as u32).collect();
+    order.sort_unstable_by_key(|&i| (key(i), i));
+    let mut canon: Vec<u32> = (0..v.len() as u32).collect();
+    for w in order.windows(2) {
+        if key(w[0]) == key(w[1]) {
+            canon[w[1] as usize] = canon[w[0] as usize];
+        }
+    }
+    let sheet: Vec<[u32; 3]> = tris
+        .iter()
+        .map(|t| t.map(|i| canon[i as usize]))
+        .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+        .collect();
+    // the pieces: the root point of each point
+    let mut parent: Vec<u32> = (0..v.len() as u32).collect();
+    let find = |parent: &mut Vec<u32>, mut x: u32| {
+        while parent[x as usize] != x {
+            let up = parent[parent[x as usize] as usize];
+            parent[x as usize] = up;
+            x = up;
+        }
+        x
+    };
+    for t in &sheet {
+        let r0 = find(&mut parent, t[0]);
+        for &w in &t[1..] {
+            let r = find(&mut parent, w);
+            if r != r0 {
+                parent[r as usize] = r0;
+            }
+        }
+    }
+    let piece: Vec<u32> = (0..v.len() as u32).map(|w| find(&mut parent, w)).collect();
+
+    let mesh = TriMesh::new(v.iter().map(|p| p.as_vec3()).collect(), sheet);
+    let adjacency = mesh.edge_adjacency();
+    let border: Vec<(u32, u32)> = mesh
+        .tris
+        .iter()
+        .flat_map(|t| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])])
+        .filter(|&(a, b)| adjacency.faces_of(a, b).len() == 1)
+        .collect();
+    let half: HashSet<(u32, u32)> = border.iter().copied().collect();
+    let loops: Vec<Vec<u32>> = adjacency
+        .boundary_loops()
+        .into_iter()
+        .filter(|lp| lp.len() >= 3 && half.contains(&(lp[lp.len() - 1], lp[0])))
+        .collect();
+    // the longest closed loop of each piece is its open border
+    let lengths: Vec<f64> = loops
+        .iter()
+        .map(|lp| {
+            (0..lp.len())
+                .map(|i| v[lp[i] as usize].distance(v[lp[(i + 1) % lp.len()] as usize]))
+                .sum()
+        })
+        .collect();
+    let mut longest: HashMap<u32, (f64, usize)> = HashMap::new();
+    for (k, lp) in loops.iter().enumerate() {
+        let e = longest
+            .entry(piece[lp[0] as usize])
+            .or_insert((lengths[k], k));
+        if lengths[k] > e.0 {
+            *e = (lengths[k], k);
+        }
+    }
+    let open: HashSet<u32> = border.iter().map(|&(a, _)| piece[a as usize]).collect();
+    let mut lowest: HashMap<u32, f64> = HashMap::new();
+    for t in &mesh.tris {
+        let r = piece[t[0] as usize];
+        if !open.contains(&r) {
+            let z = t
+                .iter()
+                .map(|&w| v[w as usize].z)
+                .fold(f64::INFINITY, f64::min);
+            let e = lowest.entry(r).or_insert(z);
+            *e = e.min(z);
+        }
+    }
+    let feet: Vec<[u32; 3]> = mesh
+        .tris
+        .iter()
+        .filter(|t| {
+            lowest
+                .get(&piece[t[0] as usize])
+                .is_some_and(|&z0| t.iter().all(|&w| v[w as usize].z <= z0 + band))
+        })
+        .copied()
+        .collect();
+
+    let TriMesh {
+        mut positions,
+        mut tris,
+        ..
+    } = mesh;
+    let mut capped: HashSet<(u32, u32)> = HashSet::new();
+    for (k, lp) in loops.iter().enumerate() {
+        let (top, border_loop) = longest[&piece[lp[0] as usize]];
+        if border_loop == k || lengths[k] >= HOLE_FRACTION * top {
+            continue;
+        }
+        let c = positions.len() as u32;
+        let mid = lp.iter().map(|&w| v[w as usize]).sum::<DVec3>() / lp.len() as f64;
+        positions.push(mid.as_vec3());
+        for i in 0..lp.len() {
+            let (a, b) = (lp[i], lp[(i + 1) % lp.len()]);
+            tris.push([b, a, c]);
+            capped.insert((a, b));
+        }
+    }
+    let mut copy: HashMap<u32, u32> = HashMap::new();
+    for &(a, b) in &border {
+        if capped.contains(&(a, b)) {
+            continue;
+        }
+        let [a2, b2] = [a, b].map(|w| {
+            *copy.entry(w).or_insert_with(|| {
+                let p = v[w as usize];
+                positions.push(DVec3::new(p.x, p.y, floor).as_vec3());
+                (positions.len() - 1) as u32
+            })
+        });
+        tris.push([b, a, a2]);
+        tris.push([b, a2, b2]);
+    }
+    (TriMesh::new(positions, tris), feet)
+}
+
 /// A mesh moved by `m`.
 fn moved(mesh: &TriMesh, m: &DMat4) -> TriMesh {
     TriMesh::new(
@@ -1273,7 +1437,16 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
                 }
             })
             .collect();
-        // the protected scan, thickened and swept down
+        // the land: the outline is solid up to just under the deepest
+        // protected point (or the art portion when that is higher), so no
+        // anatomy is buried and no surface grazes it
+        let land = a.min(p.depth + (4.0 * params.voxel_mm).max(LAND_GAP_MM));
+        // the protected scan as it is, its holes capped and its open border
+        // walled straight down into the slab of the land, which spans the
+        // anatomy and the outline from under the base plane: as a shell of
+        // 1.5 voxels (whatever the winding of the scan, its walls crossing
+        // each other or not), filled where they enclose, then brought back
+        // onto the scan; the outline prism cuts it
         let keep: Vec<[u32; 3]> = p
             .input
             .scan
@@ -1282,22 +1455,41 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
             .filter(|t| t.iter().all(|&i| p.protected[i as usize]))
             .copied()
             .collect();
-        let anat_mesh = TriMesh::new(p.v.iter().map(|q| q.as_vec3()).collect(), keep);
         let top = p.v.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max) + 2.0;
-        let mut solid = SdfGrid::from_mesh(&anat_mesh, &sdf)?;
-        drop(anat_mesh);
+        let (walled, feet) = walled_anatomy(&p.v, &keep, -0.5 * (land + h), LAND_GAP_MM);
+        drop(keep);
+        let mut solid = SdfGrid::from_mesh(&walled, &sdf)?;
+        drop(walled);
         solid.shift(0.75 * vs)?;
-        solid.sweep_down((-h) as f32 - 2.0 * vs)?;
+        // a piece with no open border stands on the land on its lowest part
+        if !feet.is_empty() {
+            let feet = TriMesh::new(p.v.iter().map(|q| q.as_vec3()).collect(), feet);
+            let mut stand = SdfGrid::from_mesh(&feet, &sdf)?;
+            drop(feet);
+            stand.shift(0.75 * vs)?;
+            stand.sweep_down((-h) as f32 - 2.0 * vs)?;
+            solid.union(&stand)?;
+        }
+        let (mut lo, mut hi) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
+        for q in work_poly.iter().copied().chain(
+            p.v.iter()
+                .zip(&p.protected)
+                .filter(|(_, k)| **k)
+                .map(|(q, _)| q.truncate()),
+        ) {
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+        let (lo, hi) = (lo - DVec2::ONE, hi + DVec2::ONE);
+        let rect = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
+        let slab = SdfGrid::from_mesh(&prism(&rect, -h - 2.0 * params.voxel_mm, -land), &sdf)?;
+        solid.union(&slab)?;
+        drop(slab);
+        solid.fill_interior()?;
+        solid.shift(-0.75 * vs)?;
         let walls = SdfGrid::from_mesh(&prism(&work_poly, -h, top), &sdf)?;
         solid.intersect(&walls)?;
         drop(walls);
-        // the land: the outline is solid up to just under the deepest
-        // protected point (or the art portion when that is higher), so no
-        // anatomy is buried and no surface grazes it
-        let land = a.min(p.depth + (4.0 * params.voxel_mm).max(LAND_GAP_MM));
-        let slab = SdfGrid::from_mesh(&prism(&work_poly, -h, -land), &sdf)?;
-        solid.union(&slab)?;
-        drop(slab);
         let full = solid.to_mesh()?;
         drop(solid);
         let to_case = frame::rigid_inverse(&p.to_work);
