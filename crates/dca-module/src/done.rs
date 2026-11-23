@@ -77,6 +77,9 @@ pub(crate) fn leaf_done(state: &CaseState, id: &str) -> bool {
         "aligners.review.classify" => {
             every_arch(&|a| data.review.iter().any(|r| r.arch == a.role()))
         }
+        "aligners.output.study-models" => {
+            every_arch(&|a| data.study_models.contains_key(&a.role()))
+        }
         "aligners.followup.visits" => !data.visits.is_empty(),
         _ => false,
     }
@@ -139,6 +142,32 @@ mod tests {
         cleared.set_module(MODULE_ID, ModuleState::new(data));
         assert!(!leaf_done(&cleared, colours));
         assert!(leaf_done(&cleared, BITE));
+    }
+
+    #[test]
+    fn the_study_models_step_follows_the_models_of_the_arches() {
+        use dc_mesh::TriMesh;
+        let id = "aligners.output.study-models";
+        let mut one = demo();
+        assert!(!leaf_done(&one, id));
+        let blob = one.blobs.insert(TriMesh::new(
+            vec![glam::Vec3::ZERO, glam::Vec3::Z, glam::Vec3::Y],
+            vec![[0, 1, 2]],
+        ));
+        let put = |s: &mut CaseState, role| {
+            let mut d = s.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+            d.study_models.insert(role, blob);
+            s.set_module(MODULE_ID, ModuleState::new(d));
+        };
+        put(&mut one, ScanRole::Lower);
+        assert!(leaf_done(&one, id), "one arch with its study model");
+
+        let mut two = exec("aligners.demo", &demo(), json!({ "arch": "upper" }));
+        assert!(!leaf_done(&two, id));
+        put(&mut two, ScanRole::Lower);
+        assert!(!leaf_done(&two, id), "only one of two arches");
+        put(&mut two, ScanRole::Upper);
+        assert!(leaf_done(&two, id));
     }
 
     #[test]

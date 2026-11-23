@@ -279,8 +279,9 @@ pub fn is_study_model(data: &AlignersState, e: &SceneEntry) -> bool {
 /// The entries a render draws for the "Study models" layer: `entries`
 /// (the module's, with or without their study models) without any study
 /// model when `show` is `false`; with `show`, each arch that has a study
-/// model is drawn as its study model alone: the other entries of the arch
+/// model is drawn as its study model: the other entries of the arch
 /// (3D teeth, gingiva) are left out and the study model hides its scan.
+/// The aligner of the arch, when the case shows it, is kept.
 pub fn study_models_drawn(
     state: &CaseState,
     mut entries: Vec<SceneEntry>,
@@ -299,7 +300,12 @@ pub fn study_models_drawn(
         .filter(|(_, b)| state.blobs.contains(b))
         .map(|(a, b)| (*a, *b))
         .collect();
-    entries.retain(|e| e.arch.is_none_or(|a| !study.iter().any(|(s, _)| *s == a)));
+    // the study model replaces the scan, teeth and gingiva of its arch; the
+    // aligner the user asked to see stays
+    entries.retain(|e| {
+        e.arch.is_none_or(|a| !study.iter().any(|(s, _)| *s == a))
+            || crate::aligner_scene::is_aligner(e)
+    });
     entries.extend(
         study
             .into_iter()

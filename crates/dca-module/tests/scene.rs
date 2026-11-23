@@ -3,7 +3,7 @@
 use dc_case::{Case, CaseState, Fdi, ModuleState, Pose, ScanRole};
 use dc_mesh::TriMesh;
 use dc_module_api::{Module, ModuleRegistry};
-use dc_scene::{MeshColoring, SceneItem};
+use dc_scene::{MeshColoring, SceneEntry, SceneItem};
 use dca_model::{AlignersState, Stage, ToothFrame};
 use dca_module::{
     AlignersModule, GINGIVA_COLOR, MODULE_ID, STUDY_MODEL_COLOR, is_study_model, study_models_drawn,
@@ -203,6 +203,39 @@ fn a_render_draws_the_study_model_in_place_of_its_arch_or_leaves_it_out() {
     // whatever the entries given (e.g. the scan model left the upper arch
     // out), the study model comes from the case
     assert_eq!(study_models_drawn(&s, Vec::new(), true).len(), 1);
+}
+
+#[test]
+fn the_aligner_shown_stays_beside_the_study_model() {
+    let (s, _) = with_study();
+    let data = s.module_data::<AlignersState>(MODULE_ID).unwrap();
+    let aligner = SceneEntry::new(SceneItem::Mesh {
+        blob: dc_case::BlobRef::of_bytes(b"aligner"),
+        coloring: MeshColoring::Uniform(dca_module::ALIGNER_COLOR),
+        xform: Pose::IDENTITY,
+        pickable: false,
+    })
+    .with_arch(ScanRole::Upper);
+    let mut entries = AlignersModule::new().scene_at(&s, Some(0));
+    // aligner shown: the arch holds the study model and the aligner
+    entries.push(aligner.clone());
+    let drawn = study_models_drawn(&s, entries.clone(), true);
+    let upper: Vec<_> = drawn
+        .iter()
+        .filter(|e| e.arch == Some(ScanRole::Upper))
+        .collect();
+    assert_eq!(upper.len(), 2);
+    assert!(upper.iter().any(|e| is_study_model(data, e)));
+    assert!(upper.iter().any(|e| **e == aligner));
+    // aligner hidden: the study model alone
+    entries.pop();
+    let drawn = study_models_drawn(&s, entries, true);
+    let upper: Vec<_> = drawn
+        .iter()
+        .filter(|e| e.arch == Some(ScanRole::Upper))
+        .collect();
+    assert_eq!(upper.len(), 1);
+    assert!(is_study_model(data, upper[0]));
 }
 
 /// A flat strip of gingiva along +X (1 mm grid, 3 rows) whose first column
