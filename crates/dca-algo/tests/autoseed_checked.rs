@@ -429,3 +429,196 @@ fn the_base_of_a_model_behind_the_last_molars_is_not_a_tooth() {
         "the plugin fooled {fooled} times of {cases}"
     );
 }
+
+/// The ridge of a missing tooth as the gum makes it: a closed block whose
+/// top is a rough hump centred on `c` (its top), `a` mm long along `u`
+/// (unit, in the occlusal plane) on each side of `c`, falling across the
+/// arch as a parabola, `fall` mm at `b` mm from its middle, as gum does (no
+/// walls), 6 mm deep. Its top is a grid of 0.2 mm raised and lowered by up
+/// to `rough` mm, which the crown score takes for enamel.
+fn ridge(c: DVec3, u: DVec2, a: f64, b: f64, fall: f64, rough: f64) -> (Vec<DVec3>, Vec<[u32; 3]>) {
+    const STEP: f64 = 0.2;
+    const DEPTH: f64 = 6.0;
+    let w = DVec2::new(-u.y, u.x);
+    let (nu, nw) = ((2.0 * a / STEP) as u32 + 1, (2.0 * b / STEP) as u32 + 1);
+    let mut v = Vec::new();
+    for k in 0..2 {
+        for i in 0..nu {
+            for j in 0..nw {
+                let (x, y) = (-a + f64::from(i) * STEP, -b + f64::from(j) * STEP);
+                let z = match k {
+                    0 => {
+                        -fall * (y / b).powi(2)
+                            + rough * (f64::from(i) * 1.9).sin() * (f64::from(j) * 2.3).cos()
+                    }
+                    _ => -DEPTH,
+                };
+                let p = u * x + w * y;
+                v.push(c + DVec3::new(p.x, p.y, z));
+            }
+        }
+    }
+    let id = |k: u32, i: u32, j: u32| k * nu * nw + i * nw + j;
+    let mut t = Vec::new();
+    for i in 0..nu - 1 {
+        for j in 0..nw - 1 {
+            let [p, q, r, s] = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)];
+            t.push([id(0, p.0, p.1), id(0, q.0, q.1), id(0, r.0, r.1)]);
+            t.push([id(0, p.0, p.1), id(0, r.0, r.1), id(0, s.0, s.1)]);
+            t.push([id(1, p.0, p.1), id(1, r.0, r.1), id(1, q.0, q.1)]);
+            t.push([id(1, p.0, p.1), id(1, s.0, s.1), id(1, r.0, r.1)]);
+        }
+    }
+    // the sides, along the border of the grid (counter-clockwise from above)
+    let mut ring: Vec<(u32, u32)> = (0..nu - 1).map(|i| (i, 0)).collect();
+    ring.extend((0..nw - 1).map(|j| (nu - 1, j)));
+    ring.extend((1..nu).rev().map(|i| (i, nw - 1)));
+    ring.extend((1..nw).rev().map(|j| (0, j)));
+    for k in 0..ring.len() {
+        let ((i0, j0), (i1, j1)) = (ring[k], ring[(k + 1) % ring.len()]);
+        let (p0, p1, q0, q1) = (id(0, i0, j0), id(0, i1, j1), id(1, i0, j0), id(1, i1, j1));
+        t.push([p0, q0, q1]);
+        t.push([p0, q1, p1]);
+    }
+    (v, t)
+}
+
+/// A demo arch without the tooth `gone`: in its place the ridge of a
+/// missing tooth as on the printed test piece (rough, its top `below` mm
+/// under the top of the tooth that is gone, running under the crowns of
+/// the neighbours with no valley in between, falling across the arch as
+/// gum: 3 mm at 6 mm from its middle). The true teeth, the label of every
+/// demo vertex left, the teeth beside the ridge, the mesh.
+#[allow(clippy::type_complexity)]
+fn arch_with_ridge(
+    arch: Arch,
+    seed: u64,
+    gone: u8,
+    below: f64,
+) -> (Vec<Fdi>, Vec<u16>, [u8; 2], Vec<DVec3>, Vec<[u32; 3]>) {
+    let d = demo::run(&demo::Params {
+        arch,
+        severity: Severity::Mild,
+        seed,
+        third_molars: false,
+    });
+    let labels = d.mesh.vertex_labels.as_ref().unwrap();
+    let k = d.seeds.iter().position(|s| s.fdi.get() == gone).unwrap();
+    let mut index = vec![u32::MAX; labels.len()];
+    let (mut v, mut kept) = (Vec::new(), Vec::new());
+    for (i, (p, &l)) in d.mesh.positions.iter().zip(labels).enumerate() {
+        if l != u16::from(gone) {
+            index[i] = v.len() as u32;
+            v.push(p.as_dvec3());
+            kept.push(l);
+        }
+    }
+    let mut t: Vec<[u32; 3]> = d
+        .mesh
+        .tris
+        .iter()
+        .filter(|f| f.iter().all(|&i| index[i as usize] != u32::MAX))
+        .map(|f| f.map(|i| index[i as usize]))
+        .collect();
+    let (prev, next) = (d.seeds[k - 1], d.seeds[k + 1]);
+    let u = (next.position - prev.position).truncate().normalize();
+    let md = dca_algo::anatomy::typical_diameters(d.seeds[k].fdi).0;
+    let top = d.seeds[k].position - DVec3::Z * below;
+    let (rv, rt) = ridge(top, u, 0.5 * md + 1.0, 6.0, 3.0, 0.1);
+    let base = v.len() as u32;
+    v.extend(rv);
+    t.extend(rt.iter().map(|f| f.map(|i| i + base)));
+    let truth = d
+        .seeds
+        .iter()
+        .map(|s| s.fdi)
+        .filter(|f| f.get() != gone)
+        .collect();
+    (truth, kept, [prev.fdi.get(), next.fdi.get()], v, t)
+}
+
+/// The ridge of a missing tooth 3-5 mm under the crowns beside it, rough
+/// as on the printed test piece (21 missing there), with no tooth marked
+/// missing: the checked proposal finds a stretch with no crown
+/// ([`Doubt::EmptyRidge`]: it sinks between the crowns, nothing stands on
+/// it, it falls across the arch as gum) and counts it as the space of a
+/// missing tooth: the true teeth, each seed on its own crown, and the
+/// teeth beside the space named. On the test piece the plugin is fooled by
+/// such a ridge (a seed on it, or every number on its side shifted).
+#[test]
+fn the_ridge_of_a_missing_tooth_is_a_space() {
+    for (arch, seed, gone, below) in [
+        (Arch::Upper, 3, 21, 5.0),
+        (Arch::Upper, 5, 21, 5.0),
+        (Arch::Upper, 7, 12, 4.0),
+        (Arch::Upper, 3, 24, 3.0),
+        (Arch::Lower, 5, 31, 3.0),
+        (Arch::Lower, 5, 31, 4.0),
+    ] {
+        let name = format!("{arch:?} seed {seed} without {gone}, ridge {below} mm under");
+        let (truth, labels, beside, v, t) = arch_with_ridge(arch, seed, gone, below);
+        let out = checked(arch, &v, &t, &[]);
+        assert_eq!(teeth(&out.seeds), truth, "{name}");
+        assert_eq!(
+            off_crown_in(&labels, &v, &out.seeds),
+            Vec::<Fdi>::new(),
+            "{name}"
+        );
+        let check = out.diagnostics.checked.as_ref().expect("checked");
+        assert!(check.doubts.contains(&Doubt::EmptyRidge), "{name}");
+        let mut spaces = check.spaces.clone();
+        for s in &mut spaces {
+            s.sort_unstable();
+        }
+        let mut beside = beside;
+        beside.sort_unstable();
+        assert_eq!(spaces, vec![beside], "{name}");
+    }
+}
+
+/// A short tooth, its crown sunk 1.5-3.5 mm under its neighbours (partly
+/// erupted, intruded), front and back, upper and lower: it stands in the
+/// gum with walls, so it is a tooth, never a space, even where it is as
+/// flat along the arch as a ridge. (Sunk 3.5 mm, the plugin's seed point
+/// of a premolar can fall on the slope of its neighbour: there only the
+/// teeth are compared.)
+#[test]
+fn a_low_tooth_is_a_tooth() {
+    for (arch, seed, low) in [
+        (Arch::Upper, 3, 12),
+        (Arch::Upper, 5, 25),
+        (Arch::Upper, 7, 21),
+        (Arch::Lower, 3, 42),
+        (Arch::Lower, 5, 35),
+        (Arch::Lower, 7, 33),
+    ] {
+        for sink in [1.5, 2.5, 3.5] {
+            let name = format!("{arch:?} seed {seed}, {low} {sink} mm low");
+            let d = demo::run(&demo::Params {
+                arch,
+                severity: Severity::Mild,
+                seed,
+                third_molars: false,
+            });
+            let labels = d.mesh.vertex_labels.as_ref().unwrap();
+            let v: Vec<DVec3> = d
+                .mesh
+                .positions
+                .iter()
+                .zip(labels)
+                .map(|(p, &l)| p.as_dvec3() - DVec3::Z * if l == low { sink } else { 0.0 })
+                .collect();
+            let out = checked(arch, &v, &d.mesh.tris, &[]);
+            assert_eq!(teeth(&out.seeds), teeth(&d.seeds), "{name}");
+            if sink <= 2.5 {
+                assert_eq!(off_crown(&d, &v, &out.seeds), Vec::<Fdi>::new(), "{name}");
+            }
+            let doubts = out
+                .diagnostics
+                .checked
+                .map(|c| c.doubts)
+                .unwrap_or_default();
+            assert!(!doubts.contains(&Doubt::EmptyRidge), "{name}: {doubts:?}");
+        }
+    }
+}

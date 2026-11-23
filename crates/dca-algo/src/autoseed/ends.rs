@@ -29,6 +29,7 @@
 use glam::{DMat4, DVec2, DVec3};
 
 use super::numpy::interp;
+use super::ridges;
 use super::{
     AutoseedError, BIN_MM, CROWN_WIDTH_MM, END_ZONE, MIN_SEEDS, Options, Profiles, Proposal,
     RawProfile, ToothBins, VALLEY_COST, VALLEY_MM, WALL_DROP_MM, WALL_REACH_MM, propose_in,
@@ -53,6 +54,10 @@ const MIN_ARCH_MM: f64 = 20.0;
 /// A contact is kept by a boundary at most this far (mm) along the arch
 /// ([`no_worse`]).
 const CONTACT_MM: f64 = 1.0;
+/// The crown tops on each side of a valley are looked for within this
+/// distance (mm) along the arch ([`valley`]), as for the plugin's valley
+/// depth.
+const VALLEY_REACH_MM: f64 = 2.0;
 
 /// The scan seen from its occlusal side: the highest point of every cell
 /// of [`CELL_MM`] (arch coordinates).
@@ -95,7 +100,7 @@ impl HeightMap {
     }
 
     /// Height of the scan at `p`; `None` where it has no point.
-    fn at(&self, p: DVec2) -> Option<f64> {
+    pub(crate) fn at(&self, p: DVec2) -> Option<f64> {
         let (fx, fy) = ((p.x - self.x0) / CELL_MM, (p.y - self.y0) / CELL_MM);
         if !(fx >= 0.0 && fy >= 0.0) {
             return None;
@@ -127,7 +132,7 @@ fn top_of(pts: &[DVec3]) -> Option<(DVec2, f64)> {
 }
 
 /// [`top_of`] the crown on the bins `[a, b)` of the profiles.
-fn crown_top(pr: &Profiles, (a, b): (usize, usize)) -> Option<(DVec2, f64)> {
+pub(crate) fn crown_top(pr: &Profiles, (a, b): (usize, usize)) -> Option<(DVec2, f64)> {
     let pts: Vec<DVec3> = pr
         .points
         .iter()
@@ -138,20 +143,25 @@ fn crown_top(pr: &Profiles, (a, b): (usize, usize)) -> Option<(DVec2, f64)> {
     top_of(&pts)
 }
 
+/// The highest point of the scan on a strip [`WALL_STRIP_MM`] long along
+/// `u` centred on `p`; `None` where the scan has no point.
+pub(crate) fn strip(hm: &HeightMap, p: DVec2, u: DVec2) -> Option<f64> {
+    let z = [-1.0, -0.5, 0.0, 0.5, 1.0]
+        .map(|f| hm.at(p + u * (f * WALL_STRIP_MM)))
+        .into_iter()
+        .flatten()
+        .fold(f64::NEG_INFINITY, f64::max);
+    z.is_finite().then_some(z)
+}
+
 /// How far from `c` towards `w` the scan falls [`WALL_DROP_MM`] under
-/// `top` (a strip [`WALL_STRIP_MM`] long along `u`), up to
-/// [`WALL_REACH_MM`]. Where the scan has no point the search goes on: past
-/// its border, nothing falls.
+/// `top` (a strip along `u`, [`strip`]), up to [`WALL_REACH_MM`]. Where the
+/// scan has no point the search goes on: past its border, nothing falls.
 fn wall(hm: &HeightMap, c: DVec2, top: f64, u: DVec2, w: DVec2) -> Option<f64> {
     let steps = (WALL_REACH_MM / WALL_STEP_MM).round() as usize;
-    (1..=steps).map(|k| k as f64 * WALL_STEP_MM).find(|&t| {
-        let z = [-1.0, -0.5, 0.0, 0.5, 1.0]
-            .map(|f| hm.at(c + w * t + u * (f * WALL_STRIP_MM)))
-            .into_iter()
-            .flatten()
-            .fold(f64::NEG_INFINITY, f64::max);
-        z.is_finite() && z < top - WALL_DROP_MM
-    })
+    (1..=steps)
+        .map(|k| k as f64 * WALL_STEP_MM)
+        .find(|&t| strip(hm, c + w * t, u).is_some_and(|z| z < top - WALL_DROP_MM))
 }
 
 /// The top `top` centred on `c` stands above the scan on both sides across
@@ -222,7 +232,8 @@ pub(crate) fn refit(
     hm: &HeightMap,
 ) -> Result<(Profiles, Proposal, ToothBins), AutoseedError> {
     let (mut lo, mut hi) = raw.extent();
-    let mut pr = raw.between(lo, hi, true)?;
+    // a stretch with no crown between two crowns is gum here too
+    let mut pr = ridges::gum_stretches(raw.between(lo, hi, true)?, hm);
     let (mut p, mut segs) = propose_in(arch, opts, frame, &pr, false)?;
     for _ in 0..ROUNDS {
         let [first, last] = end_crowns(&pr, hm, &segs);
@@ -246,7 +257,7 @@ pub(crate) fn refit(
         if hi2 - lo2 < MIN_ARCH_MM {
             break;
         }
-        let pr2 = raw.between(lo2, hi2, true)?;
+        let pr2 = ridges::gum_stretches(raw.between(lo2, hi2, true)?, hm);
         let (p2, segs2) = propose_in(arch, opts, frame, &pr2, false)?;
         if p2.seeds.len() < MIN_SEEDS {
             break;
@@ -258,9 +269,12 @@ pub(crate) fn refit(
 
 /// Arc length of the contacts of the teeth on the bins `segs` of `pr`: the
 /// boundaries where two teeth touch (not across a space) in a valley of the
-/// crown tops that the plugin's boundary cost does not penalise (a contact
-/// at least as likely as the inside of a crown, [`VALLEY_COST`]), but
-/// those of the teeth that are no crown at either end ([`non_crowns`]).
+/// crown tops, under the tops on both sides of it ([`valley`]) by a depth
+/// the plugin's boundary cost does not penalise (a contact at least as
+/// likely as the inside of a crown, [`VALLEY_COST`]), but those of the
+/// teeth that are no crown at either end ([`non_crowns`]). A boundary on
+/// the slope of a crown is no contact: a proposal stretched over the end
+/// of a crown puts boundaries there.
 fn contacts(pr: &Profiles, hm: &HeightMap, segs: &ToothBins) -> Vec<f64> {
     let n = segs.len();
     let [first, last] = non_crowns(pr, hm, segs);
@@ -268,9 +282,22 @@ fn contacts(pr: &Profiles, hm: &HeightMap, segs: &ToothBins) -> Vec<f64> {
         .filter(|&j| j >= first && j + 1 + last < n)
         .filter(|&j| segs[j].1.1 == segs[j + 1].1.0)
         .map(|j| segs[j].1.1)
-        .filter(|&k| interp(pr.dip[k.min(pr.nb - 1)], &VALLEY_MM, &VALLEY_COST) <= 0.0)
+        .filter(|&k| interp(valley(pr, k), &VALLEY_MM, &VALLEY_COST) <= 0.0)
         .map(|k| pr.s_min + k as f64 * BIN_MM)
         .collect()
+}
+
+/// Depth of the valley of the crown tops of `pr` at the bin `k`: how far it
+/// lies under the highest bin on each side of it within [`VALLEY_REACH_MM`],
+/// the lower of the two (the plugin's depth, [`Profiles::dip`], takes the
+/// highest bin on either side, and is as deep on a slope).
+fn valley(pr: &Profiles, k: usize) -> f64 {
+    let k = k.min(pr.nb - 1);
+    let r = (VALLEY_REACH_MM / BIN_MM).round() as usize;
+    let top = |s: &[f64]| s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let left = top(&pr.h[k.saturating_sub(r)..=k]);
+    let right = top(&pr.h[k..(k + r + 1).min(pr.nb)]);
+    left.min(right) - pr.h[k]
 }
 
 /// The proposal on the bins `r_segs` of `r_pr` ([`refit`]) is no worse than

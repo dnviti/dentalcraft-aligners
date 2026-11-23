@@ -51,7 +51,9 @@ mod dp;
 mod ends;
 mod nearest;
 pub(crate) mod numpy;
+mod ridges;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use dc_case::{Fdi, Pose};
@@ -1063,6 +1065,15 @@ pub enum Doubt {
     /// heel or a back wall as high as the crowns). The ends of the arch
     /// are found again from the crowns ([`WALL_DROP_MM`]).
     EndNotTooth,
+    /// A stretch of the arch with no crown on it between two crowns (the
+    /// ridge of a missing tooth, or a space): counted as gum, so it is a
+    /// missing tooth or a space between the teeth on its sides
+    /// ([`RIDGE_DROP_MM`], [`Check::spaces`]).
+    EmptyRidge,
+    /// A stretch of the arch low between two crowns that could be a low
+    /// tooth or the ridge of a missing tooth: left as it was found
+    /// ([`RIDGE_DOUBT_MM`], [`Check::low`]).
+    LowCrown,
 }
 
 /// The check of a doubtful proposal ([`Diagnostics::checked`]).
@@ -1072,6 +1083,14 @@ pub struct Check {
     pub doubts: Vec<Doubt>,
     /// The teeth of the plugin's proposal, replaced by the new ones.
     pub plugin_teeth: Vec<u8>,
+    /// The teeth on the two sides of each stretch with no crown counted as
+    /// gum ([`Doubt::EmptyRidge`]), 0 where the arch ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<[u8; 2]>,
+    /// The teeth on the two sides of each low stretch left as found
+    /// ([`Doubt::LowCrown`]), 0 where the arch ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub low: Vec<[u8; 2]>,
 }
 
 /// The checked proposal leaves out what lies beyond the end teeth when it
@@ -1100,6 +1119,40 @@ pub const WALL_DROP_MM: f64 = 2.5;
 pub const WALL_REACH_MM: f64 = 7.5;
 /// See [`WALL_DROP_MM`].
 pub const CROWN_WIDTH_MM: f64 = 12.5;
+/// A stretch of the arch with no crown on it between two crowns (the ridge
+/// of a missing tooth, a space between two teeth): at least
+/// [`RIDGE_MIN_MM`] long [`RIDGE_DROP_MM`] under the crown tops on both
+/// sides (looked for within [`RIDGE_REACH_MM`]), nothing on it rising
+/// [`RIDGE_RISE_MM`] above the lowest points on both sides of it, and the
+/// scan falling across the arch from its top at most [`RIDGE_GUM_SLOPE`]
+/// ([`Doubt::EmptyRidge`]). The empty ridge of 21 on the printed test
+/// piece: 6.5-7.75 mm long at that depth, 3.3-5.4 mm under the crowns of
+/// its neighbours, rising 0.16-0.35 mm, falling across the arch at most
+/// 1.6-1.8 mm per mm; the crowns beside it have walls falling 4.2-8 mm
+/// per mm, and a crown sunk under its neighbours can be as flat along the
+/// arch as a ridge, but not across it.
+pub const RIDGE_DROP_MM: f64 = 2.5;
+/// See [`RIDGE_DROP_MM`].
+pub const RIDGE_REACH_MM: f64 = 8.0;
+/// See [`RIDGE_DROP_MM`].
+pub const RIDGE_MIN_MM: f64 = 4.0;
+/// See [`RIDGE_DROP_MM`].
+pub const RIDGE_RISE_MM: f64 = 0.5;
+/// See [`RIDGE_DROP_MM`]: the steepest fall of gum (mm per mm, over 1 mm),
+/// within [`RIDGE_WALL_REACH_MM`] of the top on either side.
+pub const RIDGE_GUM_SLOPE: f64 = 2.25;
+/// See [`RIDGE_GUM_SLOPE`].
+pub const RIDGE_WALL_REACH_MM: f64 = 4.0;
+/// A stretch [`RIDGE_MIN_MM`] long only this deep under the crowns on both
+/// sides, or with a rise under [`RIDGE_TOP_MM`], or with walls falling up
+/// to [`RIDGE_CROWN_SLOPE`], that is not an empty ridge could be a low
+/// tooth: it is left as it is, a doubt ([`Doubt::LowCrown`]).
+pub const RIDGE_DOUBT_MM: f64 = 2.0;
+/// See [`RIDGE_DOUBT_MM`].
+pub const RIDGE_TOP_MM: f64 = 1.0;
+/// See [`RIDGE_DOUBT_MM`]: walls steeper than this (mm per mm) are a
+/// crown's.
+pub const RIDGE_CROWN_SLOPE: f64 = 3.5;
 
 /// One seed per tooth found.
 #[derive(Debug, Clone, PartialEq)]
@@ -1186,6 +1239,12 @@ fn width_scales() -> Vec<f64> {
 /// teeth are found and checked again on it. That proposal replaces the
 /// first one only when it is no worse (`ends::no_worse`); otherwise the
 /// first one stays, with the doubt.
+///
+/// Before all this, a stretch of the arch with no crown on it between two
+/// crowns (the ridge of a missing tooth, as high as the crowns on a model)
+/// is made gum, and the teeth are found around it (`ridges`,
+/// [`Doubt::EmptyRidge`]): without the tooth marked missing, the plugin
+/// takes such a ridge for a tooth or spaces the teeth over it.
 pub fn propose_checked(
     v: &[DVec3],
     t: &[[u32; 3]],
@@ -1212,39 +1271,108 @@ pub fn propose_checked(
         return Ok(p);
     }
     let plugin_teeth: Vec<u8> = p.seeds.iter().map(|s| s.fdi.get()).collect();
-    let (c, c_segs, c_doubts) = check(arch, opts, &data.frame, &data.profiles, p, segs)?;
-    if ends::end_crowns(&data.profiles, &data.heights, &c_segs) == [true; 2] {
-        return Ok(mark(c, c_doubts, plugin_teeth));
+    // the stretches with no crown between two crowns are gum: the teeth are
+    // found around them (a missing tooth, a space)
+    let low = ridges::low_stretches(&data.profiles, &data.heights);
+    let (pr, p, segs, low) = if low.empty.is_empty() {
+        (Cow::Borrowed(&data.profiles), p, segs, low)
+    } else {
+        let pr = ridges::as_gum(data.profiles.clone(), &low.empty);
+        let (q, q_segs) = propose_in(arch, opts, &data.frame, &pr, false)?;
+        if ridges::keeps_crowns(&segs, &q_segs, &low.empty) {
+            (Cow::Owned(pr), q, q_segs, low)
+        } else {
+            // a crown of the plugin's proposal would go: the stretches stay
+            // as they were found, a doubt
+            (Cow::Borrowed(&data.profiles), p, segs, low.left_as_found())
+        }
+    };
+    let at = |(a, b): &(usize, usize)| {
+        let s = |k: usize| pr.s_min + k as f64 * BIN_MM;
+        (s(*a), s(*b))
+    };
+    let stretches = Stretches {
+        empty: low.empty.iter().map(at).collect(),
+        low: low.doubtful.iter().map(at).collect(),
+        curve: &data.curve,
+    };
+    let (c, c_segs, c_doubts) = check(arch, opts, &data.frame, &pr, p, segs)?;
+    if ends::end_crowns(&pr, &data.heights, &c_segs) == [true; 2] {
+        return Ok(mark(c, c_doubts, plugin_teeth, &stretches));
     }
     // an end tooth is no crown (the base of a model as high as the crowns):
     // the ends of the arch found again from the crowns, checked the same
     // way; kept only when no worse, otherwise the doubt is told
     let refit = ends::refit(arch, opts, &data.frame, &data.raw, &data.heights).and_then(
-        |(pr, r, r_segs)| {
-            check(arch, opts, &data.frame, &pr, r, r_segs).map(|(r, s, d)| (pr, r, s, d))
+        |(r_pr, r, r_segs)| {
+            check(arch, opts, &data.frame, &r_pr, r, r_segs).map(|(r, s, d)| (r_pr, r, s, d))
         },
     );
     let mut doubts = vec![Doubt::EndNotTooth];
     let (x, more) = match refit {
-        Ok((pr, r, r_segs, r_doubts))
-            if ends::no_worse(&data.profiles, &c_segs, &pr, &r_segs, &data.heights) =>
+        Ok((r_pr, r, r_segs, r_doubts))
+            if ends::no_worse(&pr, &c_segs, &r_pr, &r_segs, &data.heights) =>
         {
             (r, r_doubts)
         }
         _ => (c, c_doubts),
     };
     doubts.extend(more.into_iter().filter(|d| *d != Doubt::EndNotTooth));
-    Ok(mark(x, doubts, plugin_teeth))
+    Ok(mark(x, doubts, plugin_teeth, &stretches))
+}
+
+/// The low stretches of the arch ([`ridges`]) in arc length along `curve`:
+/// those made gum and those left as found.
+struct Stretches<'a> {
+    empty: Vec<(f64, f64)>,
+    low: Vec<(f64, f64)>,
+    curve: &'a ArchCurve,
+}
+
+/// The teeth of `p` on the two sides of the stretch `[s0, s1]` of the arch
+/// curve `curve` (arc length): the nearest before and the nearest after
+/// it, 0 where there is none.
+fn around(p: &Proposal, curve: &ArchCurve, (s0, s1): (f64, f64)) -> [u8; 2] {
+    let inv = frame::rigid_inverse(&p.frame);
+    let (mut before, mut after) = ((f64::NEG_INFINITY, 0), (f64::INFINITY, 0));
+    for seed in &p.seeds {
+        let s = curve.project(transform(&inv, seed.position).truncate());
+        if s <= s0 && s > before.0 {
+            before = (s, seed.fdi.get());
+        }
+        if s >= s1 && s < after.0 {
+            after = (s, seed.fdi.get());
+        }
+    }
+    [before.1, after.1]
 }
 
 /// `p` with its `doubts` and `plugin_teeth`, the teeth of the plugin's
-/// proposal, in its diagnostics; unmarked without doubts (the plugin's
-/// proposal, [`propose_checked`]).
-fn mark(mut p: Proposal, doubts: Vec<Doubt>, plugin_teeth: Vec<u8>) -> Proposal {
+/// proposal, in its diagnostics, with the doubts of the low `stretches` of
+/// the arch and the teeth beside them; unmarked without doubts (the
+/// plugin's proposal, [`propose_checked`]).
+fn mark(
+    mut p: Proposal,
+    mut doubts: Vec<Doubt>,
+    plugin_teeth: Vec<u8>,
+    stretches: &Stretches<'_>,
+) -> Proposal {
+    if !stretches.empty.is_empty() {
+        doubts.push(Doubt::EmptyRidge);
+    }
+    if !stretches.low.is_empty() {
+        doubts.push(Doubt::LowCrown);
+    }
     if !doubts.is_empty() {
+        let teeth = |s: &[(f64, f64)]| -> Vec<[u8; 2]> {
+            s.iter().map(|&x| around(&p, stretches.curve, x)).collect()
+        };
+        let (spaces, low) = (teeth(&stretches.empty), teeth(&stretches.low));
         p.diagnostics.checked = Some(Check {
             doubts,
             plugin_teeth,
+            spaces,
+            low,
         });
     }
     p
