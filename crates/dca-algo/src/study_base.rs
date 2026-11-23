@@ -8,8 +8,10 @@
 //! model). Every angle and distance is a [`Params`] field.
 //!
 //! # Frame and landmarks
-//! Common occlusion frame (the arches are in occlusion in case coordinates,
-//! after a bite registration or the virtual bite):
+//! Two arches in occlusion in case coordinates (after a bite registration
+//! or the virtual bite: their occlusal sides facing each other, their
+//! crowns within [`OCCLUSION_REACH_MM`]) are based as a pair, on a common
+//! occlusion frame:
 //! * `z`: normal of the occlusal plane fitted through the cusp tips of both
 //!   arches (the highest vertex of every tooth label towards the
 //!   antagonist), pointing from the lower to the upper arch; origin on it;
@@ -19,6 +21,12 @@
 //!   and through their midpoints. Fallbacks: the same on the lower arch
 //!   (the dental midline), then the `y` of the arch frame from the seeds;
 //! * `x = y × z` (the patient's right).
+//!
+//! Two arches that are not in occlusion (the scans as read, before the
+//! bite: both facing the scanner, side by side) are each based on its own,
+//! as when alone: the common frame would take the occlusal side of one for
+//! that of the other and turn that arch upside down. One arch alone is
+//! framed the same way, its `z` its own occlusal direction.
 //!
 //! Each arch is worked in its own frame with `+Z` occlusal (the upper arch
 //! turned 180° about `y`), so its base plane is `z = −H`.
@@ -286,18 +294,21 @@ pub enum StudyBaseError {
     Geometry(#[from] dc_geom::GeomError),
 }
 
-/// One arch: its scan in occlusion (case coordinates) and its tooth labels.
+/// One arch: its scan (case coordinates) and its tooth labels.
 #[derive(Debug, Clone, Copy)]
 pub struct ArchInput<'a> {
     /// The scan (open surface, teeth and gingiva).
     pub scan: &'a TriMesh,
     /// FDI number per scan vertex, `0` for the gingiva.
     pub labels: &'a [u16],
-    /// The arch frame (seeds or mesh), for the fallbacks of the frame.
+    /// The arch frame (seeds or mesh): its occlusal direction tells
+    /// whether two arches are in occlusion, and the fallbacks of the frame.
     pub arch_frame: ArchFrame,
 }
 
-/// The arches to base (at least one), in occlusion in case coordinates.
+/// The arches to base (at least one). Two in occlusion in case coordinates
+/// (facing each other, their crowns within [`OCCLUSION_REACH_MM`]) are
+/// based as a pair; two that are not are each based on its own.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Input<'a> {
     /// The upper arch.
@@ -324,7 +335,8 @@ impl Plane {
     }
 }
 
-/// The common occlusion frame (case coordinates).
+/// The occlusion frame of the pair, or of one arch based on its own (case
+/// coordinates).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommonFrame {
     /// Origin, on the occlusal plane and the raphe.
@@ -389,7 +401,10 @@ pub struct ArchReport {
     pub land_mm: f64,
     /// The base plane.
     pub base_plane: Plane,
-    /// The outline (common frame, plan).
+    /// The frame its outline and walls are given in: the occlusion frame of
+    /// the pair, or its own when the arches are based apart.
+    pub frame: CommonFrame,
+    /// The outline (its frame, plan).
     pub outline: Outline,
     /// Interior angles of the outline as designed (degrees).
     pub design_angles_deg: BTreeMap<String, f64>,
@@ -454,12 +469,18 @@ pub struct Tunnel {
 pub struct Report {
     /// Style built.
     pub style: Style,
-    /// The common occlusion frame.
+    /// The common occlusion frame (of the upper arch when the arches are
+    /// based apart; each arch's own is in its report).
     pub frame: CommonFrame,
-    /// The occlusal plane.
+    /// The occlusal plane (of the frame).
     pub occlusal_plane: Plane,
-    /// The back plane, shared by both arches.
+    /// The back plane, shared by both arches of a pair.
     pub back_plane: Plane,
+    /// The two arches were in occlusion and are based as a pair (one
+    /// frame, the back plane shared); `false` for one arch, or for two
+    /// that are not in occlusion (the scans as read, before the bite), each
+    /// based on its own as when alone.
+    pub paired: bool,
     /// Per arch (`upper`, `lower`).
     pub arches: BTreeMap<String, ArchReport>,
     /// Upper base to lower base, designed (mm; both arches only).
@@ -687,6 +708,56 @@ fn common_frame(
             plane_source: plane_source.to_owned(),
         },
     ))
+}
+
+/// Two arches whose occlusal directions are farther than this from
+/// opposite are not in occlusion (degrees).
+pub const OCCLUSION_FACING_DEG: f64 = 45.0;
+
+/// The crowns of two arches in occlusion are within this of each other
+/// (mm): their centroids lie a few millimetres apart (the overjet, the
+/// height of the crowns), those of scans as read a jaw or more.
+pub const OCCLUSION_REACH_MM: f64 = 20.0;
+
+/// The two arches are in occlusion in case coordinates (after a bite
+/// registration or the virtual bite): their occlusal directions (of the
+/// arch frames) face each other, within [`OCCLUSION_FACING_DEG`], and the
+/// centroids of their crowns (every labelled point, whatever its number)
+/// are within [`OCCLUSION_REACH_MM`].
+fn in_occlusion(upper: &ArchInput<'_>, lower: &ArchInput<'_>) -> bool {
+    let facing = upper
+        .arch_frame
+        .n
+        .normalize_or_zero()
+        .dot(lower.arch_frame.n.normalize_or_zero());
+    let crowns = |a: &ArchInput<'_>| {
+        let (mut sum, mut n) = (DVec3::ZERO, 0.0);
+        for (p, &l) in a.scan.positions.iter().zip(a.labels) {
+            if l > 0 {
+                sum += p.as_dvec3();
+                n += 1.0;
+            }
+        }
+        sum / f64::max(n, 1.0)
+    };
+    facing < -OCCLUSION_FACING_DEG.to_radians().cos()
+        && crowns(upper).distance(crowns(lower)) < OCCLUSION_REACH_MM
+}
+
+/// The output of two arches based each on its own ([`run`] of each
+/// alone): not a pair (no total height, no back planes to compare), the
+/// frame of the report the upper's, each arch's own in its report.
+fn apart(upper: Output, lower: Output) -> Output {
+    let mut report = upper.report;
+    report.paired = false;
+    report.arches.extend(lower.report.arches);
+    report.warnings.extend(lower.report.warnings);
+    report.warnings.retain(|w| w.code != "single_arch");
+    Output {
+        upper_base: upper.upper_base,
+        lower_base: lower.lower_base,
+        report,
+    }
 }
 
 /// The land stays at least this far under the deepest protected point (mm).
@@ -1282,6 +1353,28 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
         }
         case_v.push(to_vec(a.scan));
     }
+    // two arches not in occlusion (the scans as read, before the bite) are
+    // each based on its own, as when alone: the common frame would take the
+    // occlusal side of one for that of the other
+    if let (Some(u), Some(l)) = (input.upper, input.lower)
+        && !in_occlusion(&u, &l)
+    {
+        let up = run(
+            &Input {
+                upper: Some(u),
+                lower: None,
+            },
+            params,
+        )?;
+        let lo = run(
+            &Input {
+                upper: None,
+                lower: Some(l),
+            },
+            params,
+        )?;
+        return Ok(apart(up, lo));
+    }
     if arches.len() == 1 {
         warn(
             &mut warnings,
@@ -1840,6 +1933,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
                 depth_mm: p.depth,
                 land_mm: land,
                 base_plane: Plane::new(origin + z_axis * (sgn * h), z_axis * sgn),
+                frame: frame_report.clone(),
                 outline: o.clone(),
                 design_angles_deg: design[key].clone(),
                 measured_angles_deg: measured_angles,
@@ -1882,6 +1976,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
         style: params.style,
         occlusal_plane: Plane::new(origin, z_axis),
         back_plane: Plane::new(origin + y * back_y, -y),
+        paired: prepared.len() == 2,
         frame: frame_report,
         arches: reports,
         total_height_mm: total,

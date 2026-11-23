@@ -344,6 +344,7 @@ fn the_study_models_keep_the_scanned_anatomy_undercuts_and_palate_included() {
         }),
     };
     let out = run(&input, &params).unwrap();
+    assert!(out.report.paired, "{:?}", out.report.warnings);
     for (key, scan, model) in [
         ("upper", &upper, out.upper_base.as_ref().unwrap()),
         ("lower", &lower, out.lower_base.as_ref().unwrap()),
@@ -379,6 +380,83 @@ fn the_study_models_keep_the_scanned_anatomy_undercuts_and_palate_included() {
             (r.measured_height_mm - r.height_mm).abs() < 0.5,
             "{key}: {r:?}"
         );
+    }
+}
+
+/// `scan` and its arch frame as an upper scan is read: turned 180° about
+/// `y` to face the scanner as a lower scan does, and moved by `shift`.
+fn as_read(scan: &TriMesh, frame: ArchFrame, shift: DVec3) -> (TriMesh, ArchFrame) {
+    let m = DMat4::from_translation(shift) * DMat4::from_rotation_y(std::f64::consts::PI);
+    let mut moved = scan.clone();
+    for p in &mut moved.positions {
+        *p = m.transform_point3(p.as_dvec3()).as_vec3();
+    }
+    let frame = ArchFrame {
+        origin: m.transform_point3(frame.origin),
+        x: m.transform_vector3(frame.x),
+        y: m.transform_vector3(frame.y),
+        n: m.transform_vector3(frame.n),
+    };
+    (moved, frame)
+}
+
+#[test]
+fn two_arches_not_in_occlusion_are_each_based_as_when_alone() {
+    // the scans as read, before the bite: the upper facing the scanner as
+    // the lower does, beside it (a pair's frame would take the lower's
+    // occlusal side for the upper's, turn the upper upside down and put its
+    // base on its crowns, with a false mirrored-labels warning)
+    let params = Params {
+        voxel_mm: 0.4,
+        tolerance_mm: 0.0,
+        ..Params::default()
+    };
+    let (upper, upper_labels, upper_frame) = arch_sheet(Arch::Upper, false);
+    let (lower, lower_labels, lower_frame) = arch_sheet(Arch::Lower, false);
+    let (upper, upper_frame) = as_read(&upper, upper_frame, DVec3::new(0.0, 100.0, 0.0));
+    let input = Input {
+        upper: Some(ArchInput {
+            scan: &upper,
+            labels: &upper_labels,
+            arch_frame: upper_frame,
+        }),
+        lower: Some(ArchInput {
+            scan: &lower,
+            labels: &lower_labels,
+            arch_frame: lower_frame,
+        }),
+    };
+    let both = run(&input, &params).unwrap();
+    assert!(!both.report.paired);
+    let codes: Vec<&str> = both
+        .report
+        .warnings
+        .iter()
+        .map(|w| w.code.as_str())
+        .collect();
+    assert!(
+        !codes.contains(&"mirrored_labels") && !codes.contains(&"single_arch"),
+        "{:?}",
+        both.report.warnings
+    );
+    for (arch, scan, labels, frame) in [
+        (Arch::Upper, &upper, &upper_labels, upper_frame),
+        (Arch::Lower, &lower, &lower_labels, lower_frame),
+    ] {
+        let key = arch_key(arch);
+        assert_one_clean_solid(&both, key);
+        let one = alone(arch, scan, labels, frame, &params);
+        let (a, b) = if arch.is_upper() {
+            (&both.upper_base, &one.upper_base)
+        } else {
+            (&both.lower_base, &one.lower_base)
+        };
+        let (a, b) = (a.as_ref().unwrap(), b.as_ref().unwrap());
+        assert_eq!(a.positions, b.positions, "{key}");
+        assert_eq!(a.tris, b.tris, "{key}");
+        let (ra, rb) = (&both.report.arches[key], &one.report.arches[key]);
+        assert_eq!(ra.depth_mm, rb.depth_mm, "{key}");
+        assert_eq!(ra.frame, rb.frame, "{key}");
     }
 }
 

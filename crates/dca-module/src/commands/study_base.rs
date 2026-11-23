@@ -2,8 +2,9 @@
 //! orthodontic study models on a trimmed base, European or ABO style.
 //!
 //! * `aligners.output.study-models` builds the bases of the arches that have
-//!   a scan and tooth labels (in occlusion: after a bite registration or
-//!   the virtual bite). Its parameters start from the case settings
+//!   a scan and tooth labels (two in occlusion, after a bite registration or
+//!   the virtual bite, as a pair; two not in occlusion yet, the scans as
+//!   read, each on its own). Its parameters start from the case settings
 //!   (`Settings::study_base`); any [`study_base::Params`] field given
 //!   overrides them. The models built are kept in the case
 //!   (`AlignersState::study_models`, in place of the earlier ones of their
