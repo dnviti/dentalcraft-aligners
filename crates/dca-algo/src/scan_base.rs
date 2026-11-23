@@ -17,29 +17,38 @@
 //!
 //! The same here, on a [`TriMesh`]: the vertices and triangles of the scan
 //! keep their index and the new ones follow, so the scan as it was read is
-//! the start of the closed solid ([`Based::scan`], [`open_part`]). Every
-//! boundary loop is extruded, holes inside the scan too, as in the plugin.
-//! The flat caps are triangulated by ear clipping in the base plane
-//! (Blender's "beauty" fill gives other triangles over the same flat area).
-//! The new faces follow the winding of the scan; when the closed result has
-//! a negative volume every face is turned, the outward orientation
-//! `recalc_face_normals` gives. A boundary chain that does not close on
+//! the start of the closed solid ([`Based::scan`], [`open_part`]). One
+//! deviation from the plugin, which extrudes every boundary loop: only the
+//! border of the scan, the longest loop of each piece, is walled down to
+//! the base; a hole inside the scan (missing data, e.g. a few points on a
+//! cusp tip) is filled in place with a smooth patch that follows the
+//! surrounding surface ([`dc_geom::holefill`]), or, when the patching
+//! cannot take it (a hole through a point twice, or open around an edge of
+//! more than two faces), with a fan from its middle point; never extruded
+//! into a chimney from the hole down to the base. A single open edge stays
+//! as it is. The flat caps are triangulated by ear clipping in the base
+//! plane (Blender's "beauty" fill gives other triangles over the same flat
+//! area). The new faces follow the winding of the scan; when the closed
+//! result has a negative volume every face is turned, the outward
+//! orientation `recalc_face_normals` gives. A border that does not close on
 //! itself (around a non-manifold vertex) gets its wall but no cap, as
 //! `holes_fill` only fills closed loops.
 //!
-//! Two deviations from bmesh, which copies every attribute of the source
-//! vertex: a point of the base gets the label `0` (gingiva), never a tooth,
-//! so no tooth reaches into the base (its colour still follows the source
-//! vertex); and the points of the scan keep their normals (turned with the
-//! faces), so that the scan as it was read comes back exactly.
+//! Two more deviations from bmesh, which copies every attribute of the
+//! source vertex: a point of the base or of a patch gets the label `0`
+//! (gingiva), never a tooth, so no tooth reaches into the base (its colour
+//! still follows its source vertex); and the points of the scan keep their
+//! normals (turned with the faces), so that the scan as it was read comes
+//! back exactly.
 //!
 //! The import closes every open arch scan before anything is computed on it
 //! (the case has no tooth marks yet): its occlusal direction is then the one
 //! [`occlusal_direction`] finds without them, where the plugin needs the
 //! arch frame of the tooth marks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use dc_geom::holefill::{self, HoleFillParams};
 use dc_mesh::TriMesh;
 use dca_model::{ClosedBy, ScanBase};
 use glam::{DVec2, DVec3, Vec3};
@@ -71,12 +80,14 @@ pub enum BaseError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Based {
     /// The closed scan: the vertices of the scan in their order, then the
-    /// vertices of the base.
+    /// points of the patches of its holes, then the vertices of the base.
     pub mesh: TriMesh,
-    /// Boundary edges closed (the plugin's return value).
+    /// Boundary edges closed (the plugin's return value): those of the
+    /// border and of the holes.
     pub closed_edges: usize,
-    /// For each vertex of the base, in order, the boundary vertex of the
-    /// scan it was extruded from.
+    /// For each point added (the patches, then the base), in order, the
+    /// point of the scan it comes from: a point of the border of its hole
+    /// for a patch, the boundary vertex it was extruded from for the base.
     pub sources: Vec<u32>,
     /// Height of the base plane along the occlusal direction (mm).
     pub plane: f64,
@@ -103,58 +114,119 @@ pub fn make_base(
     if mesh.tris.is_empty() || mesh.positions.iter().any(|p| !p.is_finite()) {
         return Err(BaseError::Mesh);
     }
-    let adjacency = mesh.edge_adjacency();
-    let closed_edges = adjacency.boundary_edge_count();
+    let closed_edges = mesh.edge_adjacency().boundary_edge_count();
     if closed_edges == 0 {
         return Ok(None);
     }
-    // the boundary half-edges, in the winding of their face
-    let boundary: Vec<(u32, u32)> = mesh
+    // the holes inside the scan are filled in place: a smooth patch that
+    // follows the surrounding surface, its points and triangles after those
+    // of the scan
+    let (patched, _) = holefill::fill_holes(
+        &TriMesh::new(mesh.positions.clone(), mesh.tris.clone()),
+        &HoleFillParams::default(),
+    )
+    .map_err(|_| BaseError::Mesh)?;
+    let mut sources = patch_sources(mesh.positions.len(), &patched, mesh.tris.len());
+    let adjacency = patched.edge_adjacency();
+    let half_edges: HashSet<(u32, u32)> = patched
         .tris
         .iter()
         .flat_map(|t| [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])])
         .filter(|&(a, b)| a != b && adjacency.faces_of(a, b).len() == 1)
         .collect();
-    let half_edges: HashSet<(u32, u32)> = boundary.iter().copied().collect();
+    // the border of each piece is its longest open loop, closed or not; the
+    // patching leaves a hole through a point twice, or open around an edge
+    // of more than two faces: a fan from its middle point closes it in
+    // place (a single open edge stays as it is)
+    let mut piece = vec![u32::MAX; patched.positions.len()];
+    for (k, faces) in patched.connected_components().iter().enumerate() {
+        for &f in faces {
+            for w in patched.tris[f as usize] {
+                piece[w as usize] = k as u32;
+            }
+        }
+    }
+    let loops = adjacency.boundary_loops();
+    let closes = |lp: &[u32]| lp.len() >= 3 && half_edges.contains(&(lp[lp.len() - 1], lp[0]));
+    let edges_of = |lp: &[u32]| -> Vec<(u32, u32)> {
+        let m = if closes(lp) { lp.len() } else { lp.len() - 1 };
+        (0..m).map(|i| (lp[i], lp[(i + 1) % lp.len()])).collect()
+    };
+    let length = |lp: &[u32]| -> f64 {
+        edges_of(lp)
+            .iter()
+            .map(|&(a, b)| patched.positions[a as usize].distance(patched.positions[b as usize]))
+            .map(f64::from)
+            .sum()
+    };
+    let mut border_of: HashMap<u32, (f64, usize)> = HashMap::new();
+    for (k, lp) in loops.iter().enumerate() {
+        let len = length(lp);
+        let e = border_of.entry(piece[lp[0] as usize]).or_insert((len, k));
+        if len > e.0 {
+            *e = (len, k);
+        }
+    }
+    let is_border = |k: usize, lp: &[u32]| border_of[&piece[lp[0] as usize]].1 == k;
+    let mut positions = patched.positions.clone();
+    let mut tris = patched.tris.clone();
+    let n = mesh.positions.len() as u32;
+    for (k, lp) in loops.iter().enumerate() {
+        if is_border(k, lp) || lp.len() < 3 {
+            continue;
+        }
+        let c = positions.len() as u32;
+        let mid = lp
+            .iter()
+            .map(|&w| positions[w as usize].as_dvec3())
+            .sum::<DVec3>()
+            / lp.len() as f64;
+        positions.push(mid.as_vec3());
+        sources.push(lp[0]);
+        for (a, b) in edges_of(lp) {
+            tris.push([b, a, c]);
+        }
+    }
+    // the edges walled down: those of the borders
+    let boundary: Vec<(u32, u32)> = loops
+        .iter()
+        .enumerate()
+        .filter(|(k, lp)| is_border(*k, lp))
+        .flat_map(|(_, lp)| edges_of(lp))
+        .collect();
 
     let height = |p: Vec3| p.as_dvec3().dot(z);
-    let lowest = mesh
-        .positions
+    let lowest = positions
         .iter()
         .map(|p| height(*p))
         .fold(f64::INFINITY, f64::min);
     let plane = lowest - height_mm;
 
-    // one new vertex per boundary vertex, on the plane
-    let n = mesh.positions.len() as u32;
-    let mut copy = vec![u32::MAX; mesh.positions.len()];
-    let mut sources = Vec::new();
-    let mut positions = mesh.positions.clone();
+    // one new vertex per border vertex, on the plane
+    let mut copy = vec![u32::MAX; positions.len()];
     for &(a, b) in &boundary {
         for v in [a, b] {
             if copy[v as usize] == u32::MAX {
                 copy[v as usize] = n + sources.len() as u32;
                 sources.push(v);
-                let p = mesh.positions[v as usize].as_dvec3();
+                let p = positions[v as usize].as_dvec3();
                 positions.push((p - z * (p.dot(z) - plane)).as_vec3());
             }
         }
     }
 
-    // the walls: the quad between each boundary edge a -> b and its copy,
+    // the walls: the quad between each border edge a -> b and its copy,
     // with the edge the other way round (b -> a) to follow the winding
-    let mut tris = mesh.tris.clone();
     for &(a, b) in &boundary {
         let (a2, b2) = (copy[a as usize], copy[b as usize]);
         tris.push([b, a, a2]);
         tris.push([b, a2, b2]);
     }
 
-    // the caps: each closed loop of the base, the other way round
+    // the caps: each closed border of the base, the other way round
     let (u, v) = plane_axes(z);
-    for lp in adjacency.boundary_loops() {
-        let (&first, &last) = (lp.first().expect("a loop"), lp.last().expect("a loop"));
-        if lp.len() < 3 || !half_edges.contains(&(last, first)) {
+    for (k, lp) in loops.iter().enumerate() {
+        if !is_border(k, lp) || !closes(lp) {
             continue;
         }
         let ring: Vec<u32> = lp.iter().rev().map(|&w| copy[w as usize]).collect();
@@ -171,7 +243,8 @@ pub fn make_base(
     }
 
     let mut out = TriMesh::new(positions, tris);
-    // the base is gingiva, never a tooth (bmesh would copy the label)
+    // the patches and the base are gingiva, never a tooth (bmesh would copy
+    // the label)
     if let Some(labels) = &mesh.vertex_labels {
         let mut l = labels.clone();
         l.resize(out.positions.len(), 0);
@@ -195,7 +268,7 @@ pub fn make_base(
         }
     }
     // the points of the scan keep their normals, turned with the faces; the
-    // points of the base get those of the closed solid
+    // points of the patches and of the base get those of the closed solid
     if let Some(normals) = &mesh.normals {
         let all = out.compute_vertex_normals();
         let mut n: Vec<Vec3> = if flipped {
@@ -220,6 +293,40 @@ pub fn make_base(
         plane,
         scan,
     }))
+}
+
+/// For each point the hole patches added to `patched` after the `n` points
+/// of the scan, a point of the scan it comes from: a point of the border of
+/// its hole, reached through the triangles of the patch (those from
+/// `first_patch_tri` on).
+fn patch_sources(n: usize, patched: &TriMesh, first_patch_tri: usize) -> Vec<u32> {
+    let mut src = vec![u32::MAX; patched.positions.len() - n];
+    loop {
+        let mut changed = false;
+        for t in &patched.tris[first_patch_tri..] {
+            let known = t.iter().find_map(|&w| {
+                let s = if (w as usize) < n {
+                    w
+                } else {
+                    src[w as usize - n]
+                };
+                (s != u32::MAX).then_some(s)
+            });
+            let Some(s) = known else { continue };
+            for &w in t {
+                if w as usize >= n && src[w as usize - n] == u32::MAX {
+                    src[w as usize - n] = s;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    src.into_iter()
+        .map(|s| if s == u32::MAX { 0 } else { s })
+        .collect()
 }
 
 /// The scan [`make_base`] closed into `closed`, as `base` (its
@@ -535,6 +642,55 @@ mod tests {
             closed_by: ClosedBy::Import,
         };
         assert_eq!(open_part(&out.mesh, &whole).as_ref(), Some(&out.mesh));
+    }
+
+    #[test]
+    fn a_hole_inside_the_scan_is_filled_in_place_never_walled_down() {
+        // a flat 10 x 10 mm sheet at z = 0 (1 mm cells, faces up) with a
+        // 2 x 2 mm hole in its middle, as a few points missing on a cusp
+        let k = 11u32;
+        let positions: Vec<Vec3> = (0..k * k)
+            .map(|i| Vec3::new((i % k) as f32, (i / k) as f32, 0.0))
+            .collect();
+        let mut tris = Vec::new();
+        for y in 0..k - 1 {
+            for x in 0..k - 1 {
+                if (4..6).contains(&x) && (4..6).contains(&y) {
+                    continue;
+                }
+                let a = y * k + x;
+                tris.push([a, a + 1, a + k + 1]);
+                tris.push([a, a + k + 1, a + k]);
+            }
+        }
+        let mut mesh = TriMesh::new(positions, tris);
+        mesh.vertex_labels = Some(vec![23; mesh.positions.len()]);
+        mesh.vertex_colors = Some(vec![[9, 9, 9, 255]; mesh.positions.len()]);
+        let n = mesh.positions.len();
+        let out = make_base(&mesh, DVec3::Z, 3.0).unwrap().unwrap();
+        // the border (40 edges) and the hole (8) are closed
+        assert_eq!(out.closed_edges, 48);
+        assert!(out.mesh.validate().is_watertight());
+        // a solid slab 10 x 10 x 3 mm: no chimney from the hole to the base
+        assert!(
+            (signed_volume(&out.mesh) - 300.0).abs() < 1e-3,
+            "{}",
+            signed_volume(&out.mesh)
+        );
+        // the base has a point under each of the 40 points of the border
+        // only; the patch lies in the plane of the sheet
+        let added = &out.mesh.positions[n..];
+        assert_eq!(added.len(), out.sources.len());
+        assert_eq!(added.iter().filter(|p| p.z == -3.0).count(), 40);
+        assert!(added.iter().all(|p| p.z == -3.0 || p.z.abs() < 1e-6));
+        assert!(out.sources.iter().all(|&s| (s as usize) < n));
+        // gingiva on the patch and the base, the colour of the scan
+        let labels = out.mesh.vertex_labels.as_ref().unwrap();
+        assert!(labels[n..].iter().all(|&l| l == 0));
+        let colors = out.mesh.vertex_colors.as_ref().unwrap();
+        assert!(colors[n..].iter().all(|c| *c == [9, 9, 9, 255]));
+        // the scan as it was read comes back
+        assert_eq!(open_part(&out.mesh, &out.scan).as_ref(), Some(&mesh));
     }
 
     #[test]
