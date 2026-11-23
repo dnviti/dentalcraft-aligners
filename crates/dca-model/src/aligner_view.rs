@@ -29,6 +29,7 @@ pub fn view_key(state: &CaseState, data: &AlignersState) -> String {
     d.diagnosis = Default::default();
     d.setup = Default::default();
     d.staging_results.clear();
+    d.staging_collisions.clear();
     d.tooth_speed.clear();
     d.visits.clear();
     d.bite_report = None;

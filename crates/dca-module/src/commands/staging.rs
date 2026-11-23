@@ -49,8 +49,8 @@ use dca_algo::schedule::Date;
 use dca_algo::staging::{self, Complexity, IprPlan, Level, Pattern, Perio, ToothMove};
 use dca_algo::teeth::{self, Which};
 use dca_model::{
-    AlignersState, INTERVAL_DAYS, IntervalPolicy, IprStep, MODULE_ID, PerioStage, Stage,
-    StagingPattern, StagingSettings, StagingSummary, TOOTH_SPEED,
+    AlignersState, CollisionLeft, INTERVAL_DAYS, IntervalPolicy, IprStep, MODULE_ID, PerioStage,
+    Stage, StagingPattern, StagingSettings, StagingSummary, TOOTH_SPEED,
 };
 use glam::{DMat4, DVec3};
 use schemars::JsonSchema;
@@ -510,6 +510,23 @@ fn run_automatic(
                 overcorrection: sp.overcorrection,
             },
         );
+        // the collisions left, listed with the aligners of the arch (the report says each)
+        let left: Vec<CollisionLeft> = plan
+            .unresolved
+            .iter()
+            .map(|u| CollisionLeft {
+                stage: u.stage,
+                a: u.a,
+                b: u.b,
+                penetration_mm: u.penetration_mm,
+                allowed_mm: u.allowed_mm,
+            })
+            .collect();
+        if left.is_empty() {
+            data.staging_collisions.remove(&role);
+        } else {
+            data.staging_collisions.insert(role, left);
+        }
 
         let mut teeth_out = serde_json::Map::new();
         for (f, st) in &plan.stats {
@@ -1215,6 +1232,39 @@ pub(crate) mod tests {
         assert_eq!(
             r.collisions_left as usize,
             out["lower"]["unresolved"].as_array().unwrap().len()
+        );
+        // the collisions left are listed with it, as the output says them
+        let listed = data_of(&staged)
+            .staging_collisions
+            .get(&ScanRole::Lower)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(listed.len(), r.collisions_left as usize);
+        for (c, u) in listed
+            .iter()
+            .zip(out["lower"]["unresolved"].as_array().unwrap())
+        {
+            assert_eq!(serde_json::to_value(c).unwrap(), *u);
+        }
+        // a list of an older plan of the arch does not outlive the new plan
+        let mut stale = data_of(&set).clone();
+        let f = |n| dc_case::Fdi::new(n).unwrap();
+        stale.staging_collisions.insert(
+            ScanRole::Lower,
+            vec![CollisionLeft {
+                stage: 99,
+                a: f(43),
+                b: f(42),
+                penetration_mm: 0.96,
+                allowed_mm: 0.95,
+            }],
+        );
+        let mut old = set.clone();
+        old.set_module(MODULE_ID, ModuleState::new(stale));
+        let (restaged, _) = exec(STAGING, &old, Value::Null).unwrap();
+        assert_eq!(
+            data_of(&restaged).staging_collisions,
+            data_of(&staged).staging_collisions
         );
         // the calendar: the stored start and policy
         let (_, cal) = exec("aligners.planning.schedule", &staged, Value::Null).unwrap();

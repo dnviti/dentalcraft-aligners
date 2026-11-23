@@ -339,6 +339,27 @@ pub struct StagingSummary {
     pub overcorrection: bool,
 }
 
+/// A collision between neighbouring crowns that no anti-collision delay of
+/// the last automatic staging of an arch could solve (the plugin's
+/// `plan["unresolved"]`, which its report lists). It goes with the aligners
+/// of the arch, like [`StagingSummary`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CollisionLeft {
+    /// Aligner where the crowns collide (1 is the first).
+    pub stage: u32,
+    /// First tooth of the contact.
+    pub a: Fdi,
+    /// Second tooth of the contact.
+    pub b: Fdi,
+    /// Interpenetration of the two crowns (mm).
+    pub penetration_mm: f64,
+    /// The interpenetration the plan allows the contact (mm), which
+    /// `penetration_mm` exceeds: the overlap of the crowns at rest plus the
+    /// tolerance and the IPR of the contact, or the overlap in the final
+    /// position plus the tolerance, the larger.
+    pub allowed_mm: f64,
+}
+
 /// What one automatic separation of an arch gave.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SegmentationRun {
@@ -380,6 +401,12 @@ pub struct AlignersState {
     /// arch.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub staging_results: BTreeMap<ScanRole, StagingSummary>,
+    /// The collisions between neighbouring crowns that the last automatic
+    /// staging of each arch left, the list behind
+    /// [`StagingSummary::collisions_left`]. It goes with the aligners of the
+    /// arch.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub staging_collisions: BTreeMap<ScanRole, Vec<CollisionLeft>>,
     /// The teeth slowed by hand in the staging and their relative speed
     /// ([`crate::TOOTH_SPEED`], below 1; the plugin's `speed_json`, set by
     /// `oa.tooth_speed`): their limits per aligner are multiplied by it.
@@ -1100,6 +1127,7 @@ impl AlignersState {
     /// empty go.
     fn drop_stages_of(&mut self, role: ScanRole) -> bool {
         let summary = self.staging_results.remove(&role).is_some();
+        self.staging_collisions.remove(&role);
         let mut held = false;
         for s in &mut self.stages {
             let n = s.ipr.len();

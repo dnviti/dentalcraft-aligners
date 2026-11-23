@@ -466,6 +466,11 @@ static TABLE: &[(&str, &str, &str)] = &[
         "Controllo delle collisioni tra denti adiacenti a ogni stadio (tolleranza {0} mm).",
     ),
     (
+        "rpt-collision-left",
+        "Collision left in the {0} at aligner {1} between {2} and {3}: {4} mm, {5} mm over the {6} mm allowed (correct the setup, add IPR or slow a tooth).",
+        "Collisione non risolta nell'{0} all'allineatore {1} tra {2} e {3}: {4} mm, {5} mm oltre i {6} mm ammessi (correggere il setup, aggiungere IPR o rallentare un dente).",
+    ),
+    (
         "rpt-shell-line",
         "Directly printed shell: design thickness {0} mm, internal clearance {1} mm, trim: {2}. Printed shells come out thicker than designed; the final thickness after thermoforming must be checked.",
         "Guscio per stampa diretta: spessore di progetto {0} mm, gioco interno {1} mm, bordo: {2}. I gusci stampati risultano piu spessi del progetto; lo spessore finale dopo termoformatura va verificato.",

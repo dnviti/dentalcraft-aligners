@@ -580,6 +580,25 @@ pub fn report_html(input: &ReportInput<'_>) -> String {
             esc(&f("rpt-collision", &[n(sp.collision_tol_mm, 2)]))
         );
     }
+    // each collision the staging left (the plugin's report lists them)
+    for c in st.staging_collisions.values().flatten() {
+        let _ = write!(
+            o,
+            "<br><span class=\"bad\">{}</span>",
+            esc(&f(
+                "rpt-collision-left",
+                &[
+                    arch_name(lang, Arch::of(c.a)).to_owned(),
+                    c.stage.to_string(),
+                    c.a.to_string(),
+                    c.b.to_string(),
+                    n(c.penetration_mm, 2),
+                    n(c.penetration_mm - c.allowed_mm, 2),
+                    n(c.allowed_mm, 2),
+                ]
+            ))
+        );
+    }
     let _ = write!(
         o,
         "<br>{} {}",
@@ -1017,5 +1036,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_collision_the_staging_left_is_listed() {
+        let mut st = AlignersState::default();
+        let f = |n| Fdi::new(n).unwrap();
+        assert!(!page(&st, Lang::En).contains("Collision left"));
+        st.staging_collisions.insert(
+            dc_case::ScanRole::Lower,
+            vec![
+                dca_model::CollisionLeft {
+                    stage: 14,
+                    a: f(43),
+                    b: f(42),
+                    penetration_mm: 0.959,
+                    allowed_mm: 0.948,
+                },
+                dca_model::CollisionLeft {
+                    stage: 3,
+                    a: f(31),
+                    b: f(32),
+                    penetration_mm: 0.5,
+                    allowed_mm: 0.2,
+                },
+            ],
+        );
+        let en = page(&st, Lang::En);
+        assert!(
+            en.contains(
+                "Collision left in the lower arch at aligner 14 between 43 and 42: 0.96 mm, 0.01 mm over the 0.95 mm allowed"
+            ),
+            "{en}"
+        );
+        assert!(en.contains("at aligner 3 between 31 and 32: 0.50 mm, 0.30 mm over the 0.20 mm"));
+        let it = page(&st, Lang::It);
+        assert!(
+            it.contains(
+                "Collisione non risolta nell&#39;arcata inferiore all&#39;allineatore 14 tra 43 e 42: 0,96 mm, 0,01 mm oltre i 0,95 mm ammessi"
+            ),
+            "{it}"
+        );
     }
 }

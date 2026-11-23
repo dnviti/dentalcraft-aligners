@@ -48,9 +48,9 @@ pub use settings::{
     StudyBaseSettings, StudyBaseStyle, TOOTH_SPEED, TrimMode, TrimParams, production_out_of_range,
 };
 pub use state::{
-    AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed,
-    SegmentationRun, Setup, SetupSummary, Stage, StagingSummary, TeethBasis, TeethChange,
-    ToothFrame, ToothMeasures, other_arch_fdi, other_arch_label,
+    AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, CollisionLeft, Diagnosis,
+    IprStep, Seed, SegmentationRun, Setup, SetupSummary, Stage, StagingSummary, TeethBasis,
+    TeethChange, ToothFrame, ToothMeasures, other_arch_fdi, other_arch_label,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 
