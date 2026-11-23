@@ -230,8 +230,10 @@ pub struct Params {
     pub delay_step: u32,
     /// Most anti-collision iterations.
     pub max_iter: u32,
-    /// Crown points used by the collision metric.
-    pub sample_points: usize,
+    /// Crown points of each tooth used by the collision metric: `None`, every
+    /// one; `Some(n)`, the plugin's `sample_points`, at most `n` taken every
+    /// k-th in the list ([`teeth::subsample`]).
+    pub sample_points: Option<usize>,
 }
 
 impl Default for Params {
@@ -252,7 +254,7 @@ impl Default for Params {
             seq_overlap: 0.5,
             delay_step: 2,
             max_iter: 300,
-            sample_points: 2500,
+            sample_points: None,
         }
     }
 }
@@ -1090,6 +1092,15 @@ type PenKey = (Fdi, Fdi, [u64; 6], [u64; 6]);
 
 /// Interpenetration of adjacent crowns measured along the direction joining
 /// them. Crown points within 0.6 mm of the cervical margin are ignored.
+///
+/// Departure from the plugin (2026-11-23): its `CollisionChecker` keeps 2500
+/// crown points, taken every k-th in the list (`mu.subsample`). One vertex
+/// more or less in the segmentation renews every point it keeps, and the
+/// interpenetration it measures misses the deepest points of the crown by up
+/// to 0.11 mm on the golden demo cases and on a real case. Every crown point
+/// is used now ([`Params::sample_points`] `None`; 5 points removed per tooth
+/// move an interpenetration by at most 0.10 mm instead of 0.21 mm), at no
+/// cost worth the name (a real arch is staged in 0.06 s instead of 0.04 s).
 struct CollisionChecker<'a> {
     moves: &'a BTreeMap<Fdi, ToothMove>,
     pairs: Vec<(Fdi, Fdi)>,
@@ -1102,7 +1113,11 @@ fn bits(q: &Q6) -> [u64; 6] {
 }
 
 impl<'a> CollisionChecker<'a> {
-    fn new(moves: &'a BTreeMap<Fdi, ToothMove>, pairs: &[(Fdi, Fdi)], n_samples: usize) -> Self {
+    fn new(
+        moves: &'a BTreeMap<Fdi, ToothMove>,
+        pairs: &[(Fdi, Fdi)],
+        n_samples: Option<usize>,
+    ) -> Self {
         let mut pts = BTreeMap::new();
         for (&f, m) in moves {
             if m.pts.is_empty() {
@@ -1110,7 +1125,13 @@ impl<'a> CollisionChecker<'a> {
             }
             let zmin = m.pts.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
             let upper: Vec<DVec3> = m.pts.iter().copied().filter(|p| p.z > zmin + 0.6).collect();
-            pts.insert(f, teeth::subsample(&upper, n_samples));
+            pts.insert(
+                f,
+                match n_samples {
+                    Some(n) => teeth::subsample(&upper, n),
+                    None => upper,
+                },
+            );
         }
         Self {
             moves,

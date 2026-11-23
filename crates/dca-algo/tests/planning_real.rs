@@ -421,7 +421,11 @@ fn plan(s: &Scan, moves: &[ToothMove]) -> staging::Plan {
             ipr: &ipr,
             complexity,
         },
-        &Params::default(),
+        // the plugin's sample of the crowns (the port's default uses every point)
+        &Params {
+            sample_points: Some(2500),
+            ..Params::default()
+        },
     )
     .unwrap()
 }

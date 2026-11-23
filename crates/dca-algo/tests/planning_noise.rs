@@ -24,7 +24,8 @@
 //! differs (after the rounding to 0.05 mm), the number of aligners differs by
 //! more than one, or more collisions are left. With the plugin's mirror search
 //! (before 21db055) 46 of the 64 noisy plans jumped, 17 among the moving teeth
-//! in 43 of them; now [`JUMPS_NOW`] do. The goal is none: what still jumps
+//! in 40 of them; 18 with the new search, [`JUMPS_NOW`] once the collision
+//! check uses every crown point. The goal is none: what still jumps
 //! comes from the thresholds downstream of the axis (the cusps of the molar
 //! taken as single highest points, the tolerances of the evaluation, the
 //! rounding of the IPR, the anti-collision delays), and
@@ -44,8 +45,9 @@ use dca_model::{SetupScope, SetupSettings};
 use glam::DVec3;
 use golden_case::Case;
 
-/// Noisy plans that still jump (of 64; 46 with the plugin's mirror search).
-const JUMPS_NOW: usize = 18;
+/// Noisy plans that still jump (of 64; 46 with the plugin's mirror search, 18
+/// with its sample of the crowns in the collision check).
+const JUMPS_NOW: usize = 16;
 /// Seeds of each family of noise.
 const SEEDS: u64 = 32;
 
@@ -331,7 +333,7 @@ fn a_last_molar_moved_by_noise_jumps_the_plan_less_often() {
 }
 
 #[test]
-#[ignore = "the goal: 18 of 64 noisy plans still jump until the thresholds downstream of the axis are redesigned"]
+#[ignore = "the goal: 16 of 64 noisy plans still jump until the thresholds downstream of the axis are redesigned"]
 fn a_last_molar_moved_by_noise_never_jumps_the_plan() {
     let j = noisy_jumps();
     assert!(j.is_empty(), "noisy plans that jump:\n{}", j.join("\n"));
