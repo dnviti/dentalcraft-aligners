@@ -375,6 +375,7 @@ aligners-err-seed-bad-ends = the last tooth of each side must be number 5, 6, 7 
 aligners-err-seed-bad-tooth = { $fdi } is not a valid tooth number
 aligners-err-deciduous = { $fdi } is a deciduous (milk) tooth: only permanent teeth (11 to 48) are supported
 aligners-err-tooth-not-closed = tooth { $fdi } of the { $arch } arch could not be closed into a solid: every try leaves a hole or an edge shared by more than two faces; check its crown with the brush, then build the teeth again
+aligners-err-tooth-tunnel = tooth { $fdi } of the { $arch } arch could not be closed into a solid: every try leaves a tunnel through the tooth; check its crown with the brush, then build the teeth again
 aligners-warn-seeds-close = the marks of teeth { $a } and { $b } are only { $mm } mm apart, less than half the width of a tooth: the separation may leave one of them without a crown; check that each mark sits on its own tooth
 aligners-region-summary = Tooth { $fdi }: { $vertices } vertices, { $area } mm², { $width } mm wide
 aligners-region-vertices = Tooth { $fdi }: { $vertices } vertices

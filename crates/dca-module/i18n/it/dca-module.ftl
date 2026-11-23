@@ -375,6 +375,7 @@ aligners-err-seed-bad-ends = l'ultimo dente di ogni lato deve essere il numero 5
 aligners-err-seed-bad-tooth = { $fdi } non è un numero di dente valido
 aligners-err-deciduous = { $fdi } è un dente deciduo (da latte): sono supportati solo i denti permanenti (da 11 a 48)
 aligners-err-tooth-not-closed = il dente { $fdi } dell'arcata { $arch } non si chiude in un solido: a ogni tentativo resta un buco o un lato condiviso da più di due facce; controlla la sua corona con il pennello, poi ricostruisci i denti
+aligners-err-tooth-tunnel = il dente { $fdi } dell'arcata { $arch } non si chiude in un solido: a ogni tentativo resta un foro che attraversa il dente; controlla la sua corona con il pennello, poi ricostruisci i denti
 aligners-warn-seeds-close = i punti dei denti { $a } e { $b } distano solo { $mm } mm, meno di metà della larghezza di un dente: la separazione può lasciarne uno senza corona; controlla che ogni punto stia sul suo dente
 aligners-region-summary = Dente { $fdi }: { $vertices } vertici, { $area } mm², largo { $width } mm
 aligners-region-vertices = Dente { $fdi }: { $vertices } vertici
