@@ -83,16 +83,31 @@ fn one_arch_has_no_bite_and_its_aligners_no_ramps() {
     let mut upper = with.clone();
     upper.case.scans.retain(|s| s.role != ScanRole::Lower);
     let one = StageBite::new(&upper).unwrap();
-    assert!(!one.shapes_shells(), "no occlusal shaping, and no note about it");
+    assert!(
+        !one.shapes_shells(),
+        "no occlusal shaping, and no note about it"
+    );
     assert!(one.ramps(Arch::Upper, 0).is_empty());
     assert!(one.to_arch(Arch::Upper).is_none() && one.bite(0, 0).is_none());
     assert!(one.covered(Arch::Upper).is_empty());
     assert!(ramp_solids(&upper, Arch::Upper, 0).unwrap().is_empty());
     for (id, params) in [
-        ("aligners.occlusion.bite-with-aligners", json!({ "mode": "manual" })),
-        ("aligners.occlusion.bite-ramps", json!({ "action": "propose" })),
-        ("aligners.occlusion.bite-ramps", json!({ "action": "remove" })),
-        ("aligners.occlusion.bite-ramps", json!({ "action": "set", "enabled": true })),
+        (
+            "aligners.occlusion.bite-with-aligners",
+            json!({ "mode": "manual" }),
+        ),
+        (
+            "aligners.occlusion.bite-ramps",
+            json!({ "action": "propose" }),
+        ),
+        (
+            "aligners.occlusion.bite-ramps",
+            json!({ "action": "remove" }),
+        ),
+        (
+            "aligners.occlusion.bite-ramps",
+            json!({ "action": "set", "enabled": true }),
+        ),
     ] {
         assert_not_applicable(id, &upper, params);
     }

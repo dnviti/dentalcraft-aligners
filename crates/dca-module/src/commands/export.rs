@@ -1229,7 +1229,8 @@ pub(crate) mod tests {
             .unwrap()
             .0;
             let t = std::time::Instant::now();
-            let (s, out) = exec("aligners.auto", &s, json!({ "start_date": "2026-11-02" })).unwrap();
+            let (s, out) =
+                exec("aligners.auto", &s, json!({ "start_date": "2026-11-02" })).unwrap();
             eprintln!("{name}: pipeline {:.1} s", t.elapsed().as_secs_f64());
             let bite: Vec<&Value> = out["steps"]
                 .as_array()
@@ -1275,7 +1276,12 @@ pub(crate) mod tests {
                 clean["print_check"]
             );
             let notes = clean["notes"].to_string();
-            for bite_note in ["occlusal thickness", "spessore occlusale", "ramps:", "rampe:"] {
+            for bite_note in [
+                "occlusal thickness",
+                "spessore occlusale",
+                "ramps:",
+                "rampe:",
+            ] {
                 assert!(!notes.contains(bite_note), "{name}: {notes}");
                 assert!(!report.contains(bite_note), "{name}: {bite_note}");
             }
@@ -1313,19 +1319,25 @@ pub(crate) mod tests {
                 .map(|(p, _)| p.as_dvec3())
                 .max_by(|a, b| a.y.total_cmp(&b.y))
                 .unwrap();
-            data.aligner_bite.ramps.ramps.push(dca_algo::ramps::manual_ramp(
-                incisor,
-                tip,
-                glam::DVec3::Y,
-                [3.0, 2.0, 1.5],
-                data.settings.clearance_mm,
-                data.settings.shell_thickness_mm,
-            ));
+            data.aligner_bite
+                .ramps
+                .ramps
+                .push(dca_algo::ramps::manual_ramp(
+                    incisor,
+                    tip,
+                    glam::DVec3::Y,
+                    [3.0, 2.0, 1.5],
+                    data.settings.clearance_mm,
+                    data.settings.shell_thickness_mm,
+                ));
             let mut stale = s.clone();
             stale.set_module(dca_model::MODULE_ID, dc_case::ModuleState::new(data));
             let (old, _) = export(&stale, "stale");
             assert_eq!(old["notes"], clean["notes"], "{name}");
-            assert_eq!(old["files"], clean["files"], "{name}: a stored bite changed a file");
+            assert_eq!(
+                old["files"], clean["files"],
+                "{name}: a stored bite changed a file"
+            );
         }
     }
 

@@ -733,7 +733,11 @@ mod tests {
                 "lower_points": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
                 "bite_points": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
             });
-            assert_not_applicable("aligners.occlusion.bite-registration.icp", &one, Value::Null);
+            assert_not_applicable(
+                "aligners.occlusion.bite-registration.icp",
+                &one,
+                Value::Null,
+            );
             assert_not_applicable(
                 "aligners.occlusion.bite-registration.three-points",
                 &one,

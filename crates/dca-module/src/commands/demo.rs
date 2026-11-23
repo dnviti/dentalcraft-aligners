@@ -249,7 +249,10 @@ mod tests {
         patient.case.scans[0].id = "11111111-2222-4333-8444-555555555555".parse().unwrap();
         let err = run(&patient, json!({ "arch": "lower" })).unwrap_err();
         let want = messages::tr("aligners-err-demo-patient-case", &[]);
-        assert!(matches!(&err, CommandError::Invalid(m) if *m == want), "{err}");
+        assert!(
+            matches!(&err, CommandError::Invalid(m) if *m == want),
+            "{err}"
+        );
         // nor next to the bite scan of a patient
         let (mut bite, _) = run(&CaseState::default(), json!({ "arch": "lower" })).unwrap();
         let mut scan = bite.case.scans[0].clone();
