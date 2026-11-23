@@ -22,9 +22,11 @@
 //! 4. the positions along the arch: the nearest to the current ones,
 //!    without overlaps (weighted isotonic regression per stretch between the
 //!    fixed teeth);
-//! 5. each tooth: derotated about its own long axis until its mesio-distal
-//!    axis is tangent to the line, moved with the cusps onto the line, and
-//!    levelled (only the step beyond `level_tol`); tip and torque unchanged;
+//! 5. each tooth: derotated about its own long axis by the part of its
+//!    rotation against the line beyond the tolerance of its zone (none when
+//!    that part is under [`MIN_DEROTATION_DEG`]), moved with the cusps onto
+//!    the line, and levelled (only the step beyond `level_tol`); tip and
+//!    torque unchanged;
 //! 6. with the crowns, the real 3D overlap between neighbours adds space
 //!    where needed (at most 4 rounds); when the space is not enough even
 //!    with the therapy the teeth are derotated only as far as it allows
@@ -74,6 +76,19 @@ const REST_OVERLAP_MAX: f64 = 0.5;
 /// Beyond this (mm) the difference between the model and the crowns is not a
 /// calibration error: the contact of the model stays.
 const GAP_CAL_MAX: f64 = 2.0;
+/// Smallest derotation the setup makes (degrees). A tooth rotated against
+/// the line beyond the tolerance of its zone (`rot_tol_deg`,
+/// `post_rot_tol_deg`) is turned back only by the excess, so the turn grows
+/// from nothing at the tolerance instead of jumping to the whole rotation; an
+/// excess under this is not turned at all. 0.5 degrees is the smallest turn
+/// the plugin's setup makes itself (a tooth left in place that follows the
+/// curve is not turned below it; its staging gives any turn an aligner), a
+/// quarter of the 2 degrees an aligner turns a tooth, and it moves the
+/// contacts of an incisor (about 4 mm from its axis) by 0.035 mm, under the
+/// 0.05 mm steps of the IPR and of the levelling. It is above the noise of
+/// the measured rotation (about 0.3 degrees when a few vertices of a contact
+/// change label).
+pub const MIN_DEROTATION_DEG: f64 = 0.5;
 
 // ---- options ------------------------------------------------------------------------------------------
 
@@ -177,7 +192,8 @@ pub struct Config {
     /// Distance from the line below which an anterior tooth is not moved
     /// onto it (mm).
     pub normal_tol: f64,
-    /// Rotation below which an anterior tooth is not derotated (degrees).
+    /// Rotation an anterior tooth keeps (degrees): beyond it only the excess
+    /// is derotated, and not under [`MIN_DEROTATION_DEG`] of excess.
     pub rot_tol_deg: f64,
     /// Largest derotation (degrees).
     pub max_derotation: f64,
@@ -189,7 +205,8 @@ pub struct Config {
     pub vertical_max: f64,
     /// Premolars and molars: distance from the line below which they stay (mm).
     pub post_normal_tol: f64,
-    /// Premolars and molars: rotation below which they stay (degrees).
+    /// Premolars and molars: rotation they keep (degrees); beyond it only the
+    /// excess is derotated, and not under [`MIN_DEROTATION_DEG`] of excess.
     pub post_rot_tol_deg: f64,
     /// Vertical step tolerated (only the excess is corrected, mm).
     pub level_tol: f64,
@@ -228,6 +245,12 @@ pub struct Config {
     pub ipr_surface_cap: f64,
     /// Largest fraction of the enamel removed.
     pub enamel_fraction: f64,
+    /// Derotate as the plugin: a tooth rotated beyond the tolerance of its
+    /// zone turns fully onto the line. Off by default (2026-11-23): only the
+    /// excess over the tolerance turns, none under [`MIN_DEROTATION_DEG`] of
+    /// excess, so the turn grows from nothing at the tolerance. The parity
+    /// tests with the plugin turn it on.
+    pub plugin_derotation: bool,
 }
 
 impl Default for Config {
@@ -261,6 +284,43 @@ impl Default for Config {
             ipr_zone: IprZone::Anterior,
             ipr_surface_cap: 0.25,
             enamel_fraction: 0.5,
+            plugin_derotation: false,
+        }
+    }
+}
+
+impl Config {
+    /// The rotation tolerance of the zone of `f` (radians): `rot_tol_deg`
+    /// for incisors and canines, `post_rot_tol_deg` for premolars and molars.
+    fn rot_tol(&self, f: Fdi) -> f64 {
+        if anatomy::index(f) >= 4 {
+            self.post_rot_tol_deg
+        } else {
+            self.rot_tol_deg
+        }
+        .to_radians()
+    }
+
+    /// Whether a tooth of `f` rotated `rot` (radians, at rest against the
+    /// line) is to be derotated.
+    fn rotated(&self, f: Fdi, rot: f64) -> bool {
+        if self.plugin_derotation {
+            rot > self.rot_tol(f)
+        } else {
+            derotation(rot, self.rot_tol(f)) != 0.0
+        }
+    }
+
+    /// The turn (radians, signed) of a tooth of `f` rotated `psi` (radians,
+    /// signed) against the line: the excess over the tolerance of its zone
+    /// ([`derotation`]), or, as the plugin, all of it from `rot_tol_deg` on.
+    fn turn(&self, f: Fdi, psi: f64) -> f64 {
+        if !self.plugin_derotation {
+            derotation(psi, self.rot_tol(f))
+        } else if psi.abs() < self.rot_tol_deg.to_radians() {
+            0.0
+        } else {
+            psi
         }
     }
 }
@@ -681,18 +741,22 @@ fn bisect(mut ok: impl FnMut(f64) -> bool, mut lo: f64, mut hi: f64, steps: usiz
     hi
 }
 
-/// Angle about the axis `ax` of the tooth that makes the direction `e3`
-/// parallel in plan to `m` (secant method from the plan angle `psi`, within
-/// 1.2 times the limit); `psi` when it does not converge.
-fn plan_turn(ax: DVec3, e3: DVec3, m: DVec2, psi: f64, lim: f64) -> f64 {
+/// Angle about the axis `ax` of the tooth that leaves the direction `e3` at
+/// the plan angle `keep` from `m` (parallel for 0; secant method from the
+/// plan angle `psi` until the plan angle is within `tol` rad, within 1.2
+/// times the limit); `psi` when it does not converge. The plugin stops
+/// within 1e-5 rad; the port runs to the root, which left the turn of a
+/// tooth kept at its tolerance moving by up to that with the round-off of
+/// its stored frame.
+fn plan_turn(ax: DVec3, e3: DVec3, m: DVec2, psi: f64, keep: f64, lim: f64, tol: f64) -> f64 {
     let left = |a: f64| {
         let v = (rot_axis_angle(ax, a) * e3).truncate();
-        cross2(v, m).atan2(v.dot(m))
+        cross2(v, m).atan2(v.dot(m)) - keep
     };
     let (mut a0, mut r0) = (0.0, left(0.0));
     let (mut a1, mut r1) = (psi, left(psi));
     for _ in 0..8 {
-        if r1.abs() < 1e-5 || (r1 - r0).abs() < 1e-12 {
+        if r1.abs() < tol || (r1 - r0).abs() < 1e-7 * tol {
             break;
         }
         let a2 = a1 - r1 * (a1 - a0) / (r1 - r0);
@@ -703,6 +767,20 @@ fn plan_turn(ax: DVec3, e3: DVec3, m: DVec2, psi: f64, lim: f64) -> f64 {
         a1
     } else {
         psi
+    }
+}
+
+/// The derotation (radians) of a tooth rotated `psi` (radians, signed)
+/// against the line, with the tolerance `tol` (radians) of its zone: the
+/// excess over the tolerance, with the sign of `psi`, and none when the
+/// excess is under [`MIN_DEROTATION_DEG`]. It never exceeds the excess and
+/// grows with `|psi|`.
+fn derotation(psi: f64, tol: f64) -> f64 {
+    let excess = psi.abs() - tol;
+    if excess >= MIN_DEROTATION_DEG.to_radians() {
+        excess.copysign(psi)
+    } else {
+        0.0
     }
 }
 
@@ -852,11 +930,7 @@ fn evaluate(
                 } else {
                     cfg.normal_tol
                 },
-                rot > if post {
-                    cfg.post_rot_tol_deg
-                } else {
-                    cfg.rot_tol_deg
-                },
+                cfg.rotated(f, rot.to_radians()),
             )
         })
         .collect()
@@ -1010,16 +1084,23 @@ impl Solver<'_> {
                 0.5
             };
             if self.aligned[i] && self.need_rot[i] && !asis {
-                // derotated: more only by what the rotation removed adds
+                // derotated by the excess over its tolerance: more only by what that turn adds
                 let e = md3(g, &self.c[i]).truncate();
                 let phi = plan_angle(e, tg).min(self.cfg.max_derotation.to_radians());
+                let turn = if self.cfg.plugin_derotation {
+                    phi
+                } else {
+                    derotation(phi, self.cfg.rot_tol(self.seq[i]))
+                };
                 let kf = k.map_or(1.0, |k| k[i]);
                 match pq {
                     Some(pq) => {
-                        let we = crown::extent(pq, e / e.length().max(1e-12)).max(1.0);
-                        w += kf * (we - w);
+                        if phi > 1e-12 {
+                            let we = crown::extent(pq, e / e.length().max(1e-12)).max(1.0);
+                            w += kf * turn / phi * (we - w);
+                        }
                     }
-                    None => w = w * ((1.0 - kf) * phi).cos() / phi.cos().max(0.2),
+                    None => w = w * (phi - kf * turn).cos() / phi.cos().max(0.2),
                 }
             }
             wm[i] = frac * w;
@@ -1265,6 +1346,8 @@ impl Solver<'_> {
             let e = e3.truncate() / e3.truncate().length().max(1e-12);
             let m = if tg.dot(e) >= 0.0 { tg } else { -tg };
             let mut psi = cross2(e, m).atan2(e.dot(m));
+            // the plan angle the tooth keeps against the line: its tolerance when derotated
+            let mut keep = 0.0;
             if !self.need_rot[i] {
                 // in place: not derotated, but it follows the curve when it slides along
                 // the arch or the line turns (expansion)
@@ -1273,8 +1356,11 @@ impl Solver<'_> {
                 if psi.to_degrees().abs() < 0.5 {
                     psi = 0.0;
                 }
-            } else if psi.to_degrees().abs() < cfg.rot_tol_deg {
-                psi = 0.0;
+            } else {
+                // only the excess over the tolerance of its zone, none under the smallest turn
+                let turn = cfg.turn(f, psi);
+                keep = psi - turn;
+                psi = turn;
             }
             psi = clip(psi, -lim, lim);
             let still = ds.abs() < cfg.pos_tol && (n_t - r.n0[i]).abs() < cfg.pos_tol && !snap;
@@ -1288,7 +1374,8 @@ impl Solver<'_> {
             }
             let ax = unit(self.teeth[i].e_ax);
             if psi != 0.0 {
-                psi = plan_turn(ax, e3, m, psi, lim);
+                let tol = if cfg.plugin_derotation { 1e-5 } else { 1e-12 };
+                psi = plan_turn(ax, e3, m, psi, keep, lim, tol);
                 let kf = r.k[i];
                 if kf < 1.0 {
                     let left = (1.0 - kf) * psi.abs();
@@ -1882,11 +1969,13 @@ pub struct Params {
     pub pos_tol_mm: f64,
     /// Incisors and canines: distance from the line below which they stay (mm).
     pub normal_tol_mm: f64,
-    /// Incisors and canines: rotation below which they stay (degrees).
+    /// Incisors and canines: rotation they keep (degrees); beyond it only the
+    /// excess is derotated ([`MIN_DEROTATION_DEG`]).
     pub rot_tol_deg: f64,
     /// Premolars and molars: distance from the line below which they stay (mm).
     pub post_normal_tol_mm: f64,
-    /// Premolars and molars: rotation below which they stay (degrees).
+    /// Premolars and molars: rotation they keep (degrees); beyond it only the
+    /// excess is derotated ([`MIN_DEROTATION_DEG`]).
     pub post_rot_tol_deg: f64,
     /// Largest derotation (degrees).
     pub max_derotation_deg: f64,
@@ -2026,6 +2115,7 @@ impl Params {
             ipr_zone: self.ipr_zone,
             ipr_surface_cap: self.ipr_surface_cap_mm,
             enamel_fraction: self.enamel_fraction,
+            plugin_derotation: false,
         }
     }
 
@@ -2186,6 +2276,12 @@ pub fn resample(p: &[DVec3], n: usize) -> Vec<DVec3> {
 /// Runs the setup of one arch: the cusps and the crowns from the labelled
 /// scan, then [`conservative_setup`] with the configuration of the arch.
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SetupError> {
+    run_with(input, &params.config(input.arch))
+}
+
+/// [`run`] with the configuration `cfg` (the parity tests run it with the
+/// plugin's derotation, [`Config::plugin_derotation`]).
+pub fn run_with(input: &Input<'_>, cfg: &Config) -> Result<Output, SetupError> {
     if input.labels.len() != input.vertices.len() {
         return Err(SetupError::Invalid(format!(
             "{} labels for {} vertices",
@@ -2209,12 +2305,11 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SetupError> {
         cusps.insert(*f, cusp_points(t, p));
         crowns.insert(*f, rest_crown(t, p));
     }
-    let cfg = params.config(input.arch);
     let mut result = conservative_setup(
         &teeth,
         input.sequence,
         &cusps,
-        &cfg,
+        cfg,
         input.line,
         input.fixed,
         Some(&crowns),
@@ -2235,4 +2330,62 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SetupError> {
         Vec::new()
     };
     Ok(Output { result, line })
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A signed rotation from {0, ±0.2, ±0.9, ±1.2, ±1.5, ±1.7, ±4.9, ±5.6, ±12, ±35}
+    /// degrees, in radians: none, under and at the tolerances, just under and over the
+    /// smallest turn beyond them, and large.
+    fn any_rotation() -> f64 {
+        let deg: f64 = match kani::any::<u8>() % 10 {
+            0 => 0.0,
+            1 => 0.2,
+            2 => 0.9,
+            3 => 1.2,
+            4 => 1.5,
+            5 => 1.7,
+            6 => 4.9,
+            7 => 5.6,
+            8 => 12.0,
+            _ => 35.0,
+        };
+        let sign = if kani::any() { -1.0 } else { 1.0 };
+        (sign * deg).to_radians()
+    }
+
+    /// A tolerance from {0, 1, 5} degrees, in radians.
+    fn any_tolerance() -> f64 {
+        match kani::any::<u8>() % 3 {
+            0 => 0.0,
+            1 => 1.0f64.to_radians(),
+            _ => 5.0f64.to_radians(),
+        }
+    }
+
+    // The derotation of a tooth never turns it by more than the excess of its rotation over
+    // the tolerance, never past the line (the same sign as the rotation, or none), and not at
+    // all when the excess is under the smallest turn MIN_DEROTATION_DEG.
+    #[kani::proof]
+    fn derotation_never_exceeds_the_excess() {
+        let (psi, tol) = (any_rotation(), any_tolerance());
+        let d = derotation(psi, tol);
+        let excess = psi.abs() - tol;
+        assert!(d.abs() <= excess.max(0.0));
+        assert!(d == 0.0 || d.signum() == psi.signum());
+        if excess < MIN_DEROTATION_DEG.to_radians() {
+            assert!(d == 0.0);
+        }
+    }
+
+    // The derotation grows with the rotation: a tooth rotated more (the same way) is never
+    // turned less.
+    #[kani::proof]
+    fn derotation_grows_with_the_rotation() {
+        let (a, b, tol) = (any_rotation(), any_rotation(), any_tolerance());
+        kani::assume(a.abs() <= b.abs() && a.signum() == b.signum());
+        assert!(derotation(a, tol).abs() <= derotation(b, tol).abs());
+    }
 }

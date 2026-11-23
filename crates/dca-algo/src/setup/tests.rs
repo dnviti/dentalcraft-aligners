@@ -436,14 +436,51 @@ fn a_rotation_below_the_threshold_is_not_corrected() {
 }
 
 #[test]
-fn a_rotation_above_the_threshold_is_corrected() {
+fn a_rotation_above_the_threshold_is_corrected_by_the_excess() {
     let a = make_arch(&Mal {
         rot: vec![(42, 12.0)],
         ..Mal::default()
     });
+    // tolerance 5 degrees: the plugin turns 42 fully onto the line, the port 5 degrees less
+    let plugin = setup(
+        &a,
+        &full(|c| {
+            c.rot_tol_deg = 5.0;
+            c.plugin_derotation = true;
+        }),
+    );
+    let full_turn = angle(&plugin.targets[&fdi(42)]);
+    assert!(full_turn > 8.0 && full_turn < 13.0, "{full_turn}");
     let res = setup(&a, &full(|c| c.rot_tol_deg = 5.0));
     let ang = angle(&res.targets[&fdi(42)]);
-    assert!(ang > 8.0 && ang < 13.0, "{ang}");
+    assert!(
+        (full_turn - ang - 5.0).abs() < 0.1,
+        "{ang} against {full_turn}"
+    );
+}
+
+#[test]
+fn the_derotation_grows_from_nothing_beyond_the_tolerance() {
+    // tolerance 1 degree: the plugin turns a tooth fully onto the line, the port by the
+    // excess over the tolerance, and not at all under half a degree of excess
+    for rot in [1.2, 2.5, 4.0, 8.0] {
+        let a = make_arch(&Mal {
+            rot: vec![(42, rot)],
+            ..Mal::default()
+        });
+        let plugin = setup(&a, &full(|c| c.plugin_derotation = true));
+        let full_turn = plugin.targets.get(&fdi(42)).map_or(0.0, angle);
+        let res = setup(&a, &full(|_| {}));
+        let turn = res.targets.get(&fdi(42)).map_or(0.0, angle);
+        if full_turn - 1.0 < MIN_DEROTATION_DEG - 0.1 {
+            assert_eq!(turn, 0.0, "{rot}: {turn} against {full_turn}");
+        } else {
+            assert!(
+                (full_turn - turn - 1.0).abs() < 0.1,
+                "{rot}: {turn} against {full_turn}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -497,13 +534,15 @@ fn a_small_offset_from_the_line_is_corrected() {
 }
 
 #[test]
-fn a_small_rotation_is_corrected() {
+fn a_small_rotation_is_corrected_by_the_excess() {
     let a = make_arch(&Mal {
         rot: vec![(44, 3.0)],
         ..Mal::default()
     });
+    // 3 degrees, tolerance 1: turned by 2
     let res = setup(&a, &full(|_| {}));
-    assert!(angle(&res.targets[&fdi(44)]) > 2.0);
+    let ang = angle(&res.targets[&fdi(44)]);
+    assert!((ang - 2.0).abs() < 0.3, "{ang}");
 }
 
 #[test]
@@ -1105,6 +1144,11 @@ fn scenarios() -> Vec<(&'static str, SetupResult)> {
                    crowns: Option<BTreeMap<Fdi, Vec<DVec3>>>,
                    poses: BTreeMap<Fdi, DMat4>| {
         let fixed: Vec<Fdi> = fixed.iter().map(|&n| fdi(n)).collect();
+        // the plugin derotates fully
+        let cfg = Config {
+            plugin_derotation: true,
+            ..cfg
+        };
         let r = conservative_setup(
             &a.teeth,
             &seq(),

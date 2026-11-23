@@ -689,11 +689,13 @@ pub struct SetupSettings {
     pub line_sigma_mm: f64,
     /// Incisors and canines: distance from the line below which they stay (mm).
     pub normal_tol_mm: f64,
-    /// Incisors and canines: rotation below which they stay (degrees).
+    /// Incisors and canines: rotation they keep (degrees); beyond it only the
+    /// excess is derotated, not at all under half a degree of excess.
     pub rot_tol_deg: f64,
     /// Premolars and molars: distance from the line below which they stay (mm).
     pub post_normal_tol_mm: f64,
-    /// Premolars and molars: rotation below which they stay (degrees).
+    /// Premolars and molars: rotation they keep (degrees); beyond it only the
+    /// excess is derotated, not at all under half a degree of excess.
     pub post_rot_tol_deg: f64,
     /// Move along the arch below which a tooth stays where it is (mm).
     pub pos_tol_mm: f64,
