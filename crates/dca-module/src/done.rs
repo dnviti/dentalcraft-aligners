@@ -6,9 +6,10 @@
 //! exports (they write files), the re-plan (it replaces the aligners) and the
 //! whole pipeline, which is not a step.
 //!
-//! "Bite" with one arch has nothing to do: there is no bite
-//! ([`dca_model::bite_use`]), so the step never stands as the next one to do
-//! nor leaves the progress short.
+//! "Bite" with one arch has nothing to do once the import is settled: there
+//! is no bite ([`dca_model::bite_use`]), so the step never stands as the next
+//! one to do nor leaves the progress short. While the arch of the one scan
+//! is still a guess, nothing counts as done yet.
 
 use dc_case::{CaseState, RoleSource, ScanRole};
 use dca_algo::anatomy::Arch;
@@ -35,6 +36,19 @@ pub(crate) fn leaf_done(state: &CaseState, id: &str) -> bool {
                 .iter()
                 .all(|s| s.role_source != RoleSource::Provisional);
     }
+    if id == BITE {
+        return match BiteUse::of(state) {
+            // one arch: the bite does not apply, nothing is left to do once
+            // the arch of the scan is settled
+            BiteUse::OneArch => leaf_done(state, IMPORT_SCANS),
+            u => {
+                u.applies()
+                    && state
+                        .module_data::<AlignersState>(MODULE_ID)
+                        .is_some_and(|d| d.bite_registered)
+            }
+        };
+    }
     let Some(data) = state.module_data::<AlignersState>(MODULE_ID) else {
         return false;
     };
@@ -55,11 +69,6 @@ pub(crate) fn leaf_done(state: &CaseState, id: &str) -> bool {
         "aligners.diagnosis.space-analysis" => {
             every_arch(&|a| data.diagnosis.arches.contains_key(&a.role()))
         }
-        BITE => match BiteUse::of(state) {
-            // one arch: the bite does not apply, nothing is left to do
-            BiteUse::OneArch => true,
-            u => u.applies() && data.bite_registered,
-        },
         "aligners.planning.setup.automatic" => every_arch(&|a| data.setup.poses.keys().any(of(a))),
         "aligners.planning.aligners" => {
             every_arch(&|a| schedule::active_stages(a, &data.stages) > 0)
@@ -153,6 +162,10 @@ mod tests {
         let mut stale = one.clone();
         stale.set_module(MODULE_ID, ModuleState::new(data));
         assert!(leaf_done(&stale, BITE));
+        // while the arch of the one scan is a guess, nothing is done yet
+        let mut guessed = one.clone();
+        guessed.case.scans[0].role_source = RoleSource::Provisional;
+        assert!(!leaf_done(&guessed, BITE));
         // so the next step of one arch is never the bite
         let next = |s: &CaseState| {
             crate::tree::menu_tree()
