@@ -393,7 +393,9 @@ fn molars_held_and_crowding_spread() {
         t.contact_m = c + t.e_md * t.width_md / 2.0;
         t.contact_d = c - t.e_md * t.width_md / 2.0;
     }
-    let res = setup(&a, &full(|_| {}));
+    // the plugin moves the midline into the space of the other side; by default each side
+    // makes its own room (`each_side_makes_its_own_room_and_the_midline_stays`)
+    let res = setup(&a, &full(|c| c.plugin_spaces = true));
     let mv = moved(&res, &a.cusps);
     for f in [47, 46, 36, 37] {
         assert_eq!(mv[&fdi(f)], 0.0, "{f}");
@@ -919,6 +921,33 @@ fn the_midline_stays_where_it_is_when_a_space_closes() {
         assert!(along[&f] > 0.9, "{f}: {:.2} mm", along[&f]);
     }
     assert!(res.midline_shift.abs() < 0.1, "{}", res.midline_shift);
+}
+
+#[test]
+fn each_side_makes_its_own_room_and_the_midline_stays() {
+    // 1 mm of space between 43 and 42, the left incisors 1.2 mm too wide together: the space
+    // of the right side is not given to the crowding of the left side by moving the midline
+    let a = spaced(&[(43, 1.0)], &[(31, 5.9), (32, 6.6)]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    let along = mesial_moves(&a, &res);
+    assert!(
+        res.midline_shift.abs() < 0.1,
+        "{} {along:?}",
+        res.midline_shift
+    );
+    // the central incisors open their own overlap symmetrically
+    assert!((along[&41] - along[&31]).abs() < 0.1, "{along:?}");
+    // the right side closes its space with its own teeth, the left side makes its own room
+    for f in [43, 44, 45, 46, 47] {
+        assert!(along[&f] > 0.6, "{f}: {:.2} mm", along[&f]);
+    }
+    let right = |x: Fdi| anatomy::is_right(x);
+    assert!(
+        res.ipr.keys().all(|&(x, y)| !right(x) && !right(y)),
+        "{:?}",
+        res.ipr
+    );
+    assert!(res.ipr.values().sum::<f64>() > 0.9, "{:?}", res.ipr);
 }
 
 #[test]
