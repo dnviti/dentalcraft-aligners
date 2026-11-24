@@ -1014,4 +1014,295 @@ mod tests {
         // no date of its own: the day of the export
         assert_eq!(at(9, true).date.as_deref(), Some("2026-03-01"));
     }
+
+    use glam::DVec2;
+
+    /// Points where the edges of `tris` cross the height `z` (plan).
+    fn section(p: &[DVec3], tris: &[[u32; 3]], z: f64) -> Vec<DVec2> {
+        let mut out = Vec::new();
+        for t in tris {
+            for k in 0..3 {
+                let (a, b) = (p[t[k] as usize], p[t[(k + 1) % 3] as usize]);
+                if (a.z - z) * (b.z - z) < 0.0 {
+                    out.push((a + (b - a) * ((z - a.z) / (b.z - a.z))).truncate());
+                }
+            }
+        }
+        out
+    }
+
+    /// Convex hull, counter-clockwise (monotone chain).
+    fn hull(pts: &[DVec2]) -> Vec<DVec2> {
+        let mut p = pts.to_vec();
+        p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        p.dedup();
+        if p.len() < 3 {
+            return p;
+        }
+        let cross = |o: DVec2, a: DVec2, b: DVec2| (a - o).perp_dot(b - o);
+        let mut h: Vec<DVec2> = Vec::new();
+        for pass in 0..2 {
+            let start = h.len();
+            let seq: Vec<DVec2> = if pass == 0 {
+                p.clone()
+            } else {
+                p.iter().rev().copied().collect()
+            };
+            for q in seq {
+                while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                    h.pop();
+                }
+                h.push(q);
+            }
+            h.pop();
+        }
+        h
+    }
+
+    /// The range of `s` with `c + s w` inside the convex counter-clockwise
+    /// polygon `poly`.
+    fn line_range(poly: &[DVec2], c: DVec2, w: DVec2) -> Option<(f64, f64)> {
+        let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            let n = DVec2::new(b.y - a.y, a.x - b.x);
+            let (k, r) = (n.dot(w), n.dot(a - c));
+            if k.abs() < 1e-12 {
+                if r < 0.0 {
+                    return None;
+                }
+            } else if k > 0.0 {
+                hi = hi.min(r / k);
+            } else {
+                lo = lo.max(r / k);
+            }
+        }
+        (lo < hi).then_some((lo, hi))
+    }
+
+    /// Where the ray `o + t d` (`t > 0`) crosses the triangles, sorted.
+    fn crossings(p: &[DVec3], tris: &[[u32; 3]], o: DVec3, d: DVec3) -> Vec<f64> {
+        let mut out: Vec<f64> = tris
+            .iter()
+            .filter_map(|t| {
+                let [a, b, c] = t.map(|i| p[i as usize]);
+                let (e1, e2) = (b - a, c - a);
+                let h = d.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() < 1e-12 {
+                    return None;
+                }
+                let s = o - a;
+                let u = s.dot(h) / det;
+                let q = s.cross(e1);
+                let v = d.dot(q) / det;
+                let t = e2.dot(q) / det;
+                (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 1e-9).then_some(t)
+            })
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        out
+    }
+
+    /// The aligner as the export writes it (`aligners.view.aligner-exact`
+    /// builds the print file of a stage with the provider of `export-all`)
+    /// on a golden arch at its initial stage, SMOOTH border: under the
+    /// contact of every two touching neighbours its inner wall stays within
+    /// the recess (+ [`EMBRASURE_TOL_MM`]) of the lines tangent to the two
+    /// crowns, from the contact down to 1 mm over the border (labial and
+    /// lingual, the median of three rays 0.05 mm apart), so it never goes
+    /// down into the embrasure onto the papilla; and the border over the
+    /// papilla stands at most [`NOTCH_MM`] over the line between its
+    /// heights at the middles of the two teeth (no notch). Here at most
+    /// 0.73 mm into an embrasure and 0.50 mm over a papilla; the export
+    /// before the block-out (a2dfeba) went up to 2.86 mm into one, its
+    /// border 0.55 mm over a papilla.
+    #[test]
+    #[ignore = "reconstruction, gingiva, plan and the print file of a stage: about 30 s in release, run with --release --ignored --nocapture"]
+    fn the_exported_aligner_bridges_every_embrasure() {
+        /// Penetration allowed past the recess (mm): the draft voxel of the
+        /// print file (0.25 mm) and its tolerance (0.05 mm).
+        const EMBRASURE_TOL_MM: f64 = 0.3;
+        /// Rise of the border over the papilla allowed (mm).
+        const NOTCH_MM: f64 = 1.0;
+        let run = |id: &str, s: &CaseState, p: serde_json::Value| {
+            crate::commands::find(id)
+                .unwrap()
+                .execute(s, &p, &dc_command::JobCtx::detached())
+                .unwrap()
+        };
+        let mut s = crate::commands::reconstruct::golden_state("demo_lower_mild");
+        for id in [
+            "aligners.teeth.frames",
+            "aligners.preparation.reconstruction.automatic",
+            "aligners.preparation.gingiva",
+            "aligners.planning.setup.automatic",
+            "aligners.planning.staging.automatic",
+        ] {
+            s = run(id, &s, serde_json::Value::Null).0;
+        }
+        let s = run(
+            "aligners.view.aligner-exact",
+            &s,
+            serde_json::json!({ "stage": 0, "quality": "draft" }),
+        )
+        .0;
+        let data = s
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap();
+        assert_eq!(data.trim.mode, TrimMode::Smooth);
+        let recess = data.trim.recess_mm;
+        let role = dc_case::ScanRole::Lower;
+        let base = data
+            .aligner_view
+            .bases
+            .iter()
+            .find(|b| b.exact && b.arch == role && b.stage == 0)
+            .unwrap();
+        let aligner = s.blobs.require(&base.mesh).unwrap();
+        // arch coordinates: +Z the mean occlusal axis of the teeth
+        let covered = data.aligner_teeth(role);
+        let zsum: DVec3 = data
+            .tooth_frames
+            .iter()
+            .filter(|(f, _)| covered.contains(f))
+            .map(|(_, fr)| fr.pose.q * DVec3::Z)
+            .sum();
+        let q = glam::DQuat::from_rotation_arc(zsum.normalize(), DVec3::Z);
+        let al: Vec<DVec3> = aligner.positions.iter().map(|p| q * p.as_dvec3()).collect();
+        let tris = &aligner.tris;
+        let teeth: BTreeMap<Fdi, (Vec<DVec3>, Vec<[u32; 3]>)> = data
+            .crowns
+            .iter()
+            .filter(|(f, _)| covered.contains(f))
+            .map(|(f, r)| {
+                let m = s.blobs.require(r).unwrap();
+                let p = m.positions.iter().map(|p| q * p.as_dvec3()).collect();
+                (*f, (p, m.tris.clone()))
+            })
+            .collect();
+        let order: Vec<Fdi> = dca_algo::anatomy::arch_order(Arch::Lower)
+            .iter()
+            .copied()
+            .filter(|f| teeth.contains_key(f))
+            .collect();
+        let cen = |f: &Fdi| {
+            let p = &teeth[f].0;
+            p.iter().map(|v| v.truncate()).sum::<DVec2>() / p.len() as f64
+        };
+        let mid: DVec2 = order.iter().map(cen).sum::<DVec2>() / order.len() as f64;
+        // the lowest point of the aligner in the vertical plane through `o`
+        // square to `u`, on the side `w` of `o`, within 8 mm of it
+        let border = |o: DVec2, u: DVec2, w: DVec2| {
+            let mut best = f64::INFINITY;
+            for t in tris {
+                let p = t.map(|i| al[i as usize]);
+                let d = p.map(|x| (x.truncate() - o).dot(u));
+                for k in 0..3 {
+                    let (a, b) = (k, (k + 1) % 3);
+                    if (d[a] <= 0.0) == (d[b] <= 0.0) {
+                        continue;
+                    }
+                    let x = p[a] + (p[b] - p[a]) * (d[a] / (d[a] - d[b]));
+                    let r = x.truncate() - o;
+                    if r.dot(w) > 0.0 && r.length() < 8.0 {
+                        best = best.min(x.z);
+                    }
+                }
+            }
+            best
+        };
+        let (mut pairs, mut worst, mut notch) = (0, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for w2 in order.windows(2) {
+            let ((pa, ta), (pb, tb)) = (&teeth[&w2[0]], &teeth[&w2[1]]);
+            // the contact: the highest middle of the closest two vertices
+            let close: Vec<(f64, DVec3)> = pb
+                .iter()
+                .map(|p| {
+                    let a = pa
+                        .iter()
+                        .min_by(|x, y| x.distance_squared(*p).total_cmp(&y.distance_squared(*p)))
+                        .unwrap();
+                    (a.distance(*p), (*a + *p) * 0.5)
+                })
+                .collect();
+            let dmin = close.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+            if dmin > shell::embrasure::TOUCH_MM {
+                continue;
+            }
+            pairs += 1;
+            let c = close
+                .iter()
+                .filter(|x| x.0 <= dmin + 0.1)
+                .map(|x| x.1)
+                .max_by(|a, b| a.z.total_cmp(&b.z))
+                .unwrap();
+            let (ca, cb, c2) = (cen(&w2[0]), cen(&w2[1]), c.truncate());
+            let u = (cb - ca).normalize();
+            let mut w = DVec2::new(-u.y, u.x);
+            if (c2 - mid).dot(w) < 0.0 {
+                w = -w;
+            }
+            let mut pen = [f64::NEG_INFINITY; 2];
+            let mut rise = [0.0; 2];
+            for (i, side) in [w, -w].into_iter().enumerate() {
+                let at = |o: DVec2| border(o, u, side);
+                let zb = at(c2);
+                let t = (c2 - ca).dot(u) / (cb - ca).dot(u);
+                rise[i] = zb - (at(ca) + t * (at(cb) - at(ca)));
+                let mut z = c.z - 0.3;
+                while z > zb + 1.0 && z > c.z - 7.0 {
+                    let mut sec = section(pa, ta, z);
+                    let sb = section(pb, tb, z);
+                    if sec.len() >= 3 && sb.len() >= 3 {
+                        sec.extend(sb);
+                        if let Some((lo, hi)) = line_range(&hull(&sec), c2, side) {
+                            let mut v: Vec<f64> = [-0.05, 0.0, 0.05]
+                                .into_iter()
+                                .filter_map(|off| {
+                                    let o = (c2 + u * off + side * 25.0).extend(z);
+                                    let h = crossings(&al, tris, o, -side.extend(0.0));
+                                    let inner: Vec<f64> = h
+                                        .into_iter()
+                                        .map(|t| 25.0 - t)
+                                        .filter(|x| *x > 0.5 * (lo + hi))
+                                        .collect();
+                                    (inner.len() >= 2).then(|| hi - inner[1])
+                                })
+                                .collect();
+                            v.sort_by(f64::total_cmp);
+                            if v.len() >= 2 {
+                                pen[i] = pen[i].max(if v.len() == 3 { v[1] } else { v[0] });
+                            }
+                        }
+                    }
+                    z -= 0.2;
+                }
+            }
+            eprintln!(
+                "{}-{}: gap {dmin:.2}, into the embrasure {:+.2} / {:+.2} mm, border over the papilla {:+.2} / {:+.2} mm",
+                w2[0].get(),
+                w2[1].get(),
+                pen[0],
+                pen[1],
+                rise[0],
+                rise[1]
+            );
+            worst = worst.max(pen[0]).max(pen[1]);
+            notch = notch.max(rise[0]).max(rise[1]);
+        }
+        eprintln!(
+            "{pairs} pairs: into the embrasure at most {worst:.2} mm (recess {recess}), border over the papilla at most {notch:.2} mm"
+        );
+        assert!(pairs >= 8, "{pairs} touching pairs");
+        assert!(
+            worst <= recess + EMBRASURE_TOL_MM,
+            "the aligner goes {worst:.2} mm into an embrasure (recess {recess} mm)"
+        );
+        assert!(
+            notch <= NOTCH_MM,
+            "the border rises {notch:.2} mm over a papilla"
+        );
+    }
 }
