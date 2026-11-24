@@ -299,7 +299,7 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
         &[1.0; 4],
         &[false, true, true, false],
         false,
-        None,
+        false,
     );
     assert_eq!(ch.deficit, 0.0);
     assert_eq!((ch.u[1], ch.u[2]), (2.0, 1.5));
@@ -308,28 +308,25 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
 #[test]
 fn stretches_between_fixed_teeth() {
     let fixed = [true, false, false, true];
-    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false, None);
+    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false, false);
     assert_eq!(ch.deficit, 0.0);
     assert_eq!(ch.u, vec![0.0, 0.75, 0.75, 2.0]);
-    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false, None);
+    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false, false);
     assert!((ch.deficit - 1.5).abs() < 1e-12);
 }
 
 #[test]
-fn the_last_tooth_of_a_side_goes_distally_at_most_the_slack() {
+fn the_last_tooth_of_a_side_never_goes_distally() {
     // the chain needs 1 mm more than the room between its last teeth: the plugin pushes the
     // last teeth distally, the port finds crowding (the space is made by the therapy)
     let u0 = [1.0, 1.0, 0.0, 0.0];
     let free = [false; 4];
-    let plugin = solve_chain(&u0, &[1.0; 4], &free, true, None);
+    let plugin = solve_chain(&u0, &[1.0; 4], &free, true, false);
     assert_eq!(plugin.deficit, 0.0);
     assert!(plugin.u[0] < u0[0] && plugin.u[3] > u0[3]);
-    let port = solve_chain(&u0, &[1.0; 4], &free, true, Some(0.0));
+    let port = solve_chain(&u0, &[1.0; 4], &free, true, true);
     assert!((port.deficit - 1.0).abs() < 1e-12);
     assert_eq!((port.segs[0].left, port.segs[0].right), (-1, 4));
-    // a slack of 0.3 mm at each end takes 0.6 mm of it, the rest is crowding
-    let port = solve_chain(&u0, &[1.0; 4], &free, true, Some(0.3));
-    assert!((port.deficit - 0.4).abs() < 1e-12);
 }
 
 #[test]
@@ -338,20 +335,14 @@ fn the_teeth_behind_a_space_close_it_against_a_fixed_tooth() {
     // free teeth mesially against the fixed tooth, none of them distally
     let u0 = [0.0, 0.5, 2.0];
     let fixed = [false, false, true];
-    let plugin = solve_chain(&u0, &[1.0; 3], &fixed, true, None);
+    let plugin = solve_chain(&u0, &[1.0; 3], &fixed, true, false);
     assert_eq!(plugin.u, vec![0.25, 0.25, 2.0]);
-    let port = solve_chain(&u0, &[1.0; 3], &fixed, true, Some(0.0));
+    let port = solve_chain(&u0, &[1.0; 3], &fixed, true, true);
     assert_eq!(port.u, vec![2.0, 2.0, 2.0]);
     assert_eq!((port.deficit, port.spacing), (0.0, 0.0));
     // without a fixed tooth the chain closes where its weights say, the last teeth no further
     // out than they were
-    let port = solve_chain(
-        &[0.0, 0.0, 1.0, 1.0],
-        &[1.0; 4],
-        &[false; 4],
-        true,
-        Some(0.0),
-    );
+    let port = solve_chain(&[0.0, 0.0, 1.0, 1.0], &[1.0; 4], &[false; 4], true, true);
     assert_eq!(port.u, vec![0.5; 4]);
 }
 
@@ -638,7 +629,8 @@ fn severe_crowding_does_not_push_on_the_molars() {
 fn the_order_of_the_therapy() {
     let a = crowded(&[(42, 6.3), (41, 5.8), (31, 5.8), (32, 6.3)]);
     let ipr_first = setup(&a, &full(|_| {}));
-    assert!(ipr_first.ipr.values().sum::<f64>() > 1.0);
+    // 1.6 mm of crowding: the five anterior contacts at their cap (0.2 mm each)
+    assert!(ipr_first.ipr.values().sum::<f64>() >= 1.0 - 1e-9);
     assert_eq!(ipr_first.expansion, 0.0);
     let exp_first = setup(
         &a,
@@ -897,6 +889,36 @@ fn no_ipr_on_a_contact_open_at_rest() {
     let g = contact_gaps(&a, Some(&res));
     let g34 = g.iter().find(|x| (x.0, x.1) == (33, 34)).unwrap().2;
     assert!(g34.abs() < 0.2, "{g34:.2} mm");
+}
+
+#[test]
+fn a_crowded_arch_moves_no_tooth_distally_to_make_room() {
+    // 2.4 mm of crowding in the incisors, made by IPR: the last molars do not go distally to
+    // make room (the teeth between them and the incisors go into the space the IPR makes)
+    let a = spaced(&[], &[(41, 6.0), (42, 6.5), (31, 6.0), (32, 6.5)]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    let along = mesial_moves(&a, &res);
+    for f in [36, 37, 46, 47] {
+        assert!(along[&f] > -0.01, "{f}: {:.2} mm", along[&f]);
+    }
+    let total: f64 = res.ipr.values().sum();
+    assert!(total > 1.5, "{:?}", res.ipr);
+}
+
+#[test]
+fn the_midline_stays_where_it_is_when_a_space_closes() {
+    // 1.2 mm between 44 and 43 only: the posterior teeth of that side close it, the central
+    // incisors stay (the midline kept), the other side does not move
+    let a = spaced(&[(44, 1.2)], &[]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    let along = mesial_moves(&a, &res);
+    for f in [41, 31] {
+        assert!(along[&f].abs() < 0.1, "{f}: {:.2} mm", along[&f]);
+    }
+    for f in [44, 45, 46, 47] {
+        assert!(along[&f] > 0.9, "{f}: {:.2} mm", along[&f]);
+    }
+    assert!(res.midline_shift.abs() < 0.1, "{}", res.midline_shift);
 }
 
 #[test]

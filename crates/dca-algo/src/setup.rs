@@ -16,14 +16,14 @@
 //!    rotated or stepped beyond the tolerances of its zone;
 //! 3. the space along the line: every aligned tooth takes its full
 //!    mesio-distal width; the space missing between the fixed teeth (and,
-//!    by default, between the last tooth of each side, which goes distally
-//!    at most [`END_SLACK`]) is made by the therapy in the order of
-//!    `priority`, after the spaces of the arch are used (no IPR on a contact
-//!    open at rest);
+//!    by default, between the last tooth of each side, which never goes
+//!    distally) is made by the therapy in the order of `priority`, after
+//!    the spaces of the arch are used (no IPR on a contact open at rest);
 //!    what is left is spread over the contacts of the stretch; with
 //!    `close_spaces` the gaps close, the posterior teeth going mesially as
 //!    far as needed (between two fixed teeth retracting the incisors up to
-//!    `retract_max`);
+//!    `retract_max`), the central incisors held where they are with the
+//!    midline kept;
 //! 4. the positions along the arch: the nearest to the current ones,
 //!    without overlaps (weighted isotonic regression per stretch between the
 //!    fixed teeth);
@@ -42,9 +42,11 @@
 //! Departures from the plugin, each with a [`Config`] flag the parity tests
 //! turn on: the derotation of the excess only (`plugin_derotation`), the
 //! scale of the arch line (`plugin_line_scale`) and the spaces
-//! (`plugin_spaces`, 2026-11-24: the ends of the arch bounded, the last
-//! tooth of each side at its height, no IPR on an open contact, the open
-//! contacts closed on the crowns). The parameters
+//! (`plugin_spaces`, 2026-11-24: the ends of the arch bounded, the central
+//! incisors held with the midline kept, the last tooth of each side at its
+//! height, no IPR on an open contact, the open contacts closed on the
+//! crowns). The
+//! parameters
 //! align every tooth and hold no molar by default ([`Params`]); the
 //! plugin's default aligns the incisors and canines with the molars held.
 //!
@@ -92,12 +94,10 @@ const REST_OVERLAP_MAX: f64 = 0.5;
 /// Beyond this (mm) the difference between the model and the crowns is not a
 /// calibration error: the contact of the model stays.
 const GAP_CAL_MAX: f64 = 2.0;
-/// How far (mm) the last tooth of each side may go distally (the ends of the
-/// arch are bounded, [`Config::plugin_spaces`] off): a crowding of the arch
-/// up to twice this is taken there instead of by the therapy, so the noise
-/// of the measured widths of the last molars (their derotation, a few
-/// vertices of a contact given to the neighbour) does not turn into IPR.
-pub const END_SLACK: f64 = 0.5;
+/// Weight of a central incisor against the other teeth (1) when the
+/// midline is held: at the centre of the arch ([`Midline::Center`]), or
+/// where it is ([`Midline::Keep`], [`Config::plugin_spaces`] off).
+const MIDLINE_WEIGHT: f64 = 25.0;
 /// Smallest derotation the setup makes (degrees). A tooth rotated against
 /// the line beyond the tolerance of its zone (`rot_tol_deg`,
 /// `post_rot_tol_deg`) is turned back only by the excess, so the turn grows
@@ -280,16 +280,19 @@ pub struct Config {
     pub plugin_line_scale: bool,
     /// The plugin's handling of the spaces and of the ends of the arch: the
     /// last tooth of each side free to go distally ([`solve_chain`] without
-    /// bounded ends) and levelled like the others, IPR on any contact of a
-    /// crowded stretch, and the final contacts checked on the crowns for
+    /// bounded ends) and levelled like the others, the central incisors
+    /// weighed `incisor_weight` with the midline kept, IPR on any contact of
+    /// a crowded stretch, and the final contacts checked on the crowns for
     /// overlaps only. Off by default (2026-11-24): the last tooth of each
-    /// side goes distally at most [`END_SLACK`] but mesially as far as the
-    /// spaces need, and keeps its height (the levelling extrapolates the
-    /// line of the cusps there: up to 1 mm on a real case, which pushed the
-    /// last molar into its neighbour); no IPR on a contact open at rest (the
-    /// space is used first), and a contact the crowns find still open in
-    /// the final position is closed. The parity tests with the plugin turn
-    /// it on.
+    /// side never goes distally but goes mesially as far as the spaces
+    /// need, and the last tooth keeps its height (the levelling
+    /// extrapolates the line of the cusps there: up to 1 mm on a real case,
+    /// which pushed the last molar into its neighbour); with the midline
+    /// kept the central incisors are held where they are
+    /// ([`MIDLINE_WEIGHT`]: closing the spaces of a whole arch shifted it
+    /// by 0.7 mm); no IPR on a contact open at rest (the space is used
+    /// first), and a contact the crowns find still open in the final
+    /// position is closed. The parity tests with the plugin turn it on.
     pub plugin_spaces: bool,
 }
 
@@ -1203,8 +1206,8 @@ impl Solver<'_> {
             if let (Some(sm), Some(j)) = (sm, cen) {
                 u0[j] = sm - m.wp[j];
                 u0[j + 1] = sm + m.wm[j + 1];
-                w[j] = 25.0 * cfg.incisor_weight;
-                w[j + 1] = 25.0 * cfg.incisor_weight;
+                w[j] = MIDLINE_WEIGHT * cfg.incisor_weight;
+                w[j + 1] = MIDLINE_WEIGHT * cfg.incisor_weight;
             }
         }
         let cumsum = |r: &[f64]| -> Vec<f64> {
@@ -1219,7 +1222,7 @@ impl Solver<'_> {
         let sub =
             |a: &[f64], b: &[f64]| -> Vec<f64> { a.iter().zip(b).map(|(x, y)| x - y).collect() };
         let mut off = cumsum(&req);
-        let ends = (!cfg.plugin_spaces).then_some(END_SLACK);
+        let ends = !cfg.plugin_spaces;
         let ch = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces, ends);
         let (deficit, segs) = (ch.deficit, ch.segs.clone());
         let (mut u, mut spacing) = (ch.u, ch.spacing);
@@ -1580,10 +1583,12 @@ pub fn conservative_setup(
             .map(|i| seq[i])
             .collect(),
     });
-    let w_inc = if cfg.midline == Midline::Keep {
-        cfg.incisor_weight
-    } else {
-        1.0
+    // with the midline kept the central incisors weigh more; without the plugin's spaces
+    // they are held where they are (closing the spaces of a whole arch shifted it)
+    let w_inc = match cfg.midline {
+        Midline::Keep if cfg.plugin_spaces => cfg.incisor_weight,
+        Midline::Keep => MIDLINE_WEIGHT * cfg.incisor_weight,
+        _ => 1.0,
     };
     let wts: Vec<f64> = seq
         .iter()

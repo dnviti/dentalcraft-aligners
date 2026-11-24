@@ -33,19 +33,67 @@
 //! the molar 17 in or out of the moving teeth: its two cusps are single
 //! highest points, which swap under the noise, so its measured rotation
 //! crosses the 5 degree tolerance (and the 0.5 degree smallest turn beyond
-//! it). The goal is none even on the strict criterion, and
+//! it). With every tooth free along the arch (2026-11-24) 11 jumped with a
+//! 0.5 mm distal slack at the ends of the arch (55a87aa), 20 without it.
+//! The goal is none even on the strict criterion, and
 //! [`a_last_molar_moved_by_noise_never_jumps_the_plan`] holds it.
 //!
-//! The six demo arches are planned the same way with the default settings
-//! (the anterior teeth to align), then again under the 9 flips at each of
-//! their two last molars and under 5 to 10 vertices anywhere on a border
-//! given the label across it, 16 seeds each: 384 noisy plans. On the
-//! user's criterion 53 of them jumped before 41ccdab, 24 after it, 28 after
-//! eddf352, 27 after fa0cd85 and [`FAMILY_JUMPS_NOW`] once the robust arch
-//! line takes its scale once from the canines and premolars (5bdaa21). All
-//! of those are border flips; the 9 flips at the molars move no plan. 16 of
-//! them are the lower moderate and severe arches, whose front teeth collide
-//! in the staging: more or fewer aligners, or another collision listed.
+//! The six demo arches are planned the same way with the default settings,
+//! then again under the 9 flips at each of their two last molars and under
+//! 5 to 10 vertices anywhere on a border given the label across it, 16
+//! seeds each: 384 noisy plans. With the incisors and canines aligned (the
+//! default until 2026-11-24), on the user's criterion 53 of them jumped
+//! before 41ccdab, 24 after it, 28 after eddf352, 27 after fa0cd85 and 21
+//! once the robust arch line takes its scale once from the canines and
+//! premolars (5bdaa21).
+//!
+//! Since 2026-11-24 every tooth is aligned by default, the spaces of the
+//! arch close with the posterior teeth, the last tooth of each side never
+//! goes distally and keeps its height, and with the midline kept the
+//! central incisors are held: [`FAMILY_JUMPS_NOW`] of the 384 jump. The
+//! user accepted the measured count on 2026-11-24 for the release (99 with
+//! a 0.5 mm distal slack at the ends, which then moved the last molars
+//! distally on every case and was removed), as a known debt to fix first
+//! after it; the goal stays about 5 % (21 of 384). The real case under 20
+//! noisy plans (10 seeds of the same two families, both arches) jumped in
+//! none with the slack. What each rule gives (the counts are deterministic;
+//! fixture of 64 / demo arches of 384):
+//!
+//! | rules | fixture | demo arches |
+//! |---|---|---|
+//! | the plugin's, incisors and canines, molars held (before) | - | 21 |
+//! | the new ones, incisors and canines, molars held | - | 62 |
+//! | ... without the no-IPR step at a contact open at rest | - | 33 |
+//! | ... without the contacts closed on the crowns | - | 50 |
+//! | the plugin's, every tooth (the new default) | 26 | 117 |
+//! | babed69: the new ones, every tooth | 35 | 143 |
+//! | 55a87aa: the last tooth 0.5 mm distally at most, at its height | 11 | 99 |
+//! | the last tooth never distally, at its height | 20 | 125 |
+//! | ... and the central incisors held (midline kept): this state | 20 | 132 |
+//! | ... and a crowding of 0.05 mm per contact left to the contacts | 25 | 181 |
+//! | ... the ends strict (no distal slack) | 20 | 125 |
+//! | ... the last tooth levelled | 10 | 126 |
+//! | ... no contact closed on the crowns | 19 | 127 |
+//! | ... IPR on a contact open at rest | 11 | 130 |
+//! | ... the contacts closed within 0.10 mm (0.05 mm) | 25 (37) | 141 (197) |
+//! | ... the IPR cap falling with the gap at rest | 11 | 136 |
+//! | ... 8 rounds of the 3D check of the contacts | 7 | 110 |
+//!
+//! Of the 99 of 55a87aa: 81 change the number of aligners by more than one, 26 leave a
+//! new collision, 9 change an IPR by more than one step, 1 changes the
+//! moving teeth (a plan can jump in several ways). In 97 of them the final
+//! position itself moves (in the median a crown point by 0.41 mm, a tooth
+//! by 2.6 degrees): the setup jumps, not the staging. The causes, the known
+//! debt:
+//!
+//! * the space the arch misses comes from extremes of the crowns (their
+//!   extent along the line, the contact calibrated on its smallest cell,
+//!   the 3D overlaps), which a few vertices move by 0.1 to 0.4 mm;
+//! * the 3D check of the contacts stops after 4 rounds before it converges
+//!   (0.17 mm left in one plan of ten), and its corrections feed that
+//!   space, so the IPR of the whole stretch;
+//! * the IPR is rounded up per contact, so one crossing of a step moves
+//!   every contact of the stretch.
 
 mod golden_case;
 
@@ -68,8 +116,10 @@ use golden_case::Case;
 const JUMPS_NOW: usize = 14;
 /// Seeds of each family of noise.
 const SEEDS: u64 = 32;
-/// Noisy plans of the six demo arches that still jump (of 384).
-const FAMILY_JUMPS_NOW: usize = 21;
+/// Noisy plans of the six demo arches that still jump (of 384), with every
+/// tooth aligned: the measured count the user accepted on 2026-11-24 as a
+/// known debt (see the module documentation); the goal is about 5 % (21).
+const FAMILY_JUMPS_NOW: usize = 132;
 /// Seeds of each family of noise at each last molar of the six demo arches.
 const FAMILY_SEEDS: u64 = 16;
 

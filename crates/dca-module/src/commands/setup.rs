@@ -693,10 +693,16 @@ mod tests {
             .map(|v| fdi(v.as_u64().unwrap() as u8))
             .collect();
         assert!(!moved.is_empty());
-        // only incisors and canines are aligned by default
-        for f in &moved {
-            assert!(dca_algo::anatomy::index(*f) <= 3, "{f}");
-        }
+        // every tooth is aligned by default (2026-11-24): the scope note says so
+        assert!(
+            report["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["kind"] == "scope" && n["scope"] == "all"),
+            "{}",
+            report["notes"]
+        );
         let posed: Vec<Fdi> = d.setup.poses.keys().copied().collect();
         assert_eq!(posed, moved);
         for (f, p) in &d.setup.poses {
@@ -741,7 +747,9 @@ mod tests {
         let (pa, pb) = (data(&a).setup.poses, data(&b).setup.poses);
         assert_eq!(pa.keys().collect::<Vec<_>>(), pb.keys().collect::<Vec<_>>());
         for (f, p) in &pa {
-            assert!(p.approx_eq(&pb[f], 1e-9, 1e-9), "{f}");
+            // the angle between two quaternions is an arc cosine, which turns the 1e-16 of a
+            // norm not exactly 1 into 1e-8 rad: the same pose is within 1e-7 rad
+            assert!(p.approx_eq(&pb[f], 1e-9, 1e-7), "{f}: {p:?} {:?}", pb[f]);
         }
     }
 
@@ -1048,24 +1056,27 @@ mod tests {
         let state = demo(&CaseState::default(), "lower", "moderate");
         let (plain, _) = run(&state, Value::Null).unwrap();
         assert!(!data(&plain).setup.ipr.is_empty(), "the demo needs IPR");
-        // stored: no IPR anywhere, all the teeth aligned
+        // stored: no IPR anywhere, the incisors and canines only
         let (set, _) = exec(
             SETUP_SETTINGS,
             &state,
-            json!({ "ipr_zone": "none", "align_scope": "all" }),
+            json!({ "ipr_zone": "none", "align_scope": "anterior" }),
         )
         .unwrap();
         let (stored, out) = run(&set, Value::Null).unwrap();
         assert!(data(&stored).setup.ipr.is_empty());
         // the same as giving them to the command
-        let (given, out_given) =
-            run(&state, json!({ "ipr_zone": "none", "align_scope": "all" })).unwrap();
+        let (given, out_given) = run(
+            &state,
+            json!({ "ipr_zone": "none", "align_scope": "anterior" }),
+        )
+        .unwrap();
         assert_eq!(data(&given).setup.poses, data(&stored).setup.poses);
         assert_eq!(out["lower"]["moved"], out_given["lower"]["moved"]);
-        // a parameter given wins over the stored one
+        // a parameter given wins over the stored one (here the defaults back)
         let (over, _) = run(
             &set,
-            json!({ "ipr_zone": "anterior_premolars", "align_scope": "anterior" }),
+            json!({ "ipr_zone": "anterior_premolars", "align_scope": "all" }),
         )
         .unwrap();
         assert_eq!(data(&over).setup.poses, data(&plain).setup.poses);
