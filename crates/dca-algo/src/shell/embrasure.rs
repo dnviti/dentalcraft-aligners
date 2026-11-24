@@ -20,7 +20,12 @@
 //! than that under the gingiva under the contact (the plugin takes the
 //! lowest scanned point of the crowns; the closed teeth here may reach under
 //! the gingiva, and a fill held at the width of the crowns down there stood
-//! out of it).
+//! out of it). Where the papilla of one side (labial or lingual) stands
+//! lower than that gingiva, the half of the fill on that side of the plane
+//! of the contact goes on down to as far under its tip: the embrasure over
+//! it stayed open (an upper molar, its palatal gingiva near the contact,
+//! the buccal papilla 5 mm lower, the shell 1.5 mm into the buccal
+//! embrasure).
 //!
 //! Under the shell of an aligner with the smooth border
 //! (`stage_parts(smooth=True)`) the labial and lingual faces of every slice
@@ -177,6 +182,20 @@ fn prism(poly: &[DVec2], z0: f64, z1: f64) -> Solid {
     (v, t)
 }
 
+/// The tip of the papilla on the side `n` (unit, plan, square to the arch
+/// direction `u`) of the plane of the contact `c` (plan): the highest point
+/// of the gingiva `gum` within [`COL_MM`] of that plane along the arch and
+/// [`NEAR_MM`] of the contact, not above `z_top`; `−∞` without one.
+fn side_top(gum: &[DVec3], c: DVec2, u: DVec2, n: DVec2, z_top: f64) -> f64 {
+    gum.iter()
+        .filter(|q| {
+            let d = DVec2::new(q.x, q.y) - c;
+            q.z <= z_top && d.dot(n) > 0.0 && d.dot(u).abs() < COL_MM && d.length() < NEAR_MM
+        })
+        .map(|q| q.z)
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
 /// The fill under the contact of two neighbouring teeth `a`, `b`, its
 /// labial and lingual faces `inset` inside the tangents; `None` when they
 /// do not touch.
@@ -221,7 +240,18 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
             .map(|q| q.z)
             .fold(f64::INFINITY, f64::min)
     };
-    let mut z_bot = low(a.points).min(low(b.points)) - BELOW_MM;
+    let z_low = low(a.points).min(low(b.points)) - BELOW_MM;
+    let mean = |p: &[DVec3]| {
+        let s: DVec3 = p.iter().copied().sum();
+        let m = s / p.len() as f64;
+        DVec2::new(m.x, m.y)
+    };
+    let u = (mean(b.points) - mean(a.points)).normalize_or_zero();
+    if u == DVec2::ZERO {
+        return None;
+    }
+    // across the arch, from the plane of the contact
+    let ev = DVec2::new(-u.y, u.x);
     // the closed teeth may reach far under the gingiva (their roots): the
     // fill ends that far under the gingiva under the contact, where the
     // embrasure is closed by it
@@ -230,19 +260,27 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
         .filter(|q| DVec2::new(q.x, q.y).distance(c) < COL_MM && q.z <= z_top)
         .map(|q| q.z)
         .fold(f64::NEG_INFINITY, f64::max);
-    if col.is_finite() {
-        z_bot = z_bot.max(col - BELOW_MM);
-    }
-    if !z_bot.is_finite() {
-        return None;
-    }
-    let mean = |p: &[DVec3]| {
-        let s: DVec3 = p.iter().copied().sum();
-        let m = s / p.len() as f64;
-        DVec2::new(m.x, m.y)
+    // ... but on each side of the plane of the contact at least that far
+    // under the tip of the papilla of that side ([`side_top`]): the papilla
+    // of one side may stand mm lower than the gingiva under the contact
+    // (the palatal papilla of an upper molar), and its embrasure stayed
+    // open over it
+    let bottom = |s: f64| {
+        let t = side_top(gum, c, u, ev * s, z_top);
+        let g = match (col.is_finite(), t.is_finite()) {
+            (true, true) => col.min(t),
+            (true, false) => col,
+            _ => t,
+        };
+        if g.is_finite() {
+            z_low.max(g - BELOW_MM)
+        } else {
+            z_low
+        }
     };
-    let u = (mean(b.points) - mean(a.points)).normalize_or_zero();
-    if u == DVec2::ZERO {
+    let sides = [(ev, bottom(1.0)), (-ev, bottom(-1.0))];
+    let z_bot = sides[0].1.min(sides[1].1);
+    if !z_bot.is_finite() {
         return None;
     }
     let mut parts: Vec<Solid> = Vec::new();
@@ -281,13 +319,19 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
         };
         if let Some(poly) = poly.filter(|p| p.len() >= 3) {
             let z1 = (z + 1.05 * STEP_MM).min(z_top);
-            if inset_mm > 0.0 {
-                let faces = inset(&poly, u, inset_mm);
-                if faces.len() >= 3 {
-                    parts.push(prism(&faces, z, z1));
-                }
+            let mut faces = if inset_mm > 0.0 {
+                inset(&poly, u, inset_mm)
             } else {
-                parts.push(prism(&poly, z, z1));
+                poly.clone()
+            };
+            // under the bottom of a side only the other side goes on down
+            for &(n, zb) in &sides {
+                if z < zb && faces.len() >= 3 {
+                    faces = clip(&faces, n, n.dot(c));
+                }
+            }
+            if faces.len() >= 3 {
+                parts.push(prism(&faces, z, z1));
             }
             above = Some(poly);
         }
@@ -446,5 +490,67 @@ mod tests {
         assert!((lo.y - (lo0.y + 0.5)).abs() < 1e-9, "{lo} {lo0}");
         assert!((hi.y - (hi0.y - 0.5)).abs() < 1e-9, "{hi} {hi0}");
         assert!((lo.x - lo0.x).abs() < 1e-9 && (hi.x - hi0.x).abs() < 1e-9);
+    }
+
+    /// The papilla of one side far lower than the gingiva under the contact
+    /// (the palatal gingiva of an upper molar near it): the half of the fill
+    /// on that side goes on down to [`BELOW_MM`] under its tip, the other
+    /// half ends as before.
+    #[test]
+    fn a_lower_papilla_is_filled_down_on_its_own_side() {
+        let f = |n: u8| Fdi::new(n).unwrap();
+        let pa = [
+            DVec2::new(-4.0, -3.0),
+            DVec2::new(-1.0, -3.0),
+            DVec2::new(-0.3, 0.0),
+            DVec2::new(-1.0, 3.0),
+            DVec2::new(-4.0, 3.0),
+        ];
+        let pb = [
+            DVec2::new(0.2, 0.0),
+            DVec2::new(1.0, -3.0),
+            DVec2::new(4.0, -3.0),
+            DVec2::new(4.0, 3.0),
+            DVec2::new(1.0, 3.0),
+        ];
+        let a = prism(&pa, -5.0, 0.0);
+        let b = prism(&pb, -1.0, 0.0);
+        let teeth = [
+            Tooth {
+                fdi: f(26),
+                points: &a.0,
+                tris: &a.1,
+            },
+            Tooth {
+                fdi: f(27),
+                points: &b.0,
+                tris: &b.1,
+            },
+        ];
+        // the gingiva under the contact (-y) and the papilla of +y, 2.5 mm
+        // lower
+        let high = DVec3::new(0.0, -0.8, -1.5);
+        let low_tip = DVec3::new(0.0, 2.0, -4.0);
+        let lowest = |v: &[DVec3]| v.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        for inset in [0.0, 0.5] {
+            let before = fills(&teeth, &[high], inset);
+            assert!(
+                (lowest(&before[0].0) - (-1.5 - BELOW_MM)).abs() <= STEP_MM + 1e-9,
+                "{}",
+                lowest(&before[0].0)
+            );
+            let out = fills(&teeth, &[high, low_tip], inset);
+            assert_eq!(out.len(), 1);
+            let (v, t) = &out[0];
+            assert!(volume(v, t) > 0.0);
+            let z = lowest(v);
+            assert!((z - (-4.0 - BELOW_MM)).abs() <= STEP_MM + 1e-9, "{z}");
+            // under the bottom of the side of the gingiva only the side of the
+            // papilla, on to the plane of the contact
+            for p in v.iter().filter(|p| p.z < -1.5 - BELOW_MM - STEP_MM) {
+                assert!(p.y >= -1e-9, "{p}");
+            }
+            assert!(v.iter().any(|p| p.z < -5.0 && p.y > 1.0));
+        }
     }
 }
