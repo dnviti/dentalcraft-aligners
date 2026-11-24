@@ -299,7 +299,7 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
         &[1.0; 4],
         &[false, true, true, false],
         false,
-        false,
+        None,
     );
     assert_eq!(ch.deficit, 0.0);
     assert_eq!((ch.u[1], ch.u[2]), (2.0, 1.5));
@@ -308,25 +308,28 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
 #[test]
 fn stretches_between_fixed_teeth() {
     let fixed = [true, false, false, true];
-    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false, false);
+    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false, None);
     assert_eq!(ch.deficit, 0.0);
     assert_eq!(ch.u, vec![0.0, 0.75, 0.75, 2.0]);
-    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false, false);
+    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false, None);
     assert!((ch.deficit - 1.5).abs() < 1e-12);
 }
 
 #[test]
-fn the_last_tooth_of_a_side_never_goes_distally() {
+fn the_last_tooth_of_a_side_goes_distally_at_most_the_slack() {
     // the chain needs 1 mm more than the room between its last teeth: the plugin pushes the
     // last teeth distally, the port finds crowding (the space is made by the therapy)
     let u0 = [1.0, 1.0, 0.0, 0.0];
     let free = [false; 4];
-    let plugin = solve_chain(&u0, &[1.0; 4], &free, true, false);
+    let plugin = solve_chain(&u0, &[1.0; 4], &free, true, None);
     assert_eq!(plugin.deficit, 0.0);
     assert!(plugin.u[0] < u0[0] && plugin.u[3] > u0[3]);
-    let port = solve_chain(&u0, &[1.0; 4], &free, true, true);
+    let port = solve_chain(&u0, &[1.0; 4], &free, true, Some(0.0));
     assert!((port.deficit - 1.0).abs() < 1e-12);
     assert_eq!((port.segs[0].left, port.segs[0].right), (-1, 4));
+    // a slack of 0.3 mm at each end takes 0.6 mm of it, the rest is crowding
+    let port = solve_chain(&u0, &[1.0; 4], &free, true, Some(0.3));
+    assert!((port.deficit - 0.4).abs() < 1e-12);
 }
 
 #[test]
@@ -335,14 +338,20 @@ fn the_teeth_behind_a_space_close_it_against_a_fixed_tooth() {
     // free teeth mesially against the fixed tooth, none of them distally
     let u0 = [0.0, 0.5, 2.0];
     let fixed = [false, false, true];
-    let plugin = solve_chain(&u0, &[1.0; 3], &fixed, true, false);
+    let plugin = solve_chain(&u0, &[1.0; 3], &fixed, true, None);
     assert_eq!(plugin.u, vec![0.25, 0.25, 2.0]);
-    let port = solve_chain(&u0, &[1.0; 3], &fixed, true, true);
+    let port = solve_chain(&u0, &[1.0; 3], &fixed, true, Some(0.0));
     assert_eq!(port.u, vec![2.0, 2.0, 2.0]);
     assert_eq!((port.deficit, port.spacing), (0.0, 0.0));
     // without a fixed tooth the chain closes where its weights say, the last teeth no further
     // out than they were
-    let port = solve_chain(&[0.0, 0.0, 1.0, 1.0], &[1.0; 4], &[false; 4], true, true);
+    let port = solve_chain(
+        &[0.0, 0.0, 1.0, 1.0],
+        &[1.0; 4],
+        &[false; 4],
+        true,
+        Some(0.0),
+    );
     assert_eq!(port.u, vec![0.5; 4]);
 }
 

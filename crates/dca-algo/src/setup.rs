@@ -16,9 +16,10 @@
 //!    rotated or stepped beyond the tolerances of its zone;
 //! 3. the space along the line: every aligned tooth takes its full
 //!    mesio-distal width; the space missing between the fixed teeth (and,
-//!    by default, between the last tooth of each side, which never goes
-//!    distally) is made by the therapy in the order of `priority`, after
-//!    the spaces of the arch are used (no IPR on a contact open at rest);
+//!    by default, between the last tooth of each side, which goes distally
+//!    at most [`END_SLACK`]) is made by the therapy in the order of
+//!    `priority`, after the spaces of the arch are used (no IPR on a contact
+//!    open at rest);
 //!    what is left is spread over the contacts of the stretch; with
 //!    `close_spaces` the gaps close, the posterior teeth going mesially as
 //!    far as needed (between two fixed teeth retracting the incisors up to
@@ -29,8 +30,9 @@
 //! 5. each tooth: derotated about its own long axis by the part of its
 //!    rotation against the line beyond the tolerance of its zone (none when
 //!    that part is under [`MIN_DEROTATION_DEG`]), moved with the cusps onto
-//!    the line, and levelled (only the step beyond `level_tol`); tip and
-//!    torque unchanged;
+//!    the line, and levelled (only the step beyond `level_tol`; by default
+//!    the last tooth of each side keeps its height); tip and torque
+//!    unchanged;
 //! 6. with the crowns, the real 3D overlap between neighbours adds space
 //!    where needed and a contact still open takes space away (at most 4
 //!    rounds); when the space is not enough even with the therapy the teeth
@@ -40,8 +42,9 @@
 //! Departures from the plugin, each with a [`Config`] flag the parity tests
 //! turn on: the derotation of the excess only (`plugin_derotation`), the
 //! scale of the arch line (`plugin_line_scale`) and the spaces
-//! (`plugin_spaces`, 2026-11-24: the ends of the arch bounded, no IPR on an
-//! open contact, the open contacts closed on the crowns). The parameters
+//! (`plugin_spaces`, 2026-11-24: the ends of the arch bounded, the last
+//! tooth of each side at its height, no IPR on an open contact, the open
+//! contacts closed on the crowns). The parameters
 //! align every tooth and hold no molar by default ([`Params`]); the
 //! plugin's default aligns the incisors and canines with the molars held.
 //!
@@ -89,6 +92,12 @@ const REST_OVERLAP_MAX: f64 = 0.5;
 /// Beyond this (mm) the difference between the model and the crowns is not a
 /// calibration error: the contact of the model stays.
 const GAP_CAL_MAX: f64 = 2.0;
+/// How far (mm) the last tooth of each side may go distally (the ends of the
+/// arch are bounded, [`Config::plugin_spaces`] off): a crowding of the arch
+/// up to twice this is taken there instead of by the therapy, so the noise
+/// of the measured widths of the last molars (their derotation, a few
+/// vertices of a contact given to the neighbour) does not turn into IPR.
+pub const END_SLACK: f64 = 0.5;
 /// Smallest derotation the setup makes (degrees). A tooth rotated against
 /// the line beyond the tolerance of its zone (`rot_tol_deg`,
 /// `post_rot_tol_deg`) is turned back only by the excess, so the turn grows
@@ -269,14 +278,18 @@ pub struct Config {
     /// (2026-11-23): the scale is taken once, from the canines and premolars.
     /// The parity tests with the plugin turn it on.
     pub plugin_line_scale: bool,
-    /// The plugin's handling of the spaces: the last tooth of each side free
-    /// to go distally ([`solve_chain`] without bounded ends), IPR on any
-    /// contact of a crowded stretch, and the final contacts checked on the
-    /// crowns for overlaps only. Off by default (2026-11-24): the last tooth
-    /// of each side never goes distally but goes mesially as far as the
-    /// spaces need, no IPR on a contact open at rest (the space is used
-    /// first), and a contact the crowns find still open in the final
-    /// position is closed. The parity tests with the plugin turn it on.
+    /// The plugin's handling of the spaces and of the ends of the arch: the
+    /// last tooth of each side free to go distally ([`solve_chain`] without
+    /// bounded ends) and levelled like the others, IPR on any contact of a
+    /// crowded stretch, and the final contacts checked on the crowns for
+    /// overlaps only. Off by default (2026-11-24): the last tooth of each
+    /// side goes distally at most [`END_SLACK`] but mesially as far as the
+    /// spaces need, and keeps its height (the levelling extrapolates the
+    /// line of the cusps there: up to 1 mm on a real case, which pushed the
+    /// last molar into its neighbour); no IPR on a contact open at rest (the
+    /// space is used first), and a contact the crowns find still open in
+    /// the final position is closed. The parity tests with the plugin turn
+    /// it on.
     pub plugin_spaces: bool,
 }
 
@@ -1206,7 +1219,7 @@ impl Solver<'_> {
         let sub =
             |a: &[f64], b: &[f64]| -> Vec<f64> { a.iter().zip(b).map(|(x, y)| x - y).collect() };
         let mut off = cumsum(&req);
-        let ends = !cfg.plugin_spaces;
+        let ends = (!cfg.plugin_spaces).then_some(END_SLACK);
         let ch = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces, ends);
         let (deficit, segs) = (ch.deficit, ch.segs.clone());
         let (mut u, mut spacing) = (ch.u, ch.spacing);
@@ -1358,7 +1371,10 @@ impl Solver<'_> {
             };
             let z0 = self.pc[i].z;
             let mut z = z0;
-            if !self.fx[i] && !skip[i] {
+            // the last tooth of each side keeps its height: the line of the cusps of its
+            // neighbours is extrapolated there
+            let end = !cfg.plugin_spaces && (i == 0 || i + 1 == self.n);
+            if !self.fx[i] && !skip[i] && !end {
                 match cfg.leveling {
                     Leveling::Smooth => {
                         z = self.level_z(l, sl, i, s_t, &skip).unwrap_or(p.z);
