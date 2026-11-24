@@ -90,9 +90,13 @@ pub const PAPILLA_CONTACT_TOL_MM: f64 = 0.1;
 /// [`crate::shell::embrasure::TOUCH_MM`]) lies under the interproximal
 /// block-out of the shell when the shell has it ([`smooth_border`]
 /// `blocked_out`): the border is not raised round it within this distance
-/// (mm, along the arch) of the contact, and crosses it as straight as the
-/// scallops allow, the wall standing on the block-out over the papilla.
+/// (mm, along the arch) of the contact, and crosses it straight from the
+/// zenith of one tooth to the next ([`zenith_line`]), the wall standing on
+/// the block-out over the papilla.
 pub const PAPILLA_BLOCKED_MM: f64 = 2.5;
+/// The zenith of a tooth on a side is its lowest margin point within this
+/// (mm, along the arch) of the middle of its crown ([`zenith_line`]).
+pub const ZENITH_MM: f64 = 2.0;
 
 /// `y` smoothed by a gaussian of `sigma` samples, the weights renormalised
 /// at the ends (`_gauss_rows`).
@@ -250,6 +254,48 @@ fn papilla_tops(g: &[f64], touch: &[(f64, f64)], tip: &[f64]) -> Vec<f64> {
         for k in (0..n).filter(|&k| (g[k] - g[kt]).abs() <= PAPILLA_TOP_MM) {
             out[k] = out[k].max(tip[kt]);
         }
+    }
+    out
+}
+
+/// The SMOOTH border of one side under the block-out: `gap` over the zenith
+/// of every tooth (`zen`: arc length and height, arch order) and straight
+/// from one zenith to the next where a contact with the block-out under it
+/// (`blocked`, arc lengths) lies between them, smoothed as the scallops;
+/// `+∞` over the samples `g` (step `step`) of no such stretch (a space or a
+/// missing tooth keeps the border of the plugin).
+pub fn zenith_line(
+    zen: &[(f64, f64)],
+    g: &[f64],
+    blocked: &[f64],
+    gap: f64,
+    step: f64,
+) -> Vec<f64> {
+    let mut out = vec![f64::INFINITY; g.len()];
+    for w in zen.windows(2) {
+        let ((s0, z0), (s1, z1)) = (w[0], w[1]);
+        if s1 <= s0 || !blocked.iter().any(|&b| b > s0 && b < s1) {
+            continue;
+        }
+        for (k, &s) in g.iter().enumerate() {
+            if (s0..=s1).contains(&s) {
+                out[k] = gap + z0 + (s - s0) / (s1 - s0) * (z1 - z0);
+            }
+        }
+    }
+    // every stretch smoothed on its own
+    let mut k = 0;
+    while k < out.len() {
+        if !out[k].is_finite() {
+            k += 1;
+            continue;
+        }
+        let e = (k..out.len())
+            .find(|&j| !out[j].is_finite())
+            .unwrap_or(out.len());
+        let smooth = gauss_rows(&out[k..e], SMOOTH_WAVE_SIGMA_MM / step);
+        out[k..e].copy_from_slice(&smooth);
+        k = e;
     }
     out
 }
@@ -422,8 +468,9 @@ fn gum_ends(
 /// ([`papilla_lift`]; `0`: the plugin's border); `blocked_out`: the shell
 /// stands on the interproximal block-out under every contact whose crowns
 /// touch, so the border is not raised round the papillae under those
-/// contacts ([`PAPILLA_BLOCKED_MM`]) and runs across them as straight as the
-/// scallops allow. The distal half of the
+/// contacts ([`PAPILLA_BLOCKED_MM`]) and runs straight across them from
+/// the zenith of one tooth to the next, `gap` over them ([`zenith_line`],
+/// never above the border of the plugin). The distal half of the
 /// last tooth of each side counts only its margin at the gum
 /// ([`gum_ends`]). Returns the border points and the high points (nothing
 /// kept under them), or `None` with fewer than two teeth with a margin.
@@ -566,6 +613,29 @@ pub fn smooth_border(
             .collect();
         let wave = gauss_rows(&dev, SMOOTH_WAVE_SIGMA_MM / step);
         let zb: Vec<f64> = base.iter().zip(&wave).map(|(a, w)| a + w + gap).collect();
+        // under the block-out the border stands `gap` over the zenith of
+        // every tooth and runs straight from one zenith to the next across
+        // every blocked papilla ([`zenith_line`]), never above the line of
+        // the plugin: the smoothing of the margin left 0.1 to 1.2 mm more of
+        // the crown out, and its scallops dipped round every papilla
+        let zb: Vec<f64> = if blocked.is_empty() {
+            zb
+        } else {
+            let mut zen = Vec::new();
+            let mut at = 0;
+            for (i, (_, p)) in marg.iter().enumerate() {
+                let sc = u[nearest(&l, cen[i])];
+                let low = (at..at + p.len())
+                    .filter(|&k| dm[k] * sign > 0.0 && (sm[k] - sc).abs() <= ZENITH_MM)
+                    .min_by(|&a, &b| m[a].z.total_cmp(&m[b].z));
+                if let Some(k) = low {
+                    zen.push((sm[k], m[k].z));
+                }
+                at += p.len();
+            }
+            let zl = zenith_line(&zen, &g, &blocked, gap, step);
+            zb.iter().zip(&zl).map(|(a, b)| a.min(*b)).collect()
+        };
         // round every papilla: the border at least `relief` above the highest
         // margin point of every bin (the tip of a papilla, held round it),
         // under the contacts
@@ -733,7 +803,32 @@ mod tests {
     use dc_case::Fdi;
     use glam::DVec3;
 
-    use super::{PAPILLA_CONTACT_TOL_MM, contacts, papilla_tops};
+    use super::{PAPILLA_CONTACT_TOL_MM, contacts, papilla_tops, zenith_line};
+
+    /// Between two zeniths with a blocked contact between them the border
+    /// runs straight at the gap over them (smoothed); a stretch without one
+    /// (a space, a missing tooth) is left to the border of the plugin.
+    #[test]
+    fn the_zenith_line_is_straight_across_a_blocked_papilla() {
+        let g: Vec<f64> = (0..=60).map(|k| f64::from(k) * 0.5).collect();
+        let zen = [(2.0, -4.0), (10.0, -5.0), (20.0, -4.0)];
+        let line = zenith_line(&zen, &g, &[6.0], 1.5, 0.5);
+        for (s, z) in g.iter().zip(&line) {
+            if *s < 2.0 || *s > 10.0 {
+                assert!(z.is_infinite(), "{s}: {z}");
+            } else {
+                let straight = 1.5 - 4.0 - (s - 2.0) / 8.0;
+                // the smoothing renormalised at the ends of the stretch
+                assert!((z - straight).abs() < 0.15, "{s}: {z} {straight}");
+            }
+        }
+        // no blocked contact: nothing
+        assert!(
+            zenith_line(&zen, &g, &[], 1.5, 0.5)
+                .iter()
+                .all(|z| z.is_infinite())
+        );
+    }
 
     #[test]
     fn the_contact_is_the_top_of_the_zone_where_two_crowns_touch() {
