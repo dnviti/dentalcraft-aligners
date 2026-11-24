@@ -510,18 +510,26 @@ fn placed<'a>(
 /// The contact bridges of the teeth the aligner covers (`teeth`, as they
 /// are: `contact_bridges` works on the closed teeth) and the embrasure
 /// fills between them (`filled`: the teeth of the model, their stumps drawn
-/// in), arch coordinates (`stage_parts`), `vg` the gingiva there.
+/// in), arch coordinates (`stage_parts`), `vg` the gingiva there; their
+/// labial and lingual faces `inset` inside the tangents to the two crowns
+/// (`0` for the printed model; [`model_parts_inset`]).
 fn contact_solids(
     input: &Input<'_>,
     teeth: &[Vec<DVec3>],
     filled: &[Vec<DVec3>],
     vg: &[DVec3],
+    inset: f64,
 ) -> Vec<embrasure::Solid> {
-    let mut out = bridge::contact_bridges(
-        &placed(input, teeth, input.covered),
-        &bridge::BridgeParams::default(),
-    );
-    out.extend(embrasure::fills(&placed(input, filled, input.covered), vg));
+    let params = bridge::BridgeParams {
+        inset,
+        ..bridge::BridgeParams::default()
+    };
+    let mut out = bridge::contact_bridges(&placed(input, teeth, input.covered), &params);
+    out.extend(embrasure::fills(
+        &placed(input, filled, input.covered),
+        vg,
+        inset,
+    ));
     out
 }
 
@@ -655,7 +663,7 @@ pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
     for (k, (pts, mesh)) in teeth.iter().zip(input.teeth).enumerate() {
         append(pts, &mesh.tris, input.fdis.get(k).map_or(0, |f| f.get()));
     }
-    for (v, t) in contact_solids(input, &teeth, &teeth, &vg) {
+    for (v, t) in contact_solids(input, &teeth, &teeth, &vg, 0.0) {
         append(&v, &t, 0);
     }
     (TriMesh::new(positions, tris), fdi)
@@ -667,6 +675,21 @@ pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
 /// ([`Input::stumps`]), and the contact bridges and embrasure fills of the
 /// covered teeth. Their union is the model (overlapping closed parts).
 pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, ShellError> {
+    model_parts_inset(input, base_height, 0.0)
+}
+
+/// [`model_parts`] with the labial and lingual faces of the contact bridges
+/// and of the embrasure fills `inset` inside the tangents to the two crowns
+/// (`stage_parts(smooth=True, recess=inset)`): the model the shell of an
+/// aligner with the smooth border is the offset of. Over the embrasure under
+/// every contact its wall goes from one crown to the other at most about
+/// `inset` inside their tangents, never down into the embrasure onto the
+/// papilla.
+pub fn model_parts_inset(
+    input: &Input<'_>,
+    base_height: f64,
+    inset: f64,
+) -> Result<TriMesh, ShellError> {
     if input.gingiva.tris.is_empty() {
         return Err(ShellError::Invalid("the gingiva is empty".into()));
     }
@@ -722,7 +745,7 @@ pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, Shell
     for (pts, mesh) in tucked.iter().zip(input.teeth) {
         append(&mut pts.iter().map(|p| p.as_vec3()), &mesh.tris);
     }
-    for (v, t) in contact_solids(input, &teeth, &tucked, &vg) {
+    for (v, t) in contact_solids(input, &teeth, &tucked, &vg, inset) {
         append(&mut v.iter().map(|p| p.as_vec3()), &t);
     }
     Ok(TriMesh::new(positions, tris))

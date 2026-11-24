@@ -174,6 +174,7 @@ fn smooth_border_matches_the_plugin() {
             num(&case["scallop"]),
             // the plugin's border: no relief round the papillae
             0.0,
+            false,
         )
         .unwrap();
         let what = format!("smooth {covered:?}");
@@ -190,6 +191,65 @@ fn smooth_border_matches_the_plugin() {
         }
         assert_eq!(k, want.len(), "{what} high: the plugin's points in order");
         assert_eq!((high.len() - want.len()) % 25, 0, "{what} high: whole rows");
+    }
+}
+
+/// Over the interproximal block-out (`blocked_out`) the smooth border is not
+/// raised round the papillae under the touching contacts: it runs across
+/// them as the plugin's border does (no relief), and is raised only where no
+/// block-out holds the shell off the papilla. Without it the notches round
+/// the papillae lift it by up to the relief over the tip.
+#[test]
+fn over_the_block_out_the_smooth_border_runs_straight_across_the_papillae() {
+    let f = fixture();
+    let teeth: Vec<Tooth> = f["teeth"].as_array().unwrap().iter().map(tooth).collect();
+    let crowns: BTreeMap<Fdi, Vec<DVec3>> =
+        teeth.iter().map(|t| (t.fdi, t.crown.clone())).collect();
+    for case in f["smooth"].as_array().unwrap() {
+        let covered: BTreeSet<Fdi> = case["covered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| Fdi::new(num(v) as u8).unwrap())
+            .collect();
+        let marg: Vec<(Fdi, Vec<DVec3>)> = teeth
+            .iter()
+            .filter(|t| covered.contains(&t.fdi))
+            .map(|t| (t.fdi, t.margin.clone()))
+            .collect();
+        let border = |relief: f64, blocked: bool| {
+            smooth::smooth_border(
+                &marg,
+                &crowns,
+                &covered,
+                num(&case["outer"]),
+                num(&case["gap"]),
+                num(&case["scallop"]),
+                relief,
+                blocked,
+            )
+            .unwrap()
+            .0
+        };
+        let plain = border(0.0, false);
+        let lift = |b: &[DVec3]| -> (f64, f64) {
+            assert_eq!(b.len(), plain.len());
+            b.iter().zip(&plain).fold((0.0, 0.0), |(s, m), (p, q)| {
+                let l = (p.z - q.z).max(0.0);
+                (s + l, f64::max(m, l))
+            })
+        };
+        let (notched, notched_max) = lift(&border(1.0, false));
+        let (straight, straight_max) = lift(&border(1.0, true));
+        eprintln!(
+            "{covered:?}: lift over the plugin's border, notched {notched:.1} (max \
+             {notched_max:.2} mm), over the block-out {straight:.1} (max {straight_max:.2} mm)"
+        );
+        assert!(notched_max > 0.5, "{covered:?}: no notch to compare");
+        assert!(
+            straight < 0.5 * notched,
+            "{covered:?}: {straight} of {notched} lifted"
+        );
     }
 }
 

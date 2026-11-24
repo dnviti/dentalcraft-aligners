@@ -19,10 +19,11 @@ use std::time::Instant;
 
 use dc_case::Fdi;
 use dc_mesh::TriMesh;
+use dca_algo::anatomy::{Arch, arch_order};
 use dca_algo::frame::rigid_inverse;
 use dca_algo::rotation::rotvec_to_matrix;
 use dca_algo::shell::{self, Design, Input, Outputs, Params};
-use glam::{DMat4, DVec3};
+use glam::{DMat4, DVec2, DVec3};
 use serde_json::Value;
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../golden/fixtures");
@@ -364,6 +365,220 @@ fn coarse_stage_is_closed_and_has_its_thickness() {
         ..Params::default()
     };
     check("demo_lower_mild", None, &params, 0.15);
+}
+
+/// The recess of the interproximal block-out under the smooth-border shell
+/// (the default of `TrimParams::recess_mm`).
+const RECESS_MM: f64 = 0.6;
+
+/// Points where the edges of a mesh cross the height `z` (plan).
+fn section(p: &[DVec3], tris: &[[u32; 3]], z: f64) -> Vec<DVec2> {
+    let mut out = Vec::new();
+    for t in tris {
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            let (a, b) = (p[t[i] as usize], p[t[j] as usize]);
+            if (a.z < z) != (b.z < z) {
+                out.push((a + (b - a) * ((z - a.z) / (b.z - a.z))).truncate());
+            }
+        }
+    }
+    out
+}
+
+/// Convex hull of plan points (monotone chain).
+fn hull(pts: &[DVec2]) -> Vec<DVec2> {
+    let mut p = pts.to_vec();
+    p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    p.dedup();
+    let cross = |o: DVec2, a: DVec2, b: DVec2| (a - o).perp_dot(b - o);
+    let mut h: Vec<DVec2> = Vec::new();
+    for pass in [p.clone(), p.iter().rev().copied().collect()] {
+        let start = h.len();
+        for q in pass {
+            while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
+/// The stretch of the line `c + s w` inside the convex polygon `poly`.
+fn line_range(poly: &[DVec2], c: DVec2, w: DVec2) -> Option<(f64, f64)> {
+    let mut ss: Vec<f64> = Vec::new();
+    for i in 0..poly.len() {
+        let (a, e) = (poly[i], poly[(i + 1) % poly.len()] - poly[i]);
+        let den = w.perp_dot(e);
+        if den.abs() < 1e-12 {
+            continue;
+        }
+        let d = a - c;
+        let t = d.perp_dot(w) / den;
+        if (-1e-9..=1.0 + 1e-9).contains(&t) {
+            ss.push(d.perp_dot(e) / den);
+        }
+    }
+    let lo = ss.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = ss.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    (ss.len() >= 2).then_some((lo, hi))
+}
+
+/// The fitting surface of the smooth-border shell (the zero level of the
+/// closed field relieved over the gingiva) on the model with the
+/// interproximal block-out: under the contact of every two touching
+/// neighbours, at every height down to 3 mm under it, it stays within the
+/// recess (+ a voxel and a tenth) of the lines tangent to the two crowns: the
+/// wall bridges the embrasure and never goes down into it onto the papilla
+/// (without the block-out, the shell the export laid before, it did: the
+/// test checks that too). At the stage pose of the teeth, first and last
+/// stage. Away from the block-out the field, so the fit of the shell on the
+/// crowns, is the same to a tenth of a voxel (the closing resampled).
+#[test]
+fn the_smooth_shell_bridges_every_embrasure_and_keeps_the_crowns() {
+    let voxel = 0.25;
+    let tol = voxel + 0.1;
+    let design = Design {
+        thickness_mm: 1.0,
+        clearance_mm: 0.0,
+        gum_clearance_mm: 0.3,
+    };
+    for k in [Some(0), None] {
+        let st = stage("demo_lower_mild", k);
+        let input = Input {
+            to_arch: st.to_arch,
+            teeth: &st.teeth,
+            gingiva: &st.gingiva,
+            cover: &[],
+            fdis: &st.fdis,
+            covered: None,
+            stumps: &[],
+        };
+        let bare = Input { fdis: &[], ..input };
+        let fitting = |parts: &TriMesh| {
+            let closed =
+                shell::closed_grid_for(parts, voxel, shell::SMOOTH_BLOCKOUT_MM, 1.0).unwrap();
+            shell::relieved_shell(closed, &shell::gum_surface(&input), &design)
+                .unwrap()
+                .0
+        };
+        let old_parts = shell::model_parts(&bare, shell::BASE_HEIGHT_MM).unwrap();
+        let new_parts = shell::model_parts_inset(&input, shell::BASE_HEIGHT_MM, RECESS_MM).unwrap();
+        let (old, new) = (fitting(&old_parts), fitting(&new_parts));
+        // the block-out: what the soup with it adds
+        let n0 = old_parts.positions.len() as u32;
+        let solids = TriMesh::new(
+            new_parts.positions.clone(),
+            new_parts
+                .tris
+                .iter()
+                .filter(|t| t[0] >= n0)
+                .copied()
+                .collect(),
+        );
+        assert!(!solids.tris.is_empty(), "stage {k:?}: no block-out");
+        let teeth: BTreeMap<Fdi, (Vec<DVec3>, &TriMesh)> = st
+            .fdis
+            .iter()
+            .zip(&st.teeth)
+            .map(|(f, t)| {
+                let p = t
+                    .positions
+                    .iter()
+                    .map(|p| st.to_arch.transform_point3(p.as_dvec3()))
+                    .collect();
+                (*f, (p, t))
+            })
+            .collect();
+        let order: Vec<Fdi> = arch_order(Arch::of(st.fdis[0]))
+            .into_iter()
+            .filter(|f| teeth.contains_key(f))
+            .collect();
+        let cen = |p: &[DVec3]| p.iter().map(|v| v.truncate()).sum::<DVec2>() / p.len() as f64;
+        let (mut pairs, mut points, mut bad_new, mut bad_old) = (0, 0, 0, 0);
+        for w2 in order.windows(2) {
+            let ((pa, ma), (pb, mb)) = (&teeth[&w2[0]], &teeth[&w2[1]]);
+            let a32: Vec<glam::Vec3> = pa.iter().map(|p| p.as_vec3()).collect();
+            let knn = dc_geom::knn::KnnIndex::build(&a32).unwrap();
+            let close: Vec<(f64, DVec3)> = pb
+                .iter()
+                .filter_map(|p| {
+                    let q = pa[knn.nearest(p.as_vec3())?.index as usize];
+                    Some((q.distance(*p), (q + *p) * 0.5))
+                })
+                .collect();
+            let dmin = close.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+            if dmin > shell::embrasure::TOUCH_MM {
+                continue;
+            }
+            pairs += 1;
+            let c = close
+                .iter()
+                .filter(|x| x.0 <= dmin + 0.1)
+                .map(|x| x.1)
+                .max_by(|a, b| a.z.total_cmp(&b.z))
+                .unwrap();
+            let u = (cen(pb) - cen(pa)).normalize();
+            let w = DVec2::new(-u.y, u.x);
+            let mut z = c.z - 0.3;
+            while z > c.z - 3.0 {
+                let mut sec = section(pa, &ma.tris, z);
+                let sb = section(pb, &mb.tris, z);
+                if sec.len() >= 3 && sb.len() >= 3 {
+                    sec.extend(sb);
+                    if let Some((lo, hi)) = line_range(&hull(&sec), c.truncate(), w) {
+                        let mut s = lo + RECESS_MM + tol;
+                        while s <= hi - RECESS_MM - tol {
+                            let p = (c.truncate() + s * w).extend(z).as_vec3();
+                            points += 1;
+                            bad_new += usize::from(f64::from(new.sample(p)) > 0.5 * voxel);
+                            bad_old += usize::from(f64::from(old.sample(p)) > 0.5 * voxel);
+                            s += 0.1;
+                        }
+                    }
+                }
+                z -= 0.25;
+            }
+        }
+        assert!(
+            pairs >= 8 && points > 1000,
+            "stage {k:?}: {pairs} pairs, {points} points"
+        );
+        assert_eq!(
+            bad_new, 0,
+            "stage {k:?}: the shell enters {bad_new} of {points} points"
+        );
+        assert!(
+            bad_old > points / 20,
+            "stage {k:?}: without the block-out the shell entered {bad_old} of {points} points"
+        );
+        // the crowns away from the block-out: the same fit
+        let bvh = dc_geom::bvh::Bvh::build(&solids).unwrap();
+        let (mut kept, mut worst) = (0, 0.0f64);
+        for (p, _) in teeth.values() {
+            for v in p {
+                let q = v.as_vec3();
+                let o = f64::from(old.sample(q));
+                if o.abs() > 0.5 || bvh.closest_point(q, 2.0).is_some() {
+                    continue;
+                }
+                kept += 1;
+                worst = worst.max((f64::from(new.sample(q)) - o).abs());
+            }
+        }
+        eprintln!(
+            "stage {k:?}: {pairs} pairs, {points} embrasure points ({bad_old} entered \
+             without the block-out), {kept} crown points, crown fit moved at most {worst} mm"
+        );
+        assert!(kept > 5_000, "stage {k:?}: {kept} crown points");
+        // the closing of the model resampled on its 0.25 mm voxels: a
+        // tenth of the voxel at most
+        assert!(
+            worst < 0.1 * voxel,
+            "stage {k:?}: the crown fit moved by {worst} mm"
+        );
+    }
 }
 
 #[test]

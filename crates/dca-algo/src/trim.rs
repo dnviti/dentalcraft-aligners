@@ -312,6 +312,11 @@ pub struct Input<'a> {
     /// space between two caps, arch coordinates: [`bars`]). `None`: no bar can
     /// be added, and caps left in pieces apart are an error.
     pub rebuild: Option<Rebuild<'a>>,
+    /// The shell stands on the interproximal block-out under the contacts of
+    /// the crowns that touch ([`crate::shell::model_parts_inset`]): the SMOOTH
+    /// border is not raised round the papillae under them
+    /// ([`smooth::PAPILLA_BLOCKED_MM`]). `false`: a shell without it.
+    pub blocked_out: bool,
 }
 
 /// The builder of [`Input::rebuild`]: the shell field of the model with the
@@ -706,6 +711,7 @@ fn smooth_points(
         gap,
         params.scallop_mm,
         params.papilla_relief_mm,
+        input.blocked_out,
     )?;
     line::border_floor(&mut c, input.scan_border, (-gap).max(0.0) + 0.5);
     let mut ctrl = c.clone();

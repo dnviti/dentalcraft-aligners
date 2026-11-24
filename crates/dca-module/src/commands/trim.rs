@@ -332,6 +332,9 @@ fn trim_arch(
         thickness_mm: wall,
         cut: None,
         rebuild: Some(trim::Rebuild(&rebuild)),
+        // the shell of the trim line is laid on the scan, without the
+        // interproximal block-out of the print files
+        blocked_out: false,
     };
     let done = trim::run(&input, tp).map_err(|e| match e {
         trim::TrimError::Invalid(m) => CommandError::Invalid(format!("{name} arch: {m}")),

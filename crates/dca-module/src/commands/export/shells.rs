@@ -103,6 +103,11 @@ pub(crate) struct ShellProvider<'a> {
     design: Design,
     trim: trim::Params,
     shell_blockout: f64,
+    /// SMOOTH border: the labial and lingual faces of the interproximal
+    /// block-out under the shell (the contact bridges and embrasure fills)
+    /// this far inside the tangents to the crowns (`TrimParams::recess_mm`);
+    /// `None` (other borders): the shell is laid without them.
+    recess: Option<f64>,
     options: Options,
     bites: Vec<OnceLock<Option<Arc<occlusal::Bite>>>>,
     n_lower: u32,
@@ -199,10 +204,10 @@ impl<'a> ShellProvider<'a> {
         }
         let t = &data.trim;
         let trim = super::super::trim::case_trim_params(t);
-        let shell_blockout = if t.mode == TrimMode::Smooth {
-            shell::SMOOTH_BLOCKOUT_MM
+        let (shell_blockout, recess) = if t.mode == TrimMode::Smooth {
+            (shell::SMOOTH_BLOCKOUT_MM, Some(t.recess_mm))
         } else {
-            shell::BLOCKOUT_MM
+            (shell::BLOCKOUT_MM, None)
         };
         let params = shell::Params {
             model_voxel_mm: options.voxel_mm,
@@ -221,6 +226,7 @@ impl<'a> ShellProvider<'a> {
             design,
             trim,
             shell_blockout,
+            recess,
             options,
             bites: (0..=n_lower.max(n_upper))
                 .map(|_| OnceLock::new())
@@ -648,16 +654,30 @@ impl MeshProvider for ShellProvider<'_> {
         }
         // the closed field of the model with the solids `extra` added (the
         // boxes of the bars over a space) and the untrimmed shell field read
-        // from it by arithmetic, without the embrasure fills of the model (the
-        // trim of a shell over them left holes through its wall at the
-        // margin), the ramps united with it
+        // from it by arithmetic, the ramps united with it. Under the SMOOTH
+        // border the model has the interproximal block-out of the teeth at
+        // the stage, its faces `recess` inside the tangents to the crowns
+        // (the plugin's `stage_parts(smooth=True)`): the wall bridges the
+        // embrasure under every contact instead of following it down onto
+        // the papilla. Under another border it is laid without the fills of
+        // the printed model (their faces on the tangents: the trim over them
+        // left holes through the wall at the margin).
         let fields = |extra: &[TriMesh]| -> Result<(_, _), ExportError> {
+            let full = print.input(&g);
             let input = shell::Input {
-                fdis: &[],
-                ..print.input(&g)
+                fdis: if self.recess.is_some() {
+                    full.fdis
+                } else {
+                    &[]
+                },
+                ..full
             };
-            let mut parts = shell::model_parts(&input, self.params.base_height_mm)
-                .map_err(|e| err("model", &e))?;
+            let mut parts = shell::model_parts_inset(
+                &input,
+                self.params.base_height_mm,
+                self.recess.unwrap_or(0.0),
+            )
+            .map_err(|e| err("model", &e))?;
             for e in extra {
                 let off = parts.positions.len() as u32;
                 parts.positions.extend_from_slice(&e.positions);
@@ -733,6 +753,7 @@ impl MeshProvider for ShellProvider<'_> {
             thickness_mm: self.design.thickness_mm,
             cut: cut.as_ref(),
             rebuild: Some(trim::Rebuild(&rebuild)),
+            blocked_out: self.recess.is_some(),
         };
         let done = trim::run(&input, &self.trim).map_err(|e| {
             if self.options.cancel.is_cancelled() {

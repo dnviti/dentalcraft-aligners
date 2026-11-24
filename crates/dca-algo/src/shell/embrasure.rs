@@ -20,10 +20,17 @@
 //! than that under the gingiva under the contact (the plugin takes the
 //! lowest scanned point of the crowns; the closed teeth here may reach under
 //! the gingiva, and a fill held at the width of the crowns down there stood
-//! out of it); the
-//! draft and the recess of the smooth border and the contact bridges of
-//! `contact_bridges` (`pair_bridge`, the narrow slots between teeth that do
-//! not touch) are not ported.
+//! out of it).
+//!
+//! Under the shell of an aligner with the smooth border
+//! (`stage_parts(smooth=True)`) the labial and lingual faces of every slice
+//! stand `inset` inside the tangents ([`inset`], the plugin's `trim_recess`):
+//! the rounded closing of the shell draws a hollow from one crown to the
+//! other over it, as deep as the inset, and the wall bridges the embrasure
+//! instead of entering it down to the papilla. The plugin's draft of those
+//! slices (`EMBRASURE_FILL_DRAFT`) is not ported: every slice is the hull of
+//! the one above it with the two sections before it is drawn in, so the
+//! draft changes nothing.
 
 use dc_case::Fdi;
 use dc_geom::knn::KnnIndex;
@@ -128,6 +135,30 @@ fn clip(poly: &[DVec2], n: DVec2, c: f64) -> Vec<DVec2> {
     out
 }
 
+/// Convex counter-clockwise polygon with its sides moved `d` inwards, except
+/// the sides square to `u` (the ends of a fill along the arch; `_inset`).
+fn inset(poly: &[DVec2], u: DVec2, d: f64) -> Vec<DVec2> {
+    let mut out = poly.to_vec();
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let e = b - a;
+        let l = e.length();
+        if l < 1e-9 {
+            continue;
+        }
+        // outward for a counter-clockwise polygon
+        let n = DVec2::new(e.y, -e.x) / l;
+        if n.dot(u).abs() > 0.9 {
+            continue;
+        }
+        out = clip(&out, n, n.dot(a) - d);
+        if out.len() < 3 {
+            break;
+        }
+    }
+    out
+}
+
 /// Closed prism over a convex counter-clockwise plan polygon, outward faces.
 fn prism(poly: &[DVec2], z0: f64, z1: f64) -> Solid {
     let k = poly.len() as u32;
@@ -146,9 +177,10 @@ fn prism(poly: &[DVec2], z0: f64, z1: f64) -> Solid {
     (v, t)
 }
 
-/// The fill under the contact of two neighbouring teeth `a`, `b`; `None`
-/// when they do not touch.
-fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3]) -> Option<Solid> {
+/// The fill under the contact of two neighbouring teeth `a`, `b`, its
+/// labial and lingual faces `inset` inside the tangents; `None` when they
+/// do not touch.
+fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Option<Solid> {
     if a.points.is_empty() || b.points.is_empty() {
         return None;
     }
@@ -249,7 +281,14 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3]) -> Option<Solid> {
         };
         if let Some(poly) = poly.filter(|p| p.len() >= 3) {
             let z1 = (z + 1.05 * STEP_MM).min(z_top);
-            parts.push(prism(&poly, z, z1));
+            if inset_mm > 0.0 {
+                let faces = inset(&poly, u, inset_mm);
+                if faces.len() >= 3 {
+                    parts.push(prism(&faces, z, z1));
+                }
+            } else {
+                parts.push(prism(&poly, z, z1));
+            }
             above = Some(poly);
         }
         z -= STEP_MM;
@@ -268,10 +307,11 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3]) -> Option<Solid> {
 }
 
 /// The fills under the contacts of every two neighbouring teeth along the
-/// arch (`teeth` in any order; the arch is the one of the first tooth).
-/// `gum`: points of the gingiva (same coordinates; empty: the fills end
-/// under the closed teeth).
-pub fn fills(teeth: &[Tooth<'_>], gum: &[DVec3]) -> Vec<Solid> {
+/// arch (`teeth` in any order; the arch is the one of the first tooth), their
+/// labial and lingual faces `inset_mm` inside the tangents to the two crowns
+/// (`0`: on them, the printed model). `gum`: points of the gingiva (same
+/// coordinates; empty: the fills end under the closed teeth).
+pub fn fills(teeth: &[Tooth<'_>], gum: &[DVec3], inset_mm: f64) -> Vec<Solid> {
     let Some(first) = teeth.first() else {
         return Vec::new();
     };
@@ -281,7 +321,7 @@ pub fn fills(teeth: &[Tooth<'_>], gum: &[DVec3]) -> Vec<Solid> {
         .collect();
     order
         .windows(2)
-        .filter_map(|w| pair_fill(w[0], w[1], gum))
+        .filter_map(|w| pair_fill(w[0], w[1], gum, inset_mm))
         .collect()
 }
 
@@ -346,7 +386,7 @@ mod tests {
             points: &b_top.0,
             tris: &b_top.1,
         };
-        let out = fills(&[tb, ta], &[]);
+        let out = fills(&[tb, ta], &[], 0.0);
         assert_eq!(out.len(), 1);
         let (v, t) = &out[0];
         assert!(volume(v, t) > 0.0);
@@ -365,11 +405,46 @@ mod tests {
             points: &far.0,
             tris: &far.1,
         };
-        assert!(fills(&[ta, tf], &[]).is_empty());
+        assert!(fills(&[ta, tf], &[], 0.0).is_empty());
         // the gingiva under the contact limits the depth
         let gum = [DVec3::new(0.0, -3.0, -2.0)];
-        let out = fills(&[ta, tb], &gum);
+        let out = fills(&[ta, tb], &gum, 0.0);
         let lowest = out[0].0.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
         assert!(lowest >= -2.0 - BELOW_MM - STEP_MM - 1e-9, "{lowest}");
+    }
+
+    /// The fill under the shell of the smooth border stands `inset` inside
+    /// the labial and lingual tangents, its ends along the arch unchanged.
+    #[test]
+    fn an_inset_fill_stands_inside_the_tangents() {
+        let f = |n: u8| Fdi::new(n).unwrap();
+        let a = cuboid(DVec3::new(-4.0, -3.0, -5.0), DVec3::new(-0.3, 3.0, 0.0));
+        let b = cuboid(DVec3::new(0.2, -3.0, -1.0), DVec3::new(4.0, 3.0, 0.0));
+        let teeth = [
+            Tooth {
+                fdi: f(41),
+                points: &a.0,
+                tris: &a.1,
+            },
+            Tooth {
+                fdi: f(42),
+                points: &b.0,
+                tris: &b.1,
+            },
+        ];
+        let bounds = |v: &[DVec3]| {
+            v.iter().fold(
+                (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+                |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+            )
+        };
+        let (lo0, hi0) = bounds(&fills(&teeth, &[], 0.0)[0].0);
+        let out = fills(&teeth, &[], 0.5);
+        assert_eq!(out.len(), 1);
+        assert!(volume(&out[0].0, &out[0].1) > 0.0);
+        let (lo, hi) = bounds(&out[0].0);
+        assert!((lo.y - (lo0.y + 0.5)).abs() < 1e-9, "{lo} {lo0}");
+        assert!((hi.y - (hi0.y - 0.5)).abs() < 1e-9, "{hi} {hi0}");
+        assert!((lo.x - lo0.x).abs() < 1e-9 && (hi.x - hi0.x).abs() < 1e-9);
     }
 }

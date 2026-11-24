@@ -72,7 +72,10 @@ pub(crate) struct TrimPatch {
     mode: Option<TrimMode>,
     /// Edge above the gingival margin, positive on the tooth (-2 to 5 mm).
     margin_gap_mm: Option<f64>,
-    /// Recess between the teeth (0.6 to 2.5 mm).
+    /// Smooth edge: how far inside the tangents to the two crowns the
+    /// block-out of the embrasure under every contact stands, the depth of
+    /// the bridge of the shell from one crown to the other (0.6 to 2.5 mm;
+    /// smaller is straighter).
     recess_mm: Option<f64>,
     /// Height of the scallops (0 to 4 mm).
     scallop_mm: Option<f64>,
@@ -424,7 +427,7 @@ mod tests {
         assert_eq!(d.trim.mode, TrimMode::Equator);
         assert_eq!(d.trim.margin_gap_mm, -1.0);
         assert_eq!(d.trim.insertion_axis, InsertionAxis::Common);
-        assert_eq!(d.trim.recess_mm, 1.6);
+        assert_eq!(d.trim.recess_mm, dca_model::TrimParams::default().recess_mm);
         assert_eq!(d.settings.shell_thickness_mm, 0.8);
         assert_eq!(d.settings.clearance_mm, 0.0);
         assert_eq!(d.settings.stamp.tooth, StampTooth::SecondPremolarLeft);

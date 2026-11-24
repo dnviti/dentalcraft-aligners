@@ -194,6 +194,7 @@ impl DemoArch {
             thickness_mm: self.wall,
             cut: None,
             rebuild: None,
+            blocked_out: false,
         }
     }
 
@@ -1202,6 +1203,7 @@ fn the_border_rounds_the_last_tooth_at_the_gum_not_on_a_flange() {
         p.margin_gap_mm,
         p.scallop_mm,
         p.papilla_relief_mm,
+        false,
     )
     .unwrap();
     for (f, c, t) in &ends {

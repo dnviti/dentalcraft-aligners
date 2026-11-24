@@ -86,6 +86,13 @@ pub const PAPILLA_CONTACT_MM: f64 = 2.0;
 /// their labels runs from the contact down to each papilla, every point of
 /// it as close as the contact itself).
 pub const PAPILLA_CONTACT_TOL_MM: f64 = 0.1;
+/// A papilla under a contact whose crowns touch (within
+/// [`crate::shell::embrasure::TOUCH_MM`]) lies under the interproximal
+/// block-out of the shell when the shell has it ([`smooth_border`]
+/// `blocked_out`): the border is not raised round it within this distance
+/// (mm, along the arch) of the contact, and crosses it as straight as the
+/// scallops allow, the wall standing on the block-out over the papilla.
+pub const PAPILLA_BLOCKED_MM: f64 = 2.5;
 
 /// `y` smoothed by a gaussian of `sigma` samples, the weights renormalised
 /// at the ends (`_gauss_rows`).
@@ -197,7 +204,8 @@ pub fn papilla_lift(z: &[f64], need: &[f64], cap: &[f64], weights: &[f64]) -> Ve
 /// bridges the gap between them down to the papillae: the closest two alone
 /// may lie anywhere on that bridge, as low as a papilla (a real case: 3 mm
 /// under the contact, 2.4 mm under the tip of the papilla it held down).
-fn contacts(marg: &[(Fdi, Vec<DVec3>)], crowns: &BTreeMap<Fdi, Vec<DVec3>>) -> Vec<DVec3> {
+/// Each with the distance of the closest two.
+fn contacts(marg: &[(Fdi, Vec<DVec3>)], crowns: &BTreeMap<Fdi, Vec<DVec3>>) -> Vec<(f64, DVec3)> {
     marg.windows(2)
         .filter_map(|w| {
             let (a, b) = (crowns.get(&w[0].0)?, crowns.get(&w[1].0)?);
@@ -219,6 +227,7 @@ fn contacts(marg: &[(Fdi, Vec<DVec3>)], crowns: &BTreeMap<Fdi, Vec<DVec3>>) -> V
                 .filter(|(d, _)| *d <= closest + PAPILLA_CONTACT_TOL_MM)
                 .map(|(_, c)| c)
                 .max_by(|x, y| x.z.total_cmp(&y.z))
+                .map(|c| (closest, c))
         })
         .collect()
 }
@@ -410,7 +419,11 @@ fn gum_ends(
 /// `scallop`: the height of the scallops; `relief`: the border raised to at
 /// least this above the margin all along the arch, in a rounded notch round
 /// every papilla and never within [`PAPILLA_NECK_MM`] of a contact
-/// ([`papilla_lift`]; `0`: the plugin's border). The distal half of the
+/// ([`papilla_lift`]; `0`: the plugin's border); `blocked_out`: the shell
+/// stands on the interproximal block-out under every contact whose crowns
+/// touch, so the border is not raised round the papillae under those
+/// contacts ([`PAPILLA_BLOCKED_MM`]) and runs across them as straight as the
+/// scallops allow. The distal half of the
 /// last tooth of each side counts only its margin at the gum
 /// ([`gum_ends`]). Returns the border points and the high points (nothing
 /// kept under them), or `None` with fewer than two teeth with a margin.
@@ -423,6 +436,7 @@ pub fn smooth_border(
     gap: f64,
     scallop: f64,
     relief: f64,
+    blocked_out: bool,
 ) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
     if marg.len() < 2 {
         return None;
@@ -450,14 +464,22 @@ pub fn smooth_border(
     }
     // the contacts of the neighbours (arc length, height): the border raised
     // round a papilla stays under them
-    let touch: Vec<(f64, f64)> = if relief > 0.0 {
+    let found = if relief > 0.0 {
         contacts(marg, crowns)
-            .iter()
-            .map(|c| (u[nearest(&l, c.truncate())], c.z))
-            .collect()
     } else {
         Vec::new()
     };
+    let touch: Vec<(f64, f64)> = found
+        .iter()
+        .map(|(_, c)| (u[nearest(&l, c.truncate())], c.z))
+        .collect();
+    // the contacts with the block-out under them (arc length)
+    let blocked: Vec<f64> = found
+        .iter()
+        .zip(&touch)
+        .filter(|((d, _), _)| blocked_out && *d <= crate::shell::embrasure::TOUCH_MM)
+        .map(|(_, &(s, _))| s)
+        .collect();
     let weights = notch_weights(SMOOTH_STEP_MM);
     let marg = &gum_ends(marg, &l, &u, &cen);
     let m: Vec<DVec3> = marg.iter().flat_map(|(_, p)| p.iter().copied()).collect();
@@ -554,9 +576,18 @@ pub fn smooth_border(
                     *v = ix.iter().map(|&i| m[i].z).fold(f64::NEG_INFINITY, f64::max);
                 }
             }
+            // over a papilla under the block-out the wall stands on the
+            // block-out: nothing to clear there
             let need: Vec<f64> = papilla_tops(&g, &touch, &tip)
                 .into_iter()
-                .map(|t| t + relief)
+                .zip(&g)
+                .map(|(t, &s)| {
+                    if blocked.iter().any(|&b| (s - b).abs() <= PAPILLA_BLOCKED_MM) {
+                        f64::NEG_INFINITY
+                    } else {
+                        t + relief
+                    }
+                })
                 .collect();
             let cap: Vec<f64> = g
                 .iter()
@@ -724,7 +755,7 @@ mod tests {
         let marg = vec![(a, vec![DVec3::ZERO]), (b, vec![DVec3::ZERO])];
         let c = contacts(&marg, &crowns);
         assert_eq!(c.len(), 1);
-        assert!(c[0].z.abs() < 1e-9, "the contact at {}", c[0]);
+        assert!(c[0].1.z.abs() < 1e-9, "the contact at {}", c[0].1);
         // apart by more than the tolerance than the closest two, the bridge
         // is no contact
         let mut far = crowns.clone();
@@ -732,7 +763,7 @@ mod tests {
             p.x = 0.05 + PAPILLA_CONTACT_TOL_MM;
         }
         let c = contacts(&marg, &far);
-        assert!(c[0].z < -2.9, "the contact at {}", c[0]);
+        assert!(c[0].1.z < -2.9, "the contact at {}", c[0].1);
     }
 
     #[test]
