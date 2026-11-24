@@ -59,5 +59,6 @@ pub const MODULE_ID: &str = "aligners";
 
 /// Newest schema version of [`AlignersState`] (written on save). Version 2
 /// added the print tracking ([`AlignersState::prints`]) and the last export
-/// folder ([`AlignersState::export_dir`]).
-pub const SCHEMA_VERSION: u32 = 2;
+/// folder ([`AlignersState::export_dir`]); version 3 gave effect to the
+/// recess between the teeth ([`TrimParams::recess_mm`], [`migrate`]).
+pub const SCHEMA_VERSION: u32 = 3;

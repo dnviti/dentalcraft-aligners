@@ -211,7 +211,11 @@ pub struct TrimParams {
     /// Distance of the edge from the gingival margin, positive on the
     /// crown (mm).
     pub margin_gap_mm: f64,
-    /// Recess between adjacent teeth (mm).
+    /// Smooth edge: the labial and lingual faces of the block-out filling
+    /// the embrasure under every contact stand this far inside the lines
+    /// tangent to the two crowns (mm): the shell bridges from one crown to
+    /// the other at most about this far inside them, never down onto the
+    /// papilla (the smaller, the straighter the bridge).
     pub recess_mm: f64,
     /// Height of the scallops (mm).
     pub scallop_mm: f64,
@@ -231,7 +235,7 @@ impl Default for TrimParams {
         Self {
             mode: TrimMode::Smooth,
             margin_gap_mm: 1.5,
-            recess_mm: 1.6,
+            recess_mm: 0.6,
             scallop_mm: 1.5,
             papilla_relief_mm: 1.0,
             equator_offset_mm: 0.0,
