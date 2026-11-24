@@ -325,18 +325,23 @@ fn pair_fill(
     }
     let mut parts: Vec<Solid> = Vec::new();
     let mut above: Option<Vec<DVec2>> = None;
-    // the whole embrasure: from the top of the lower crown beside the contact
-    let ridge = |p: &[DVec3]| {
-        p.iter()
-            .filter(|q| {
-                let d = DVec2::new(q.x, q.y) - c;
-                d.dot(u).abs() <= RIDGE_MM && d.length() < NEAR_MM
-            })
-            .map(|q| q.z)
+    // the whole embrasure: from the top of the lower crown beside the contact,
+    // each crown within RIDGE_MM of its own face towards the other (`s`: +1 for
+    // `a`, which faces along `u`, -1 for `b`), so two teeth apart count too
+    let ridge = |p: &[DVec3], s: f64| {
+        let near: Vec<(f64, f64)> = p
+            .iter()
+            .filter(|q| DVec2::new(q.x, q.y).distance(c) < NEAR_MM)
+            .map(|q| (s * DVec2::new(q.x, q.y).dot(u), q.z))
+            .collect();
+        let face = near.iter().map(|n| n.0).fold(f64::NEG_INFINITY, f64::max);
+        near.iter()
+            .filter(|n| face - n.0 <= RIDGE_MM)
+            .map(|n| n.1)
             .fold(f64::NEG_INFINITY, f64::max)
     };
     let z_start = if whole {
-        (ridge(a.points).min(ridge(b.points)) - RIDGE_TOP_MM).max(z_top)
+        (ridge(a.points, 1.0).min(ridge(b.points, -1.0)) - RIDGE_TOP_MM).max(z_top)
     } else {
         z_top
     };
@@ -521,6 +526,77 @@ mod tests {
         let out = fills(&[ta, tb], &gum, 0.0);
         let lowest = out[0].0.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
         assert!(lowest >= -2.0 - BELOW_MM - STEP_MM - 1e-9, "{lowest}");
+    }
+
+    /// Under the shell of an aligner the whole embrasure is filled: from the
+    /// top of the lower crown, not from the contact, and between two teeth a
+    /// little apart too (the user's rule, 2026-11-24: the aligner goes
+    /// straight from one crown to the next, never between the teeth).
+    #[test]
+    fn the_whole_embrasure_is_filled_under_an_aligner() {
+        let f = |n: u8| Fdi::new(n).unwrap();
+        // each crown is a step: they touch 2 mm under their tops, over the contact
+        // the embrasure is open (2 mm wide)
+        let step = |x0: f64, x1: f64, x2: f64| {
+            let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
+            let mut m = cuboid(DVec3::new(lo_x, -3.0, -5.0), DVec3::new(hi_x, 3.0, -2.0));
+            let (lo_x, hi_x) = (x0.min(x2), x0.max(x2));
+            let high = cuboid(DVec3::new(lo_x, -3.0, -5.0), DVec3::new(hi_x, 3.0, 0.0));
+            let off = m.0.len() as u32;
+            m.0.extend(high.0.iter().copied());
+            m.1.extend(high.1.iter().map(|t| t.map(|i| i + off)));
+            m
+        };
+        let a = step(-4.0, -0.3, -1.0);
+        let b = step(4.0, 0.2, 1.0);
+        let ta = Tooth {
+            fdi: f(41),
+            points: &a.0,
+            tris: &a.1,
+        };
+        let tb = Tooth {
+            fdi: f(42),
+            points: &b.0,
+            tris: &b.1,
+        };
+        let top = |s: &[Solid]| s[0].0.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+        // under the contact only: the fill ends at the contact, 2 mm under the crowns
+        let under = fills(&[ta, tb], &[], 0.0);
+        assert_eq!(under.len(), 1);
+        assert!(top(&under) <= -2.0 + 1e-9, "{}", top(&under));
+        // the whole embrasure: up to RIDGE_TOP_MM under the top of the crowns
+        let whole = fills_whole(&[ta, tb], &[], 0.0);
+        assert_eq!(whole.len(), 1);
+        assert!(
+            top(&whole) >= -RIDGE_TOP_MM - STEP_MM - 1e-9,
+            "{}",
+            top(&whole)
+        );
+        // never wider than the two crowns (the faces on their tangents)
+        assert!(whole[0].0.iter().all(|p| p.y.abs() <= 3.0 + 1e-9));
+        // two teeth 2.3 mm apart: bridged under an aligner, not on the printed model
+        let far = cuboid(DVec3::new(2.0, -3.0, -5.0), DVec3::new(6.0, 3.0, 0.0));
+        let tf = Tooth {
+            fdi: f(42),
+            points: &far.0,
+            tris: &far.1,
+        };
+        assert!(fills(&[ta, tf], &[], 0.0).is_empty());
+        let bridged = fills_whole(&[ta, tf], &[], 0.0);
+        assert_eq!(bridged.len(), 1);
+        let (lo, hi) = bridged[0].0.iter().fold(
+            (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
+        assert!(lo.x < -0.3 && hi.x > 2.0, "{lo} {hi}");
+        // a missing tooth is not a space to bridge
+        let gone = cuboid(DVec3::new(4.0, -3.0, -5.0), DVec3::new(8.0, 3.0, 0.0));
+        let tg = Tooth {
+            fdi: f(42),
+            points: &gone.0,
+            tris: &gone.1,
+        };
+        assert!(fills_whole(&[ta, tg], &[], 0.0).is_empty());
     }
 
     /// The fill under the shell of the smooth border stands `inset` inside
