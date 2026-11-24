@@ -497,6 +497,7 @@ fn the_smooth_shell_bridges_every_embrasure_and_keeps_the_crowns() {
             .collect();
         let cen = |p: &[DVec3]| p.iter().map(|v| v.truncate()).sum::<DVec2>() / p.len() as f64;
         let (mut pairs, mut points, mut bad_new, mut bad_old) = (0, 0, 0, 0);
+        let mut contacts: Vec<DVec3> = Vec::new();
         for w2 in order.windows(2) {
             let ((pa, ma), (pb, mb)) = (&teeth[&w2[0]], &teeth[&w2[1]]);
             let a32: Vec<glam::Vec3> = pa.iter().map(|p| p.as_vec3()).collect();
@@ -519,6 +520,7 @@ fn the_smooth_shell_bridges_every_embrasure_and_keeps_the_crowns() {
                 .map(|x| x.1)
                 .max_by(|a, b| a.z.total_cmp(&b.z))
                 .unwrap();
+            contacts.push(c);
             let u = (cen(pb) - cen(pa)).normalize();
             let w = DVec2::new(-u.y, u.x);
             let mut z = c.z - 0.3;
@@ -577,6 +579,31 @@ fn the_smooth_shell_bridges_every_embrasure_and_keeps_the_crowns() {
         assert!(
             worst < 0.1 * voxel,
             "stage {k:?}: the crown fit moved by {worst} mm"
+        );
+        // the papillae under the contacts: the fitting surface stays the gum
+        // relief off them with the block-out under the shell (the field at a
+        // gingiva point is minus its distance to that surface; half a voxel
+        // of sampling)
+        let (mut gum_points, mut worst_gum) = (0, f64::INFINITY);
+        for g in &st.gingiva.positions {
+            let q = st.to_arch.transform_point3(g.as_dvec3());
+            if !contacts
+                .iter()
+                .any(|c| c.truncate().distance(q.truncate()) < 2.0 && q.z > c.z - 8.0)
+            {
+                continue;
+            }
+            gum_points += 1;
+            worst_gum = worst_gum.min(-f64::from(new.sample(q.as_vec3())));
+        }
+        eprintln!(
+            "stage {k:?}: {gum_points} papilla points, the shell at least {worst_gum} mm off"
+        );
+        assert!(gum_points > 100, "stage {k:?}: {gum_points} papilla points");
+        assert!(
+            worst_gum >= design.gum_clearance_mm - 0.5 * voxel,
+            "stage {k:?}: the shell {worst_gum} mm off a papilla, the relief is {} mm",
+            design.gum_clearance_mm
         );
     }
 }
