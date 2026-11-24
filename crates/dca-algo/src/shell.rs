@@ -519,17 +519,19 @@ fn contact_solids(
     filled: &[Vec<DVec3>],
     vg: &[DVec3],
     inset: f64,
+    whole: bool,
 ) -> Vec<embrasure::Solid> {
     let params = bridge::BridgeParams {
         inset,
         ..bridge::BridgeParams::default()
     };
     let mut out = bridge::contact_bridges(&placed(input, teeth, input.covered), &params);
-    out.extend(embrasure::fills(
-        &placed(input, filled, input.covered),
-        vg,
-        inset,
-    ));
+    let filled = placed(input, filled, input.covered);
+    out.extend(if whole {
+        embrasure::fills_whole(&filled, vg, inset)
+    } else {
+        embrasure::fills(&filled, vg, inset)
+    });
     out
 }
 
@@ -663,7 +665,7 @@ pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
     for (k, (pts, mesh)) in teeth.iter().zip(input.teeth).enumerate() {
         append(pts, &mesh.tris, input.fdis.get(k).map_or(0, |f| f.get()));
     }
-    for (v, t) in contact_solids(input, &teeth, &teeth, &vg, 0.0) {
+    for (v, t) in contact_solids(input, &teeth, &teeth, &vg, 0.0, false) {
         append(&v, &t, 0);
     }
     (TriMesh::new(positions, tris), fdi)
@@ -675,7 +677,7 @@ pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
 /// ([`Input::stumps`]), and the contact bridges and embrasure fills of the
 /// covered teeth. Their union is the model (overlapping closed parts).
 pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, ShellError> {
-    model_parts_inset(input, base_height, 0.0)
+    model_parts_at(input, base_height, 0.0, false)
 }
 
 /// [`model_parts`] with the labial and lingual faces of the contact bridges
@@ -689,6 +691,19 @@ pub fn model_parts_inset(
     input: &Input<'_>,
     base_height: f64,
     inset: f64,
+) -> Result<TriMesh, ShellError> {
+    model_parts_at(input, base_height, inset, true)
+}
+
+/// [`model_parts`] and [`model_parts_inset`]: `whole`, the whole embrasure of
+/// every two neighbouring teeth is filled, those a little apart too
+/// ([`embrasure::fills_whole`]): the shell of an aligner goes straight from
+/// one crown to the next and never into the space between them.
+fn model_parts_at(
+    input: &Input<'_>,
+    base_height: f64,
+    inset: f64,
+    whole: bool,
 ) -> Result<TriMesh, ShellError> {
     if input.gingiva.tris.is_empty() {
         return Err(ShellError::Invalid("the gingiva is empty".into()));
@@ -745,7 +760,7 @@ pub fn model_parts_inset(
     for (pts, mesh) in tucked.iter().zip(input.teeth) {
         append(&mut pts.iter().map(|p| p.as_vec3()), &mesh.tris);
     }
-    for (v, t) in contact_solids(input, &teeth, &tucked, &vg, inset) {
+    for (v, t) in contact_solids(input, &teeth, &tucked, &vg, inset, whole) {
         append(&mut v.iter().map(|p| p.as_vec3()), &t);
     }
     Ok(TriMesh::new(positions, tris))

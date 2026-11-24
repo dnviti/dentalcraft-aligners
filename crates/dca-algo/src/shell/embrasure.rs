@@ -60,6 +60,16 @@ pub const NEAR_MM: f64 = 4.0;
 /// ... and at most that far under the highest point of the gingiva within
 /// this of the contact in plan (mm; the col under it).
 pub const COL_MM: f64 = 1.0;
+/// The whole embrasure ([`fills_whole`], under the shell of an aligner): two
+/// neighbouring teeth apart by at most this (mm) are bridged as if they
+/// touched (a space the plan closes, a diastema; a missing tooth is wider).
+pub const SPACE_MM: f64 = 3.0;
+/// ... the fill starts at the top of the embrasure, the lower of the two
+/// crowns within this (mm) of the plane of the contact (the marginal ridges,
+/// the incisal corners), ...
+pub const RIDGE_MM: f64 = 1.5;
+/// ... this far (mm) under it.
+pub const RIDGE_TOP_MM: f64 = 0.3;
 
 /// A closed tooth at the stage (arch coordinates, `+Z` occlusal).
 #[derive(Debug, Clone, Copy)]
@@ -198,8 +208,18 @@ fn side_top(gum: &[DVec3], c: DVec2, u: DVec2, n: DVec2, z_top: f64) -> f64 {
 
 /// The fill under the contact of two neighbouring teeth `a`, `b`, its
 /// labial and lingual faces `inset` inside the tangents; `None` when they
-/// do not touch.
-fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Option<Solid> {
+/// do not touch. `whole`: the whole embrasure, from the top of the lower
+/// crown beside the contact ([`RIDGE_MM`]) down, and between two teeth up
+/// to [`SPACE_MM`] apart: the shell of an aligner formed on it goes straight
+/// from one crown to the other and never into the space between them (the
+/// user's rule, 2026-11-24: in there it is in the way, crooked and fragile).
+fn pair_fill(
+    a: &Tooth<'_>,
+    b: &Tooth<'_>,
+    gum: &[DVec3],
+    inset_mm: f64,
+    whole: bool,
+) -> Option<Solid> {
     if a.points.is_empty() || b.points.is_empty() {
         return None;
     }
@@ -210,7 +230,8 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
         )
     };
     let (lo, hi) = bounds(a.points);
-    let (lo, hi) = (lo - DVec3::splat(TOUCH_MM), hi + DVec3::splat(TOUCH_MM));
+    let reach = if whole { SPACE_MM } else { TOUCH_MM };
+    let (lo, hi) = (lo - DVec3::splat(reach), hi + DVec3::splat(reach));
     let cand: Vec<usize> = (0..b.points.len())
         .filter(|&i| b.points[i].cmpgt(lo).all() && b.points[i].cmplt(hi).all())
         .collect();
@@ -219,13 +240,32 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
     }
     let pa: Vec<Vec3> = a.points.iter().map(|p| p.as_vec3()).collect();
     let index = KnnIndex::build(&pa).ok()?;
+    let near: Vec<(f64, DVec3, DVec3)> = cand
+        .iter()
+        .filter_map(|&i| {
+            let n = index.nearest(b.points[i].as_vec3())?;
+            Some((
+                f64::from(n.distance),
+                b.points[i],
+                a.points[n.index as usize],
+            ))
+        })
+        .collect();
+    let closest = near.iter().map(|n| n.0).fold(f64::INFINITY, f64::min);
+    // the teeth touch within TOUCH_MM; apart (whole only, up to SPACE_MM),
+    // the zone is where they are closest
+    let within = if closest <= TOUCH_MM {
+        TOUCH_MM
+    } else if whole && closest <= SPACE_MM {
+        closest + 0.3
+    } else {
+        return None;
+    };
     let mut zone = Vec::new();
-    for &i in &cand {
-        if let Some(n) = index.nearest(b.points[i].as_vec3())
-            && f64::from(n.distance) <= TOUCH_MM
-        {
-            zone.push(b.points[i]);
-            zone.push(a.points[n.index as usize]);
+    for &(d, pb, pa) in &near {
+        if d <= within {
+            zone.push(pb);
+            zone.push(pa);
         }
     }
     let top = zone
@@ -285,7 +325,22 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
     }
     let mut parts: Vec<Solid> = Vec::new();
     let mut above: Option<Vec<DVec2>> = None;
-    let mut z = z_top - STEP_MM;
+    // the whole embrasure: from the top of the lower crown beside the contact
+    let ridge = |p: &[DVec3]| {
+        p.iter()
+            .filter(|q| {
+                let d = DVec2::new(q.x, q.y) - c;
+                d.dot(u).abs() <= RIDGE_MM && d.length() < NEAR_MM
+            })
+            .map(|q| q.z)
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let z_start = if whole {
+        (ridge(a.points).min(ridge(b.points)) - RIDGE_TOP_MM).max(z_top)
+    } else {
+        z_top
+    };
+    let mut z = z_start - STEP_MM;
     while z > z_bot - STEP_MM {
         let (sa, sb) = (section(a.points, a.tris, z), section(b.points, b.tris, z));
         let poly = if sa.len() < 3 || sb.len() < 3 {
@@ -318,7 +373,7 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
             }
         };
         if let Some(poly) = poly.filter(|p| p.len() >= 3) {
-            let z1 = (z + 1.05 * STEP_MM).min(z_top);
+            let z1 = (z + 1.05 * STEP_MM).min(z_start);
             let mut faces = if inset_mm > 0.0 {
                 inset(&poly, u, inset_mm)
             } else {
@@ -356,6 +411,17 @@ fn pair_fill(a: &Tooth<'_>, b: &Tooth<'_>, gum: &[DVec3], inset_mm: f64) -> Opti
 /// (`0`: on them, the printed model). `gum`: points of the gingiva (same
 /// coordinates; empty: the fills end under the closed teeth).
 pub fn fills(teeth: &[Tooth<'_>], gum: &[DVec3], inset_mm: f64) -> Vec<Solid> {
+    fills_of(teeth, gum, inset_mm, false)
+}
+
+/// [`fills`] of the whole embrasure of every two neighbouring teeth, those
+/// up to [`SPACE_MM`] apart too ([`pair_fill`] `whole`): the model the shell
+/// of an aligner is formed on.
+pub fn fills_whole(teeth: &[Tooth<'_>], gum: &[DVec3], inset_mm: f64) -> Vec<Solid> {
+    fills_of(teeth, gum, inset_mm, true)
+}
+
+fn fills_of(teeth: &[Tooth<'_>], gum: &[DVec3], inset_mm: f64, whole: bool) -> Vec<Solid> {
     let Some(first) = teeth.first() else {
         return Vec::new();
     };
@@ -365,7 +431,7 @@ pub fn fills(teeth: &[Tooth<'_>], gum: &[DVec3], inset_mm: f64) -> Vec<Solid> {
         .collect();
     order
         .windows(2)
-        .filter_map(|w| pair_fill(w[0], w[1], gum, inset_mm))
+        .filter_map(|w| pair_fill(w[0], w[1], gum, inset_mm, whole))
         .collect()
 }
 
