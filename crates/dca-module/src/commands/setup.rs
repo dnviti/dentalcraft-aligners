@@ -137,6 +137,8 @@ pub(crate) struct SettingsPatch {
     ipr_surface_cap_mm: Option<f64>,
     /// Largest fraction of the enamel removed (0.1-0.5).
     enamel_fraction: Option<f64>,
+    /// Largest distal movement of the last tooth of each side (0-0.5 mm).
+    distal_max_mm: Option<f64>,
     /// Vertical levelling (`smooth`, `flat`, `none`).
     leveling: Option<SetupLeveling>,
     /// Largest vertical correction (0-3 mm).
@@ -195,6 +197,7 @@ fn check(params: &setup::Params) -> Result<Vec<Fdi>, CommandError> {
         params.retract_max_mm,
         params.ipr_surface_cap_mm,
         params.enamel_fraction,
+        params.distal_max_mm,
     ];
     if numbers.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return Err(invalid(
@@ -203,6 +206,9 @@ fn check(params: &setup::Params) -> Result<Vec<Fdi>, CommandError> {
     }
     if params.line_sigma_mm <= 0.0 || params.incisor_weight <= 0.0 {
         return Err(invalid("line_sigma_mm and incisor_weight must be positive"));
+    }
+    if params.distal_max_mm > 0.5 {
+        return Err(invalid("distal_max_mm goes from 0 to 0.5 mm"));
     }
     if !params.line.is_empty() {
         if params.arch == Which::All {
@@ -553,6 +559,7 @@ fn run_settings(
         ipr_zone,
         ipr_surface_cap_mm,
         enamel_fraction,
+        distal_max_mm,
         leveling,
         vertical_max_mm,
         level_tol_mm,
@@ -1028,6 +1035,7 @@ mod tests {
         for bad in [
             json!({ "advance_max_mm": 4.5 }),
             json!({ "enamel_fraction": 0.05 }),
+            json!({ "distal_max_mm": 0.6 }),
             json!({ "line_sigma_mm": 0.5 }),
             json!({ "adjust_step_deg": 0.0 }),
             json!({ "ipr_zone": "everywhere" }),
@@ -1084,6 +1092,33 @@ mod tests {
         // not an object: refused
         assert!(matches!(
             run(&state, json!([1])),
+            Err(CommandError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn the_last_teeth_go_distally_only_as_far_as_the_setting_allows() {
+        let state = demo(&CaseState::default(), "lower", "moderate");
+        let total = |s: &CaseState| data(s).setup.ipr.iter().map(|x| x.amount_mm).sum::<f64>();
+        // by default no tooth goes distally to make room: the crowding takes IPR
+        let (none, _) = run(&state, Value::Null).unwrap();
+        assert!(total(&none) > 0.0, "the demo needs IPR");
+        // up to 0.5 mm at the last tooth of each side: less IPR
+        let (some, _) = run(&state, json!({ "distal_max_mm": 0.5 })).unwrap();
+        assert!(
+            total(&some) < total(&none),
+            "{} {}",
+            total(&some),
+            total(&none)
+        );
+        // stored, the same
+        let (set, _) = exec(SETUP_SETTINGS, &state, json!({ "distal_max_mm": 0.5 })).unwrap();
+        assert_eq!(data(&set).settings.setup.distal_max_mm, 0.5);
+        let (stored, _) = run(&set, Value::Null).unwrap();
+        assert_eq!(data(&stored).setup.ipr, data(&some).setup.ipr);
+        // beyond 0.5 mm: refused
+        assert!(matches!(
+            run(&state, json!({ "distal_max_mm": 0.6 })),
             Err(CommandError::Invalid(_))
         ));
     }

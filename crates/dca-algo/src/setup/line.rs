@@ -472,15 +472,15 @@ pub struct Chain {
 /// the spaces close).
 ///
 /// The two open ends of the chain (before the first fixed tooth, after the
-/// last one) are free with `bounded_ends` off, as in the plugin: there the
-/// last tooth of each side can go distally as far as the chain needs. With
-/// `bounded_ends` on, the last tooth of each side never goes distally (its
-/// `u` stays on the mesial side of its `u0`) but goes mesially as far as
-/// needed: a chain longer than the room between the last teeth is crowding
-/// (a [`Crowded`] stretch with `left` `-1` or `right` `n`), and with `pack`
-/// a stretch between an open end and a fixed tooth closes against the fixed
-/// tooth, so no space is left at the end of the arch.
-pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool, bounded_ends: bool) -> Chain {
+/// last one) are free with `ends` `None`, as in the plugin: there the last
+/// tooth of each side can go distally as far as the chain needs. With
+/// `Some(slack)` the last tooth of each side goes distally at most `slack`
+/// (its `u` stays on the mesial side of its `u0 - slack`; none with 0) but
+/// goes mesially as far as needed: a chain longer than that room is
+/// crowding (a [`Crowded`] stretch with `left` `-1` or `right` `n`), and
+/// with `pack` a stretch between an open end and a fixed tooth closes
+/// against the fixed tooth, so no space is left at the end of the arch.
+pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool, ends: Option<f64>) -> Chain {
     let n = u0.len();
     let mut u = u0.to_vec();
     let mut bounds: Vec<i64> = vec![-1];
@@ -490,22 +490,24 @@ pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool, bounded_en
     for ab in bounds.windows(2) {
         let (a, b) = (ab[0], ab[1]);
         let idx: Vec<usize> = ((a + 1)..b).map(|i| i as usize).collect();
-        // an open end bounded by the last tooth of its side, which does not go distally
+        // an open end bounded by the last tooth of its side, which goes distally at most by the
+        // slack
         let (lo_end, hi_end) = (
-            a < 0 && bounded_ends && !idx.is_empty(),
-            b >= n as i64 && bounded_ends && !idx.is_empty(),
+            a < 0 && ends.is_some() && !idx.is_empty(),
+            b >= n as i64 && ends.is_some() && !idx.is_empty(),
         );
+        let slack = ends.unwrap_or(0.0);
         let lo = if a >= 0 {
             u0[a as usize]
         } else if lo_end {
-            u0[idx[0]]
+            u0[idx[0]] - slack
         } else {
             f64::NEG_INFINITY
         };
         let hi = if b < n as i64 {
             u0[b as usize]
         } else if hi_end {
-            u0[idx[idx.len() - 1]]
+            u0[idx[idx.len() - 1]] + slack
         } else {
             f64::INFINITY
         };

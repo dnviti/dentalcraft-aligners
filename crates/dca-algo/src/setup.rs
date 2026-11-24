@@ -296,6 +296,11 @@ pub struct Config {
     /// first), and a contact the crowns find still open in the final
     /// position is closed. The parity tests with the plugin turn it on.
     pub plugin_spaces: bool,
+    /// The largest distal movement of the last tooth of each side (mm),
+    /// without the plugin's spaces: 0 by default (2026-11-24, the space comes
+    /// from the spaces of the arch and from IPR); up to that much of the
+    /// crowding of each side is taken there before any IPR.
+    pub distal_max: f64,
 }
 
 impl Default for Config {
@@ -332,6 +337,7 @@ impl Default for Config {
             plugin_derotation: false,
             plugin_line_scale: false,
             plugin_spaces: false,
+            distal_max: 0.0,
         }
     }
 }
@@ -1189,7 +1195,7 @@ impl Solver<'_> {
     /// are `[.., j + 1]` and `[j, ..]`: each holds the contact of the midline.
     fn chain(&self, y: &[f64], w: &[f64]) -> Chain {
         let cfg = self.cfg;
-        let ends = !cfg.plugin_spaces;
+        let ends = (!cfg.plugin_spaces).then_some(cfg.distal_max.max(0.0));
         let Some(j) = self.mid else {
             return solve_chain(y, w, &self.fx, cfg.close_spaces, ends);
         };
@@ -2222,6 +2228,11 @@ pub struct Params {
     pub ipr_surface_cap_mm: f64,
     /// Largest fraction of the enamel removed.
     pub enamel_fraction: f64,
+    /// The largest distal movement of the last tooth of each side (0-0.5 mm).
+    /// 0 by default: no tooth goes distally to make room, the space comes
+    /// from the spaces of the arch and from IPR; with more, up to that much
+    /// of the crowding of each side is taken there before any IPR.
+    pub distal_max_mm: f64,
     /// Teeth left out of the aligner (FDI numbers): they stay where they are.
     pub excluded: Vec<u8>,
     /// Arch line drawn by the clinician (points in case coordinates, mm);
@@ -2263,6 +2274,7 @@ impl Default for Params {
             ipr_zone: IprZone::AnteriorPremolars,
             ipr_surface_cap_mm: ev("ipr_surface", 0.25),
             enamel_fraction: ev("ipr_enamel_fraction", 0.5),
+            distal_max_mm: 0.0,
             excluded: Vec::new(),
             line: Vec::new(),
         }
@@ -2319,6 +2331,7 @@ impl Params {
             plugin_derotation: false,
             plugin_line_scale: false,
             plugin_spaces: false,
+            distal_max: self.distal_max_mm,
         }
     }
 
@@ -2355,6 +2368,7 @@ impl Params {
             ipr_zone: s.ipr_zone.into(),
             ipr_surface_cap_mm: s.ipr_surface_cap_mm,
             enamel_fraction: s.enamel_fraction,
+            distal_max_mm: s.distal_max_mm,
             ..Self::default()
         }
     }

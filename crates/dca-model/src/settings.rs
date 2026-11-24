@@ -740,6 +740,9 @@ pub struct SetupSettings {
     pub ipr_surface_cap_mm: f64,
     /// Largest fraction of the enamel removed.
     pub enamel_fraction: f64,
+    /// Largest distal movement of the last tooth of each side (mm; advanced,
+    /// 0 by default: no tooth goes distally to make room).
+    pub distal_max_mm: f64,
     /// Vertical levelling.
     pub leveling: SetupLeveling,
     /// Largest vertical correction (mm).
@@ -780,6 +783,7 @@ impl Default for SetupSettings {
             ipr_zone: SetupIprZone::AnteriorPremolars,
             ipr_surface_cap_mm: 0.25,
             enamel_fraction: 0.5,
+            distal_max_mm: 0.0,
             leveling: SetupLeveling::Smooth,
             vertical_max_mm: 1.0,
             level_tol_mm: 0.5,
@@ -793,7 +797,7 @@ impl Default for SetupSettings {
 impl SetupSettings {
     /// The numeric settings with the range of the plugin's slider
     /// (`props.py`): field name, smallest and largest value.
-    pub const NUMBERS: [(&'static str, f64, f64); 19] = [
+    pub const NUMBERS: [(&'static str, f64, f64); 20] = [
         ("line_sigma_mm", 1.0, 20.0),
         ("normal_tol_mm", 0.0, 2.0),
         ("rot_tol_deg", 0.0, 30.0),
@@ -809,6 +813,7 @@ impl SetupSettings {
         ("retract_max_mm", 0.0, 4.0),
         ("ipr_surface_cap_mm", 0.0, 0.5),
         ("enamel_fraction", 0.1, 0.5),
+        ("distal_max_mm", 0.0, 0.5),
         ("vertical_max_mm", 0.0, 3.0),
         ("level_tol_mm", 0.0, 2.0),
         ("adjust_step_mm", 0.01, 1.0),
@@ -858,6 +863,7 @@ impl SetupSettings {
             "retract_max_mm" => &mut self.retract_max_mm,
             "ipr_surface_cap_mm" => &mut self.ipr_surface_cap_mm,
             "enamel_fraction" => &mut self.enamel_fraction,
+            "distal_max_mm" => &mut self.distal_max_mm,
             "vertical_max_mm" => &mut self.vertical_max_mm,
             "level_tol_mm" => &mut self.level_tol_mm,
             "adjust_step_mm" => &mut self.adjust_step_mm,
@@ -950,6 +956,8 @@ mod tests {
         assert_eq!(s.setup.ipr_zone, SetupIprZone::None);
         assert_eq!(s.setup.advance_max_mm, 2.5);
         assert_eq!(s.setup.retract_max_mm, 2.0);
+        // a project saved before the setting: no tooth goes distally to make room
+        assert_eq!((d.distal_max_mm, s.setup.distal_max_mm), (0.0, 0.0));
     }
 
     #[test]
