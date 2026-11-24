@@ -305,7 +305,13 @@ aligners-study-vestibule-clear = Margine del vestibolo, europeo (mm)
 aligners-study-apply = Applica
 aligners-study-reset = Annulla modifiche
 aligners-study-no-case = Apri un caso con i dati degli Allineatori per modificare le impostazioni.
-aligners-study-warn-not-solid = Il modello da studio { $arch } non è un solido pulito: restano { $pieces } pezzi, { $open } spigoli di bordo, { $nonmanifold } spigoli condivisi da più di due facce e { $tunnels } fori passanti che la scansione non ha. La stampa potrebbe non riuscire: controllalo o costruiscilo di nuovo.
+# Il sostantivo dei pezzi di un modello da studio che non è un solo solido; legge
+# $count, la categoria di plurale di $pieces (one, other).
+aligners-study-pieces = { $count ->
+    [one] pezzo
+   *[other] pezzi
+}
+aligners-study-warn-not-solid = Il modello da studio { $arch } non è un solido pulito: restano { $pieces } { aligners-study-pieces }, { $open } spigoli di bordo, { $nonmanifold } spigoli condivisi da più di due facce e { $tunnels } fori passanti che la scansione non ha. La stampa potrebbe non riuscire: controllalo o costruiscilo di nuovo.
 
 # Importazione delle scansioni e passo dell'arcata (commands/import.rs).
 # Usato dai messaggi qui sotto: legge il loro $role (upper, lower, bite).

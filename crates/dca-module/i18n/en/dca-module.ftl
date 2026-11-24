@@ -305,7 +305,13 @@ aligners-study-vestibule-clear = Vestibule clearance, European (mm)
 aligners-study-apply = Apply
 aligners-study-reset = Revert
 aligners-study-no-case = Open a case with the Aligners data to edit the settings.
-aligners-study-warn-not-solid = The { $arch } study model is not one clean solid: { $pieces } pieces, { $open } open edges, { $nonmanifold } edges shared by more than two faces and { $tunnels } holes through it that the scan does not have are left. It may not print as it should: check it, or build it again.
+# The noun of the pieces of a study model that is not one solid; reads $count,
+# the plural category of $pieces (one, other).
+aligners-study-pieces = { $count ->
+    [one] piece
+   *[other] pieces
+}
+aligners-study-warn-not-solid = The { $arch } study model is not one clean solid: { $pieces } { aligners-study-pieces }, { $open } open edges, { $nonmanifold } edges shared by more than two faces and { $tunnels } holes through it that the scan does not have are left. It may not print as it should: check it, or build it again.
 
 # Scan import and arch step (commands/import.rs).
 # Referenced by the messages below: reads their $role (upper, lower, bite).

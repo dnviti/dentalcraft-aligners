@@ -289,6 +289,7 @@ fn solid_warnings(report: &study_base::Report) -> Vec<String> {
                 &[
                     ("arch", &super::messages::arch_word(arch)),
                     ("pieces", &a.components.to_string()),
+                    ("count", if a.components == 1 { "one" } else { "other" }),
                     ("open", &a.open_edges.to_string()),
                     ("nonmanifold", &a.nonmanifold_edges.to_string()),
                     ("tunnels", &made.to_string()),
@@ -558,6 +559,10 @@ mod tests {
             s.contains(&super::super::messages::arch_word(Arch::Upper)),
             "{s}"
         );
+        // one piece is said in the singular
+        report.arches.get_mut("upper").unwrap().components = 1;
+        let one = &solid_warnings(&report)[0];
+        assert!(one.contains("1 piece,"), "{one}");
     }
 
     /// Writes occlusal and frontal renders of the bases to `$DC_STUDY_PNG_DIR`
