@@ -978,24 +978,6 @@ fn each_side_makes_its_own_room_and_the_midline_stays() {
 }
 
 #[test]
-fn crowding_left_on_one_side_does_not_move_the_midline() {
-    // no IPR, no expansion, no advancement: the left incisors 1.2 mm too wide together stay
-    // crowded (reported), the space of the right side is not given to them
-    let a = spaced(&[(43, 1.0)], &[(31, 5.9), (32, 6.6)]);
-    let p = Params {
-        ipr_zone: IprZone::None,
-        expansion_lower_posterior_mm: 0.0,
-        expansion_lower_canine_mm: 0.0,
-        advance_max_mm: 0.0,
-        ..Params::default()
-    };
-    let res = setup(&a, &p.config(Arch::Lower));
-    assert!(res.midline_shift.abs() < 0.1, "{}", res.midline_shift);
-    assert!(res.residual > 0.5, "{}", res.residual);
-    assert!(has(&res, |n| matches!(n, Note::UnresolvedCrowding { .. })));
-}
-
-#[test]
 fn a_small_step_is_tolerated_a_large_one_reduced() {
     let a = make_arch(&Mal {
         shift: vec![

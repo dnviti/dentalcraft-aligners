@@ -24,8 +24,7 @@
 //!    far as needed (between two fixed teeth retracting the incisors up to
 //!    `retract_max`); with the midline kept each side of the arch closes its
 //!    own spaces and makes its own room against the midline, which stays (it
-//!    moves only for a tooth locked by the clinician that its side cannot
-//!    make room for; otherwise the crowding left is reported);
+//!    moves only when a side cannot make its room even with the therapy);
 //! 4. the positions along the arch: the nearest to the current ones,
 //!    without overlaps (weighted isotonic regression per stretch between the
 //!    fixed teeth);
@@ -1846,9 +1845,8 @@ pub fn conservative_setup(
     let mut targets;
     let mut rest_rot: BTreeMap<Fdi, f64>;
     let mut calib;
-    // the midline held: a side that cannot make its own room even with the therapy keeps
-    // its crowding (reported); only a tooth locked by the clinician (the reference of the
-    // setup) moves the midline when its side cannot make room for it
+    // the midline held first; a side that cannot make its own room even with the therapy (a
+    // tooth locked against the midline, no IPR left) moves it, as the last resort
     loop {
         extra = vec![0.0; n - 1];
         calib = 0;
@@ -2013,7 +2011,7 @@ pub fn conservative_setup(
                 *e += x;
             }
         }
-        if r.deficit <= 1e-6 || sv.mid.is_none() || poses.is_empty() {
+        if r.deficit <= 1e-6 || sv.mid.is_none() {
             break;
         }
         sv.mid = None;
