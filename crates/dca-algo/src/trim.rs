@@ -703,7 +703,19 @@ fn smooth_points(
         .filter_map(|f| Some((f, input.teeth.iter().find(|t| t.fdi == f)?.margin.clone())))
         .collect();
     let gap = params.margin_gap_mm;
-    let (mut c, high) = smooth::smooth_border(
+    // under the block-out the border stands at the equator of every tooth
+    // (the height of contour along the vertical), `equator_offset_mm` beyond it
+    let loops: BTreeMap<Fdi, line::ToothLoop> = if input.blocked_out {
+        input
+            .teeth
+            .iter()
+            .filter(|t| t.covered)
+            .filter_map(|t| Some((t.fdi, line::tooth_equator(t, line::EQUATOR_AZIMUTHS)?)))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let (mut c, high) = smooth::smooth_border_at(
         &marg,
         &crowns,
         &covered,
@@ -712,6 +724,9 @@ fn smooth_points(
         params.scallop_mm,
         params.papilla_relief_mm,
         input.blocked_out,
+        input
+            .blocked_out
+            .then_some((&loops, params.equator_offset_mm)),
     )?;
     line::border_floor(&mut c, input.scan_border, (-gap).max(0.0) + 0.5);
     let mut ctrl = c.clone();

@@ -22,8 +22,21 @@ use dc_case::Fdi;
 use dc_geom::knn::KnnIndex;
 use glam::{DVec2, DVec3, Vec3};
 
-use super::survey::median;
+use super::line::{EQUATOR_TOP_MM, ToothLoop};
+use super::survey::{loop_z, median};
 use crate::reconstruct::TAPER_RIM_MM;
+
+/// The border at the equator ([`smooth_border_at`] with the equators): on a
+/// tooth it is never higher than this share of the crown above its zenith
+/// (along a vertical path the labial equator of a proclined incisor lies in
+/// the incisal third: the face would be left bare).
+pub const EQUATOR_CROWN_SHARE: f64 = 0.5;
+/// ... and over a papilla it rises this much (mm) above the straight line
+/// from one tooth to the next, in a bump of [`EQUATOR_PAPILLA_SIGMA_MM`]
+/// along the arch: the border follows the papilla a little, no more.
+pub const EQUATOR_PAPILLA_MM: f64 = 0.3;
+/// See [`EQUATOR_PAPILLA_MM`].
+pub const EQUATOR_PAPILLA_SIGMA_MM: f64 = 1.0;
 
 /// The control points along the arch every this many mm ...
 pub const SMOOTH_STEP_MM: f64 = 0.5;
@@ -482,7 +495,7 @@ fn gum_ends(
 /// ([`gum_ends`]). Returns the border points and the high points (nothing
 /// kept under them), or `None` with fewer than two teeth with a margin.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub fn smooth_border(
+pub fn smooth_border_at(
     marg: &[(Fdi, Vec<DVec3>)],
     crowns: &BTreeMap<Fdi, Vec<DVec3>>,
     covered: &BTreeSet<Fdi>,
@@ -491,6 +504,7 @@ pub fn smooth_border(
     scallop: f64,
     relief: f64,
     blocked_out: bool,
+    equator: Option<(&BTreeMap<Fdi, ToothLoop>, f64)>,
 ) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
     if marg.len() < 2 {
         return None;
@@ -645,6 +659,69 @@ pub fn smooth_border(
                 .zip(&zl)
                 .map(|(a, b)| smooth_min(*a, *b, PAPILLA_ROUND_MM))
                 .collect()
+        };
+        // the border at the equator (the user's rule, 2026-11-24: straight,
+        // at the height of the equator, a little raised over the papillae):
+        // on every tooth the height of contour of the face of this side,
+        // moved by the offset, never less than `gap` over the zenith nor
+        // above [`EQUATOR_CROWN_SHARE`] of the crown; straight from one
+        // tooth to the next; under the contacts as the papilla notch is
+        let zb: Vec<f64> = match equator {
+            None => zb,
+            Some((loops, offset)) => {
+                let mut pts: Vec<(f64, f64)> = Vec::new();
+                let mut at = 0;
+                for (i, (f, p)) in marg.iter().enumerate() {
+                    let sc = u[nearest(&l, cen[i])];
+                    let zen = (at..at + p.len())
+                        .filter(|&k| dm[k] * sign > 0.0 && (sm[k] - sc).abs() <= ZENITH_MM)
+                        .map(|k| m[k].z)
+                        .fold(f64::INFINITY, f64::min);
+                    at += p.len();
+                    let Some(lp) = loops.get(f) else { continue };
+                    if !zen.is_finite() {
+                        continue;
+                    }
+                    let (_, n) = along(&l, &nn, &u, sc);
+                    let d = sign * n;
+                    let dirs: Vec<DVec2> = [-0.35f64, 0.0, 0.35]
+                        .iter()
+                        .map(|a| {
+                            let (sa, ca) = a.sin_cos();
+                            lp.centre + 5.0 * DVec2::new(ca * d.x - sa * d.y, sa * d.x + ca * d.y)
+                        })
+                        .collect();
+                    let mut zs = loop_z(&lp.points, lp.centre, &dirs);
+                    let eq = median(&mut zs) - offset;
+                    let high =
+                        (zen + EQUATOR_CROWN_SHARE * (lp.top - zen)).min(lp.top - EQUATOR_TOP_MM);
+                    pts.push((sc, eq.min(high).max(zen + gap)));
+                }
+                pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if pts.len() < 2 {
+                    zb
+                } else {
+                    let (xs, hs): (Vec<f64>, Vec<f64>) = pts.into_iter().unzip();
+                    let line: Vec<f64> = g
+                        .iter()
+                        .map(|&s| {
+                            let bump = touch.iter().fold(0.0f64, |b, &(sc, _)| {
+                                let t = (s - sc) / EQUATOR_PAPILLA_SIGMA_MM;
+                                b.max(EQUATOR_PAPILLA_MM * (-0.5 * t * t).exp())
+                            });
+                            let cap = touch.iter().fold(f64::INFINITY, |c, &(sc, zc)| {
+                                c.min(zc - PAPILLA_NECK_MM + soft_abs(s - sc, PAPILLA_CAP_ROUND_MM))
+                            });
+                            (interp(s, &xs, &hs) + bump).min(cap)
+                        })
+                        .collect();
+                    let line = gauss_rows(&line, SMOOTH_WAVE_SIGMA_MM / step);
+                    zb.iter()
+                        .zip(&line)
+                        .map(|(a, b)| -smooth_min(-*a, -*b, PAPILLA_ROUND_MM))
+                        .collect()
+                }
+            }
         };
         // round every papilla: the border at least `relief` above the highest
         // margin point of every bin (the tip of a papilla, held round it),
@@ -804,6 +881,32 @@ pub fn smooth_border(
         }
     }
     Some((out, high))
+}
+
+/// [`smooth_border_at`] without the equators: the border of the plugin,
+/// with the relief and the block-out as given.
+#[allow(clippy::too_many_arguments)]
+pub fn smooth_border(
+    marg: &[(Fdi, Vec<DVec3>)],
+    crowns: &BTreeMap<Fdi, Vec<DVec3>>,
+    covered: &BTreeSet<Fdi>,
+    outer: f64,
+    gap: f64,
+    scallop: f64,
+    relief: f64,
+    blocked_out: bool,
+) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
+    smooth_border_at(
+        marg,
+        crowns,
+        covered,
+        outer,
+        gap,
+        scallop,
+        relief,
+        blocked_out,
+        None,
+    )
 }
 
 #[cfg(test)]

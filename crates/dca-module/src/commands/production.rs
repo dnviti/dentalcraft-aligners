@@ -74,8 +74,8 @@ pub(crate) struct TrimPatch {
     margin_gap_mm: Option<f64>,
     /// Smooth edge: how far inside the tangents to the two crowns the
     /// block-out of the embrasure under every contact stands, the depth of
-    /// the bridge of the shell from one crown to the other (0.6 to 2.5 mm;
-    /// smaller is straighter).
+    /// the bridge of the shell from one crown to the other (0 to 2.5 mm;
+    /// 0 for a straight bridge).
     recess_mm: Option<f64>,
     /// Height of the scallops (0 to 4 mm).
     scallop_mm: Option<f64>,

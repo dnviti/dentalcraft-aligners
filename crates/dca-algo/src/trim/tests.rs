@@ -1279,3 +1279,72 @@ fn past_the_last_tooth_the_aligner_reaches_only_near_its_crown() {
     assert_eq!(extra, 0);
     assert_eq!(wrong, 0, "{wrong} of {dropped}");
 }
+
+#[test]
+fn under_the_block_out_the_border_stands_at_the_equator_not_along_the_gum() {
+    // the user's rule (2026-11-24): the border is straight, at the height of
+    // the equator, a little raised over the papillae; the border `gap` over
+    // the zenith of every tooth was "too close to the gum"
+    let a = demo_arch(Arch::Lower, 0.6, 0.25);
+    let p = Params::default();
+    let input = a.input();
+    let order = smooth_order(&input);
+    let crowns: BTreeMap<Fdi, Vec<DVec3>> =
+        a.teeth.iter().map(|t| (t.fdi, t.crown.clone())).collect();
+    let covered: BTreeSet<Fdi> = a.teeth.iter().map(|t| t.fdi).collect();
+    let marg: Vec<(Fdi, Vec<DVec3>)> = order
+        .iter()
+        .map(|&f| {
+            (
+                f,
+                a.teeth.iter().find(|t| t.fdi == f).unwrap().margin.clone(),
+            )
+        })
+        .collect();
+    let loops: BTreeMap<Fdi, line::ToothLoop> = a
+        .teeth
+        .iter()
+        .filter_map(|t| Some((t.fdi, line::tooth_equator(t, line::EQUATOR_AZIMUTHS)?)))
+        .collect();
+    assert!(loops.len() >= 2);
+    let run = |eq| {
+        smooth::smooth_border_at(
+            &marg,
+            &crowns,
+            &covered,
+            0.6,
+            p.margin_gap_mm,
+            p.scallop_mm,
+            p.papilla_relief_mm,
+            true,
+            eq,
+        )
+        .unwrap()
+        .0
+    };
+    let (gum, eq) = (run(None), run(Some((&loops, 0.0))));
+    assert_eq!(gum.len(), eq.len());
+    // never under the border along the gum, and well above it on the whole
+    let rise: Vec<f64> = gum.iter().zip(&eq).map(|(g, e)| e.z - g.z).collect();
+    let low = rise.iter().copied().fold(f64::INFINITY, f64::min);
+    let mean = rise.iter().sum::<f64>() / rise.len() as f64;
+    assert!(
+        low > -0.05,
+        "the border at the equator is {low:.2} mm under the one along the gum"
+    );
+    assert!(
+        mean > 0.3,
+        "the border at the equator is only {mean:.2} mm above the gum border"
+    );
+    // never above half of the crown nor within 1 mm of its top
+    let top = crowns
+        .values()
+        .flatten()
+        .map(|q| q.z)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let high = eq.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        high < top - line::EQUATOR_TOP_MM + 0.35,
+        "border at {high:.2}, top {top:.2}"
+    );
+}

@@ -235,7 +235,7 @@ impl Default for TrimParams {
         Self {
             mode: TrimMode::Smooth,
             margin_gap_mm: 1.5,
-            recess_mm: 0.6,
+            recess_mm: 0.0,
             scallop_mm: 1.5,
             papilla_relief_mm: 1.0,
             equator_offset_mm: 0.0,
@@ -462,7 +462,7 @@ pub const PRODUCTION_GROUPS: [&str; 6] = ["trim", "shell", "stamp", "bite", "ram
 /// (`props.py:537-661`): group, field, smallest and largest value.
 pub const PRODUCTION_NUMBERS: [(&str, &str, f64, f64); 23] = [
     ("trim", "margin_gap_mm", -2.0, 5.0),
-    ("trim", "recess_mm", 0.6, 2.5),
+    ("trim", "recess_mm", 0.0, 2.5),
     ("trim", "scallop_mm", 0.0, 4.0),
     ("trim", "papilla_relief_mm", 0.0, 3.0),
     ("trim", "equator_offset_mm", -2.0, 1.5),
