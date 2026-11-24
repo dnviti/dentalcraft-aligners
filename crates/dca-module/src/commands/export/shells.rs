@@ -1115,7 +1115,7 @@ mod tests {
     /// down into the embrasure onto the papilla; and the border over the
     /// papilla stands at most [`NOTCH_MM`] over the line between its
     /// heights at the middles of the two teeth (no notch). Here at most
-    /// 0.73 mm into an embrasure and 0.50 mm over a papilla; the export
+    /// 0.73 mm into an embrasure and 0.07 mm over a papilla; the export
     /// before the block-out (a2dfeba) went up to 2.86 mm into one, its
     /// border 0.55 mm over a papilla.
     #[test]
