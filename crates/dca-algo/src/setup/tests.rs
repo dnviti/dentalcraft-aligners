@@ -72,10 +72,12 @@ struct Mal {
     shift: Vec<(u8, DVec3)>,
     rot: Vec<(u8, f64)>,
     widths: Vec<(u8, f64)>,
+    /// Space (mm) along the arch on the mesial side of a tooth.
+    gaps: Vec<(u8, f64)>,
 }
 
 /// `make_arch`: a regular synthetic lower arch with shifted, rotated or
-/// resized teeth.
+/// resized teeth, and spaces.
 fn make_arch(m: &Mal) -> Synth {
     let (p, s) = curve();
     let xs: Vec<f64> = p.iter().map(|q| q.x).collect();
@@ -91,6 +93,7 @@ fn make_arch(m: &Mal) -> Synth {
         for i in 1..8u8 {
             let f = quadrant * 10 + i;
             let w = get(&m.widths, f).unwrap_or(width_of(i));
+            acc += get(&m.gaps, f).unwrap_or(0.0);
             let sc = sign * (acc + w / 2.0);
             acc += w;
             let (x, y) = (interp(sc, &s, &xs), interp(sc, &s, &ys));
@@ -296,6 +299,7 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
         &[1.0; 4],
         &[false, true, true, false],
         false,
+        false,
     );
     assert_eq!(ch.deficit, 0.0);
     assert_eq!((ch.u[1], ch.u[2]), (2.0, 1.5));
@@ -304,11 +308,42 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
 #[test]
 fn stretches_between_fixed_teeth() {
     let fixed = [true, false, false, true];
-    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false);
+    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false, false);
     assert_eq!(ch.deficit, 0.0);
     assert_eq!(ch.u, vec![0.0, 0.75, 0.75, 2.0]);
-    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false);
+    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false, false);
     assert!((ch.deficit - 1.5).abs() < 1e-12);
+}
+
+#[test]
+fn the_last_tooth_of_a_side_never_goes_distally() {
+    // the chain needs 1 mm more than the room between its last teeth: the plugin pushes the
+    // last teeth distally, the port finds crowding (the space is made by the therapy)
+    let u0 = [1.0, 1.0, 0.0, 0.0];
+    let free = [false; 4];
+    let plugin = solve_chain(&u0, &[1.0; 4], &free, true, false);
+    assert_eq!(plugin.deficit, 0.0);
+    assert!(plugin.u[0] < u0[0] && plugin.u[3] > u0[3]);
+    let port = solve_chain(&u0, &[1.0; 4], &free, true, true);
+    assert!((port.deficit - 1.0).abs() < 1e-12);
+    assert_eq!((port.segs[0].left, port.segs[0].right), (-1, 4));
+}
+
+#[test]
+fn the_teeth_behind_a_space_close_it_against_a_fixed_tooth() {
+    // a space of 1.5 mm before the fixed tooth 2: the plugin leaves it, the port brings the
+    // free teeth mesially against the fixed tooth, none of them distally
+    let u0 = [0.0, 0.5, 2.0];
+    let fixed = [false, false, true];
+    let plugin = solve_chain(&u0, &[1.0; 3], &fixed, true, false);
+    assert_eq!(plugin.u, vec![0.25, 0.25, 2.0]);
+    let port = solve_chain(&u0, &[1.0; 3], &fixed, true, true);
+    assert_eq!(port.u, vec![2.0, 2.0, 2.0]);
+    assert_eq!((port.deficit, port.spacing), (0.0, 0.0));
+    // without a fixed tooth the chain closes where its weights say, the last teeth no further
+    // out than they were
+    let port = solve_chain(&[0.0, 0.0, 1.0, 1.0], &[1.0; 4], &[false; 4], true, true);
+    assert_eq!(port.u, vec![0.5; 4]);
 }
 
 // ---- conservative setup -------------------------------------------------------------------------------
@@ -739,6 +774,122 @@ fn premolars_and_molars_stay() {
     assert_eq!(mv[&fdi(46)], 0.0);
 }
 
+// ---- the spaces of the arch (2026-11-24) -------------------------------------------------------------
+
+/// Gap along the arch of each contact (mm, negative: overlap) between the
+/// contact points that face each other, at rest (`None`) or moved by the
+/// targets of `res`.
+fn contact_gaps(a: &Synth, res: Option<&SetupResult>) -> Vec<(u8, u8, f64)> {
+    let mv = |f: Fdi, p: DVec3| {
+        res.and_then(|r| r.targets.get(&f))
+            .map_or(p, |d| d.transform_point3(p))
+    };
+    seq()
+        .windows(2)
+        .map(|w| {
+            let pt = |f: Fdi, g: Fdi| {
+                let t = &a.teeth[&f];
+                let p = match facing_surface(f, g) {
+                    Surface::Mesial => t.contact_m,
+                    _ => t.contact_d,
+                };
+                mv(f, p)
+            };
+            let (pa, pb) = (pt(w[0], w[1]), pt(w[1], w[0]));
+            let (ca, cb) = (
+                mv(w[0], mean(&a.cusps[&w[0]])),
+                mv(w[1], mean(&a.cusps[&w[1]])),
+            );
+            let u = (cb - ca).truncate().normalize();
+            (w[0].get(), w[1].get(), (pb - pa).truncate().dot(u))
+        })
+        .collect()
+}
+
+/// Movement of each tooth towards the midline along the arch (mm).
+fn mesial_moves(a: &Synth, res: &SetupResult) -> BTreeMap<u8, f64> {
+    seq()
+        .iter()
+        .map(|f| {
+            let c = mean(&a.cusps[f]);
+            let d = res.targets.get(f).map_or(c, |d| d.transform_point3(c)) - c;
+            (f.get(), d.truncate().dot(a.teeth[f].e_md.truncate()))
+        })
+        .collect()
+}
+
+/// The synthetic arch with spaces (`gaps`) and the teeth of `widths` wider
+/// or narrower where they are (overlapping their neighbours, or apart).
+fn spaced(gaps: &[(u8, f64)], widths: &[(u8, f64)]) -> Synth {
+    let mut a = make_arch(&Mal {
+        gaps: gaps.to_vec(),
+        ..Mal::default()
+    });
+    for &(f, w) in widths {
+        let c = mean(&a.cusps[&fdi(f)]);
+        let t = a.teeth.get_mut(&fdi(f)).unwrap();
+        t.width_md = w;
+        t.contact_m = c + t.e_md * w / 2.0;
+        t.contact_d = c - t.e_md * w / 2.0;
+    }
+    a
+}
+
+#[test]
+fn spaces_between_canines_and_premolars_close_with_the_posterior_teeth() {
+    // 1.2 mm between each canine and its first premolar, every other contact closed
+    let a = spaced(&[(34, 1.2), (44, 1.2)], &[]);
+    for (x, y, g) in contact_gaps(&a, None) {
+        let want = if [(44, 43), (33, 34)].contains(&(x, y)) {
+            1.2
+        } else {
+            0.0
+        };
+        assert!((g - want).abs() < 0.1, "at rest {x}-{y}: {g:.2} mm");
+    }
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    for (x, y, g) in contact_gaps(&a, Some(&res)) {
+        assert!(g.abs() < 0.2, "final {x}-{y}: {g:.2} mm");
+    }
+    // the premolars and the molars go mesially to close them (none distally), the space is
+    // not stripped
+    let along = mesial_moves(&a, &res);
+    for f in [44, 45, 46, 47, 34, 35, 36, 37] {
+        assert!(along[&f] > 0.8, "{f}: {:.2} mm", along[&f]);
+    }
+    assert!(along.values().all(|&d| d > -0.1), "{along:?}");
+    assert!(res.ipr.is_empty(), "{:?}", res.ipr);
+}
+
+#[test]
+fn no_ipr_while_the_arch_has_spaces() {
+    // the lower incisors 1.2 mm too wide together, 2 mm of space between the second premolars
+    // and the first molars: the space covers the crowding, no enamel is removed
+    let a = spaced(
+        &[(36, 1.0), (46, 1.0)],
+        &[(41, 5.7), (42, 6.2), (31, 5.7), (32, 6.2)],
+    );
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    assert!(res.ipr.is_empty(), "{:?}", res.ipr);
+    assert!(res.residual < 1e-6, "{}", res.residual);
+    for (x, y, g) in contact_gaps(&a, Some(&res)) {
+        assert!(g.abs() < 0.2, "final {x}-{y}: {g:.2} mm");
+    }
+}
+
+#[test]
+fn no_ipr_on_a_contact_open_at_rest() {
+    // 2.4 mm of crowding in the incisors and 0.5 mm of space between 33 and 34: IPR makes the
+    // rest, at the closed contacts only, and the space closes
+    let a = spaced(&[(34, 0.5)], &[(41, 6.0), (42, 6.5), (31, 6.0), (32, 6.5)]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    assert!(!res.ipr.is_empty());
+    assert!(!res.ipr.contains_key(&(fdi(33), fdi(34))), "{:?}", res.ipr);
+    let g = contact_gaps(&a, Some(&res));
+    let g34 = g.iter().find(|x| (x.0, x.1) == (33, 34)).unwrap().2;
+    assert!(g34.abs() < 0.2, "{g34:.2} mm");
+}
+
 #[test]
 fn a_small_step_is_tolerated_a_large_one_reduced() {
     let a = make_arch(&Mal {
@@ -1099,7 +1250,7 @@ fn the_midline_can_go_to_the_centre() {
 }
 
 #[test]
-fn the_default_parameters_are_the_plugin_scene_settings() {
+fn the_default_parameters_are_the_plugin_scene_settings_but_the_scope_and_the_molars() {
     let p = Params::default();
     let lower = p.config(Arch::Lower);
     assert_eq!(lower.ipr_zone, IprZone::AnteriorPremolars);
@@ -1112,10 +1263,17 @@ fn the_default_parameters_are_the_plugin_scene_settings() {
         (upper.expansion_posterior, upper.expansion_canine),
         (2.0, 2.0)
     );
+    // every tooth aligned and no molar held (2026-11-24), the plugin's dataclass otherwise
+    assert_eq!(
+        (lower.align_scope, lower.fix_molars),
+        (AlignScope::All, false)
+    );
     let base = Config::default();
     assert_eq!(
         Config {
             ipr_zone: IprZone::Anterior,
+            align_scope: AlignScope::Anterior,
+            fix_molars: true,
             ..lower
         },
         base
@@ -1144,10 +1302,11 @@ fn scenarios() -> Vec<(&'static str, SetupResult)> {
                    crowns: Option<BTreeMap<Fdi, Vec<DVec3>>>,
                    poses: BTreeMap<Fdi, DMat4>| {
         let fixed: Vec<Fdi> = fixed.iter().map(|&n| fdi(n)).collect();
-        // the plugin derotates fully
+        // the plugin derotates fully, and leaves the spaces as it does
         let cfg = Config {
             plugin_derotation: true,
             plugin_line_scale: true,
+            plugin_spaces: true,
             ..cfg
         };
         let r = conservative_setup(

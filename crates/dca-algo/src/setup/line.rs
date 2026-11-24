@@ -470,7 +470,17 @@ pub struct Chain {
 /// teeth held. With `pack` the free teeth of a stretch stay together (one
 /// `u` for the whole stretch: the weighted mean, within the fixed teeth;
 /// the spaces close).
-pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool) -> Chain {
+///
+/// The two open ends of the chain (before the first fixed tooth, after the
+/// last one) are free with `bounded_ends` off, as in the plugin: there the
+/// last tooth of each side can go distally as far as the chain needs. With
+/// `bounded_ends` on, the last tooth of each side never goes distally (its
+/// `u` stays on the mesial side of its `u0`) but goes mesially as far as
+/// needed: a chain longer than the room between the last teeth is crowding
+/// (a [`Crowded`] stretch with `left` `-1` or `right` `n`), and with `pack`
+/// a stretch between an open end and a fixed tooth closes against the fixed
+/// tooth, so no space is left at the end of the arch.
+pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool, bounded_ends: bool) -> Chain {
     let n = u0.len();
     let mut u = u0.to_vec();
     let mut bounds: Vec<i64> = vec![-1];
@@ -479,17 +489,26 @@ pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool) -> Chain {
     let (mut total, mut segs, mut spacing) = (0.0, Vec::new(), 0.0);
     for ab in bounds.windows(2) {
         let (a, b) = (ab[0], ab[1]);
+        let idx: Vec<usize> = ((a + 1)..b).map(|i| i as usize).collect();
+        // an open end bounded by the last tooth of its side, which does not go distally
+        let (lo_end, hi_end) = (
+            a < 0 && bounded_ends && !idx.is_empty(),
+            b >= n as i64 && bounded_ends && !idx.is_empty(),
+        );
         let lo = if a >= 0 {
             u0[a as usize]
+        } else if lo_end {
+            u0[idx[0]]
         } else {
             f64::NEG_INFINITY
         };
         let hi = if b < n as i64 {
             u0[b as usize]
+        } else if hi_end {
+            u0[idx[idx.len() - 1]]
         } else {
             f64::INFINITY
         };
-        let idx: Vec<usize> = ((a + 1)..b).map(|i| i as usize).collect();
         // two fixed teeth side by side (no free tooth between them) do not move: their overlap
         // at rest is not crowding to resolve
         let deficit = if lo.is_finite() && hi.is_finite() && !idx.is_empty() {
@@ -518,11 +537,16 @@ pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool) -> Chain {
         } else if pack {
             let num: f64 = y.iter().zip(&ww).map(|(a, b)| a * b).sum();
             let den: f64 = ww.iter().sum();
-            let m = clip(num / den, lo, hi);
+            // against the fixed tooth when the other end is the end of the arch
+            let m = match (lo_end, hi_end) {
+                (true, false) if hi.is_finite() => hi,
+                (false, true) if lo.is_finite() => lo,
+                _ => clip(num / den, lo, hi),
+            };
             for &i in &idx {
                 u[i] = m;
             }
-            if lo.is_finite() && hi.is_finite() {
+            if a >= 0 && b < n as i64 {
                 spacing += hi - lo;
             }
         } else {

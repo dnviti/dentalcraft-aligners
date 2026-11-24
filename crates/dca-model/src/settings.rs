@@ -678,16 +678,20 @@ pub enum SetupLeveling {
 
 /// Parameters of "Final position" (the plugin's scene settings,
 /// `props.py:388-468`, read by `case_plan.conservative_config`), with the
-/// plugin's defaults, and the steps of the − and + buttons of "Move a
-/// tooth" (`adjust_step_mm`, `adjust_step_deg`, `props.py:686-687`). The
+/// plugin's defaults but two, and the steps of the − and + buttons of "Move
+/// a tooth" (`adjust_step_mm`, `adjust_step_deg`, `props.py:686-687`). The
 /// automatic final position uses them for every parameter it is not given;
 /// `aligners.settings.setup` changes them inside the ranges of the plugin's
 /// sliders ([`SetupSettings::NUMBERS`]). The field names are those of the
-/// parameters of `aligners.planning.setup.automatic`.
+/// parameters of `aligners.planning.setup.automatic`. The two defaults
+/// that are not the plugin's (2026-11-24): every tooth is aligned
+/// (`align_scope`, the plugin's are the incisors and canines) and the
+/// molars are not held along the arch (`fix_molars`, held in the plugin),
+/// so the final position corrects the whole arch and closes its spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SetupSettings {
-    /// Teeth to align.
+    /// Teeth to align (every tooth by default).
     pub align_scope: SetupScope,
     /// Smoothing of the arch line from the cusps (mm).
     pub line_sigma_mm: f64,
@@ -705,7 +709,8 @@ pub struct SetupSettings {
     pub pos_tol_mm: f64,
     /// Overlap already present left as it is (mm).
     pub contact_tol_mm: f64,
-    /// First and second molars held along the arch (anchorage).
+    /// First and second molars held along the arch (anchorage; off by
+    /// default: they go mesially as far as the spaces need, never distally).
     pub fix_molars: bool,
     /// The teeth held along the arch are still derotated and put on the line.
     pub align_fixed: bool,
@@ -752,7 +757,7 @@ pub struct SetupSettings {
 impl Default for SetupSettings {
     fn default() -> Self {
         Self {
-            align_scope: SetupScope::Anterior,
+            align_scope: SetupScope::All,
             line_sigma_mm: 5.0,
             normal_tol_mm: 0.1,
             rot_tol_deg: 1.0,
@@ -760,7 +765,7 @@ impl Default for SetupSettings {
             post_rot_tol_deg: 5.0,
             pos_tol_mm: 0.1,
             contact_tol_mm: 0.15,
-            fix_molars: true,
+            fix_molars: false,
             align_fixed: true,
             fix_third: true,
             midline: SetupMidline::Keep,
@@ -925,14 +930,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_settings_saved_without_them_load_the_plugin_defaults() {
+    fn setup_settings_saved_without_them_load_the_defaults() {
         let mut v = serde_json::to_value(Settings::default()).unwrap();
         v.as_object_mut().unwrap().remove("setup");
         let s: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(s.setup, SetupSettings::default());
-        // the plugin's defaults (`props.py`, `evidence.py`)
+        // the plugin's defaults (`props.py`, `evidence.py`) but the scope and the molars
+        // (2026-11-24): every tooth aligned, no molar held along the arch
         let d = SetupSettings::default();
-        assert_eq!(d.align_scope, SetupScope::Anterior);
+        assert_eq!(d.align_scope, SetupScope::All);
+        assert!(!d.fix_molars && d.fix_third);
         assert_eq!(d.priority, SpacePriority::IprExpPro);
         assert_eq!(d.ipr_zone, SetupIprZone::AnteriorPremolars);
         assert_eq!((d.adjust_step_mm, d.adjust_step_deg), (0.1, 1.0));

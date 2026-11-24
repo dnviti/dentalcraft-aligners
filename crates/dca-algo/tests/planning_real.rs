@@ -284,9 +284,14 @@ fn check_setup(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, DMat4> {
             fixed: &[],
             poses: &BTreeMap::new(),
         },
+        // the plugin's derotation, line scale, spaces and default scope (the incisors and
+        // canines, the molars held)
         &setup::Config {
             plugin_derotation: true,
             plugin_line_scale: true,
+            plugin_spaces: true,
+            align_scope: setup::AlignScope::Anterior,
+            fix_molars: true,
             ..setup::Params::default().config(s.arch)
         },
     )

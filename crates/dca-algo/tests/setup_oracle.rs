@@ -104,9 +104,14 @@ struct Worst {
 }
 
 /// The case settings for the plugin's scene settings `scene` (the names of
-/// `props.py`; an enum value in capitals).
+/// `props.py`; an enum value in capitals), over the plugin's own defaults
+/// where the port's differ (2026-11-24: the port aligns every tooth and
+/// holds no molar by default, the plugin the incisors and canines with the
+/// molars held).
 fn settings_of(scene: &Value) -> SetupSettings {
     let mut out = Map::new();
+    out.insert("align_scope".to_owned(), Value::from("anterior"));
+    out.insert("fix_molars".to_owned(), Value::from(true));
     for (k, v) in scene.as_object().into_iter().flatten() {
         let key = match k.as_str() {
             "cons_align_scope" => "align_scope",
@@ -253,12 +258,13 @@ fn compare(case: &str, file: &str, worst: &mut Worst) {
         fixed: &[],
         poses: &BTreeMap::new(),
     };
-    // the plugin's derotation and line scale (the port's own are stated in
+    // the plugin's derotation, line scale and spaces (the port's own are stated in
     // `derotating_only_the_excess_changes_the_demo_setups_as_stated` and
     // `the_scale_of_the_arch_line_changes_the_demo_setups_as_stated`)
     let cfg = Config {
         plugin_derotation: true,
         plugin_line_scale: true,
+        plugin_spaces: true,
         ..params.config(arch)
     };
     let out = setup::run_with(&input, &cfg).unwrap();
@@ -525,9 +531,11 @@ fn run_case(case: &str, (plugin_derotation, plugin_line_scale): (bool, bool)) ->
         fixed: &[],
         poses: &BTreeMap::new(),
     };
+    // each departure on its own: the plugin's spaces in both
     let cfg = Config {
         plugin_derotation,
         plugin_line_scale,
+        plugin_spaces: true,
         ..params.config(arch)
     };
     setup::run_with(&input, &cfg).unwrap()

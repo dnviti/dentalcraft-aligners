@@ -26,7 +26,12 @@ pub enum ModelError {
 ///   version 2 state gets the default recess
 ///   ([`crate::TrimParams::default`]) whatever it stored. The aligners built
 ///   for the 3D view (`aligner_view.bases`) were built without the block-out:
-///   they go, and are built again on demand. Nothing else changes.
+///   they go, and are built again on demand. The final position aligns
+///   every tooth and holds no molar along the arch by default (2026-11-24):
+///   setup settings saved with the old defaults, the incisors and canines
+///   aligned (`settings.setup.align_scope` `anterior`) with the molars held
+///   (`fix_molars` true), take the new ones (`all`, false); a scope or an
+///   anchorage chosen otherwise stays. Nothing else changes.
 ///
 /// Keep a fixture of every old version in the tests.
 pub fn migrate(mut value: Value, from: u32) -> Result<Value, ModelError> {
@@ -43,6 +48,16 @@ pub fn migrate(mut value: Value, from: u32) -> Result<Value, ModelError> {
                 && view.contains_key("bases")
             {
                 view.insert("bases".to_owned(), Value::Array(Vec::new()));
+            }
+            if let Some(setup) = value
+                .get_mut("settings")
+                .and_then(|s| s.get_mut("setup"))
+                .and_then(Value::as_object_mut)
+                && setup.get("align_scope").and_then(Value::as_str) == Some("anterior")
+                && setup.get("fix_molars").and_then(Value::as_bool) == Some(true)
+            {
+                setup.insert("align_scope".to_owned(), Value::from("all"));
+                setup.insert("fix_molars".to_owned(), Value::from(false));
             }
             Ok(value)
         }
@@ -77,7 +92,8 @@ mod tests {
     }
 
     /// A synthetic version 2 state: a recess that did nothing, an aligner of
-    /// the 3D view built without the block-out, and other data.
+    /// the 3D view built without the block-out, the setup settings at the
+    /// defaults of version 2, and other data.
     fn version_2(recess: f64) -> Value {
         let mut s = AlignersState::default();
         s.missing.insert(dc_case::Fdi::new(11).unwrap());
@@ -85,6 +101,8 @@ mod tests {
         s.trim.margin_gap_mm = 1.2;
         s.settings.gum_clearance_mm = 0.4;
         s.aligner_view.shown = true;
+        s.settings.setup.align_scope = crate::SetupScope::Anterior;
+        s.settings.setup.fix_molars = true;
         s.aligner_view.bases.push(crate::AlignerBase {
             arch: dc_case::ScanRole::Upper,
             stage: 2,
@@ -98,10 +116,13 @@ mod tests {
         serde_json::to_value(&s).unwrap()
     }
 
-    /// `v` without the two values the migration to version 3 changes.
+    /// `v` without the values the migration to version 3 changes.
     fn rest(mut v: Value) -> Value {
         v["trim"].as_object_mut().unwrap().remove("recess_mm");
         v["aligner_view"].as_object_mut().unwrap().remove("bases");
+        let setup = v["settings"]["setup"].as_object_mut().unwrap();
+        setup.remove("align_scope");
+        setup.remove("fix_molars");
         v
     }
 
@@ -121,6 +142,26 @@ mod tests {
             let s: AlignersState = serde_json::from_value(v3).unwrap();
             assert_eq!(s.trim.recess_mm, default);
             assert!(s.aligner_view.bases.is_empty() && s.aligner_view.shown);
+        }
+    }
+
+    #[test]
+    fn version_2_setup_settings_at_the_old_defaults_take_the_new_ones() {
+        let v3 = migrate(version_2(0.6), 2).unwrap();
+        let s: AlignersState = serde_json::from_value(v3).unwrap();
+        assert_eq!(s.settings.setup.align_scope, crate::SetupScope::All);
+        assert!(!s.settings.setup.fix_molars);
+        assert_eq!(s.settings.setup, crate::SetupSettings::default());
+        // a scope or an anchorage chosen otherwise stays
+        for (scope, molars) in [("premolars", true), ("anterior", false), ("all", true)] {
+            let mut v2 = version_2(0.6);
+            v2["settings"]["setup"]["align_scope"] = Value::from(scope);
+            v2["settings"]["setup"]["fix_molars"] = Value::from(molars);
+            let v3 = migrate(v2.clone(), 2).unwrap();
+            assert_eq!(
+                v3["settings"]["setup"], v2["settings"]["setup"],
+                "{scope} {molars}"
+            );
         }
     }
 

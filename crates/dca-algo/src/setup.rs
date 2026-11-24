@@ -15,10 +15,14 @@
 //! 2. the evaluation: a tooth to align moves only when it is off the line,
 //!    rotated or stepped beyond the tolerances of its zone;
 //! 3. the space along the line: every aligned tooth takes its full
-//!    mesio-distal width; the space missing between the fixed teeth is made
-//!    by the therapy in the order of `priority`; what is left is spread over
-//!    the contacts of the stretch; with `close_spaces` the gaps close
-//!    (retracting the incisors up to `retract_max`);
+//!    mesio-distal width; the space missing between the fixed teeth (and,
+//!    by default, between the last tooth of each side, which never goes
+//!    distally) is made by the therapy in the order of `priority`, after
+//!    the spaces of the arch are used (no IPR on a contact open at rest);
+//!    what is left is spread over the contacts of the stretch; with
+//!    `close_spaces` the gaps close, the posterior teeth going mesially as
+//!    far as needed (between two fixed teeth retracting the incisors up to
+//!    `retract_max`);
 //! 4. the positions along the arch: the nearest to the current ones,
 //!    without overlaps (weighted isotonic regression per stretch between the
 //!    fixed teeth);
@@ -28,9 +32,18 @@
 //!    the line, and levelled (only the step beyond `level_tol`); tip and
 //!    torque unchanged;
 //! 6. with the crowns, the real 3D overlap between neighbours adds space
-//!    where needed (at most 4 rounds); when the space is not enough even
-//!    with the therapy the teeth are derotated only as far as it allows
-//!    (posterior teeth give up first, then the canines, the incisors last).
+//!    where needed and a contact still open takes space away (at most 4
+//!    rounds); when the space is not enough even with the therapy the teeth
+//!    are derotated only as far as it allows (posterior teeth give up first,
+//!    then the canines, the incisors last).
+//!
+//! Departures from the plugin, each with a [`Config`] flag the parity tests
+//! turn on: the derotation of the excess only (`plugin_derotation`), the
+//! scale of the arch line (`plugin_line_scale`) and the spaces
+//! (`plugin_spaces`, 2026-11-24: the ends of the arch bounded, no IPR on an
+//! open contact, the open contacts closed on the crowns). The parameters
+//! align every tooth and hold no molar by default ([`Params`]); the
+//! plugin's default aligns the incisors and canines with the molars held.
 //!
 //! Coordinates: arch coordinates (origin between the last molars on the
 //! occlusal plane, +Y anterior, +Z occlusal). Targets are deltas `D`: the
@@ -256,6 +269,15 @@ pub struct Config {
     /// (2026-11-23): the scale is taken once, from the canines and premolars.
     /// The parity tests with the plugin turn it on.
     pub plugin_line_scale: bool,
+    /// The plugin's handling of the spaces: the last tooth of each side free
+    /// to go distally ([`solve_chain`] without bounded ends), IPR on any
+    /// contact of a crowded stretch, and the final contacts checked on the
+    /// crowns for overlaps only. Off by default (2026-11-24): the last tooth
+    /// of each side never goes distally but goes mesially as far as the
+    /// spaces need, no IPR on a contact open at rest (the space is used
+    /// first), and a contact the crowns find still open in the final
+    /// position is closed. The parity tests with the plugin turn it on.
+    pub plugin_spaces: bool,
 }
 
 impl Default for Config {
@@ -291,6 +313,7 @@ impl Default for Config {
             enamel_fraction: 0.5,
             plugin_derotation: false,
             plugin_line_scale: false,
+            plugin_spaces: false,
         }
     }
 }
@@ -942,8 +965,15 @@ fn evaluate(
         .collect()
 }
 
-/// Extra space needed per contact (mm) where the crowns in the final
-/// position overlap more than at rest beyond IPR + `tol`.
+/// Correction of the space of each contact (mm) from the crowns in the final
+/// position: positive (extra space needed) where they overlap more than at
+/// rest beyond IPR + `tol`; with `close` (per contact: to be closed, a tooth
+/// of the pair free along the arch), negative (space to take away) where
+/// they are still apart beyond `tol` from their contact at rest (the
+/// overlap at rest, or touching when they were apart) less the IPR. The
+/// widths of the model come from the crown extents along the line, so a
+/// contact it closes, of a tooth derotated or slid along the curve, can be
+/// left open on the crowns by some tenths of a millimetre.
 fn overlaps_3d(
     seq: &[Fdi],
     adj: &[bool],
@@ -951,6 +981,7 @@ fn overlaps_3d(
     targets: &BTreeMap<Fdi, DMat4>,
     ipr: &[f64],
     tol: f64,
+    close: Option<&[bool]>,
 ) -> Vec<f64> {
     let mut err = vec![0.0; seq.len().saturating_sub(1)];
     for (i, w) in seq.windows(2).enumerate() {
@@ -972,6 +1003,8 @@ fn overlaps_3d(
         let floor = if rest.is_finite() { rest.min(0.0) } else { 0.0 };
         if sep.is_finite() && sep < floor - (ipr[i] + tol) {
             err[i] = floor - sep - ipr[i] - 0.5 * tol;
+        } else if close.is_some_and(|c| c[i]) && sep.is_finite() && sep > floor - ipr[i] + tol {
+            err[i] = floor - ipr[i] - sep + 0.5 * tol;
         }
     }
     err
@@ -1173,7 +1206,8 @@ impl Solver<'_> {
         let sub =
             |a: &[f64], b: &[f64]| -> Vec<f64> { a.iter().zip(b).map(|(x, y)| x - y).collect() };
         let mut off = cumsum(&req);
-        let ch = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces);
+        let ends = !cfg.plugin_spaces;
+        let ch = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces, ends);
         let (deficit, segs) = (ch.deficit, ch.segs.clone());
         let (mut u, mut spacing) = (ch.u, ch.spacing);
         if deficit > 1e-9 {
@@ -1191,7 +1225,7 @@ impl Solver<'_> {
                 }
             }
             off = cumsum(&req2);
-            let ch2 = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces);
+            let ch2 = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces, ends);
             u = ch2.u;
             spacing = ch2.spacing;
         }
@@ -1544,7 +1578,7 @@ pub fn conservative_setup(
     // no IPR towards a tooth out of the aligner or locked; a tooth that stays only because it
     // is beyond the teeth to align can be reduced
     let no_ipr: BTreeSet<Fdi> = held.difference(&beyond).copied().collect();
-    let caps: Vec<f64> = seq
+    let mut caps: Vec<f64> = seq
         .windows(2)
         .zip(&adj)
         .map(|(w, &ad)| {
@@ -1654,6 +1688,16 @@ pub fn conservative_setup(
                     sv.gap_cal[i] = g3 - gap_r;
                     measured_3d[i] = g3 >= -REST_OVERLAP_MAX;
                 }
+            }
+        }
+    }
+    // no IPR on a contact open at rest: its space is used before any enamel is removed
+    if !cfg.plugin_spaces {
+        let mr = sv.measure(&sv.base, None, true);
+        for (i, cap) in caps.iter_mut().enumerate() {
+            let gap = (mr.s0[i + 1] - mr.wm[i + 1]) - (mr.s0[i] + mr.wp[i]) + sv.gap_cal[i];
+            if gap > cfg.contact_tol {
+                *cap = 0.0;
             }
         }
     }
@@ -1803,7 +1847,7 @@ pub fn conservative_setup(
                     return true;
                 }
                 let tt = sv.targets(r, &l, &mut BTreeMap::new());
-                let err = overlaps_3d(&seq, &adj, cr, &tt, &r.ipr, cfg.contact_tol);
+                let err = overlaps_3d(&seq, &adj, cr, &tt, &r.ipr, cfg.contact_tol, None);
                 !nb.iter().any(|&j| err[i.min(j)] != 0.0)
             };
             let k0 = r.k[i];
@@ -1817,8 +1861,22 @@ pub fn conservative_setup(
                 targets = sv.targets(&r, &l, &mut rest_rot);
             }
         }
-        let err = overlaps_3d(&seq, &adj, cr, &targets, &r.ipr, cfg.contact_tol);
-        if err.iter().copied().fold(0.0, f64::max) <= 1e-3 || calib >= 4 {
+        // the contacts to close on the crowns: both teeth free along the arch (next to a tooth
+        // held along the arch a space is what its stretch leaves, `spacing`), the spaces
+        // closed (the plugin checks the overlaps only)
+        let close: Vec<bool> = (0..n - 1)
+            .map(|i| cfg.close_spaces && !cfg.plugin_spaces && !fx[i] && !fx[i + 1])
+            .collect();
+        let err = overlaps_3d(
+            &seq,
+            &adj,
+            cr,
+            &targets,
+            &r.ipr,
+            cfg.contact_tol,
+            Some(&close),
+        );
+        if err.iter().map(|e| e.abs()).fold(0.0, f64::max) <= 1e-3 || calib >= 4 {
             break;
         }
         for (e, x) in extra.iter_mut().zip(&err) {
@@ -1973,7 +2031,9 @@ pub fn conservative_setup(
 pub struct Params {
     /// Arches to work on.
     pub arch: Which,
-    /// Teeth to align.
+    /// Teeth to align. Every tooth by default (2026-11-24; the plugin's
+    /// default is the incisors and canines): the final position corrects
+    /// the whole arch, the premolars and molars too.
     pub align_scope: AlignScope,
     /// Smoothing of the arch line from the cusps (mm).
     pub line_sigma_mm: f64,
@@ -1999,7 +2059,9 @@ pub struct Params {
     pub level_tol_mm: f64,
     /// Level the canines too.
     pub level_canines: bool,
-    /// First and second molars held along the arch (anchorage).
+    /// First and second molars held along the arch (anchorage). Off by
+    /// default (2026-11-24; on in the plugin): the molars go mesially as far
+    /// as the spaces need, never distally.
     pub fix_molars: bool,
     /// Third molars held completely.
     pub fix_third: bool,
@@ -2045,7 +2107,7 @@ impl Default for Params {
         let ev = |key: &str, fallback: f64| evidence::param_f64(key).unwrap_or(fallback);
         Self {
             arch: Which::All,
-            align_scope: AlignScope::Anterior,
+            align_scope: AlignScope::All,
             line_sigma_mm: ev("cons_line_sigma", 5.0),
             pos_tol_mm: ev("cons_pos_tol", 0.1),
             normal_tol_mm: ev("cons_normal_tol", 0.1),
@@ -2057,7 +2119,7 @@ impl Default for Params {
             vertical_max_mm: ev("vertical_auto_max", 1.0),
             level_tol_mm: ev("cons_level_tol", 0.5),
             level_canines: false,
-            fix_molars: true,
+            fix_molars: false,
             fix_third: true,
             fix_canines: false,
             align_fixed: true,
@@ -2129,6 +2191,7 @@ impl Params {
             enamel_fraction: self.enamel_fraction,
             plugin_derotation: false,
             plugin_line_scale: false,
+            plugin_spaces: false,
         }
     }
 
