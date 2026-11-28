@@ -70,6 +70,14 @@ pub const SPACE_MM: f64 = 3.0;
 pub const RIDGE_MM: f64 = 1.5;
 /// ... this far (mm) under it.
 pub const RIDGE_TOP_MM: f64 = 0.3;
+/// ... and its faces are the tangents to the two crowns within this (mm,
+/// along the arch) of their faces towards each other only (the marginal
+/// ridges, the proximal line angles), not to the whole crowns: tangent to
+/// the cingula of two upper incisors the fill stood up to a millimetre
+/// proud of their palatal faces, and the shell stepped down from it onto
+/// the crown in a neck 0.13 mm thick (a real case, the upper aligners 11
+/// and 12, between 11 and 21).
+pub const LOCAL_MM: f64 = 3.0;
 
 /// A closed tooth at the stage (arch coordinates, `+Z` occlusal).
 #[derive(Debug, Clone, Copy)]
@@ -357,8 +365,25 @@ fn pair_fill(
                 .fold(f64::NEG_INFINITY, f64::max);
             let xb = sb.iter().map(|p| p.dot(u)).fold(f64::INFINITY, f64::min);
             let (lo, hi) = (xa.min(xb) - INTO_MM, xa.max(xb) + INTO_MM);
-            let mut pts = sa;
-            pts.extend(sb);
+            // the whole embrasure: the crowns near the contact only ([`LOCAL_MM`])
+            let local = |s: Vec<DVec2>, n: DVec2, face: f64| -> Vec<DVec2> {
+                if !whole {
+                    return s;
+                }
+                let near: Vec<DVec2> = s
+                    .iter()
+                    .copied()
+                    .filter(|p| face - n.dot(*p) <= LOCAL_MM)
+                    .collect();
+                // a coarse section: its hull cut at the same distance
+                if near.len() < 6 {
+                    clip(&hull(&s), -n, LOCAL_MM - face)
+                } else {
+                    near
+                }
+            };
+            let mut pts = local(sa, u, xa);
+            pts.extend(local(sb, -u, -xb));
             if let Some(h) = &above {
                 pts.extend(h.iter().copied());
             }
@@ -597,6 +622,43 @@ mod tests {
             tris: &gone.1,
         };
         assert!(fills_whole(&[ta, tg], &[], 0.0).is_empty());
+    }
+
+    /// The whole fill is tangent to the crowns near the contact, not to a
+    /// bulge farther than [`LOCAL_MM`] from it (the cingulum of an incisor):
+    /// tangent to the whole crowns it stood proud of their faces.
+    #[test]
+    fn the_whole_fill_is_tangent_near_the_contact_only() {
+        let f = |n: u8| Fdi::new(n).unwrap();
+        // a crown 2 mm thick at the contact with a bulge 8 mm thick 4.7 mm from it
+        let bulged = |near: f64, far: f64, bulge: f64| {
+            let (x0, x1) = (near.min(far), near.max(far));
+            let mut m = cuboid(DVec3::new(x0, -1.0, -5.0), DVec3::new(x1, 1.0, 0.0));
+            let (x0, x1) = (bulge.min(far), bulge.max(far));
+            let b = cuboid(DVec3::new(x0, -4.0, -5.0), DVec3::new(x1, 4.0, 0.0));
+            let off = m.0.len() as u32;
+            m.0.extend(b.0.iter().copied());
+            m.1.extend(b.1.iter().map(|t| t.map(|i| i + off)));
+            m
+        };
+        let a = bulged(-0.3, -8.0, -5.0);
+        let b = bulged(0.2, 8.0, 5.0);
+        let ta = Tooth {
+            fdi: f(41),
+            points: &a.0,
+            tris: &a.1,
+        };
+        let tb = Tooth {
+            fdi: f(42),
+            points: &b.0,
+            tris: &b.1,
+        };
+        let wide = |s: &[Solid]| s[0].0.iter().map(|p| p.y.abs()).fold(0.0, f64::max);
+        // the printed model: tangent to the bulges
+        assert!(wide(&fills(&[ta, tb], &[], 0.0)) > 3.9);
+        // under an aligner: within the crowns near the contact
+        let w = wide(&fills_whole(&[ta, tb], &[], 0.0));
+        assert!(w < 3.0, "{w}");
     }
 
     /// The fill under the shell of the smooth border stands `inset` inside
