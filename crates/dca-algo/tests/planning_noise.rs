@@ -118,8 +118,11 @@ use golden_case::Case;
 /// Noisy plans of the fixture that still jump (of 64; on the strict
 /// criterion 46 with the plugin's mirror search, 18 with its sample of the
 /// crowns in the collision check, 16 with the plugin's derotation, 15 with
-/// the plugin's delays).
-const JUMPS_NOW: usize = 14;
+/// the plugin's delays; 14 with the anterior scope). With every tooth
+/// aligned, the last teeth never distal and no therapy for the derotation
+/// of the posterior teeth: 27, the measured count the user accepted on
+/// 2026-11-28 as a known debt, as [`FAMILY_JUMPS_NOW`].
+const JUMPS_NOW: usize = 27;
 /// Seeds of each family of noise.
 const SEEDS: u64 = 32;
 /// Noisy plans of the six demo arches that still jump (of 384), with every
