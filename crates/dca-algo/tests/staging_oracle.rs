@@ -13,7 +13,14 @@
 //! section 5): poses within 0.01 mm and 0.05 degrees; the number of stages,
 //! the phases, the IPR timing and the calendar dates equal. The same plan
 //! comes out of the target poses as the case stores them (`Setup::poses`),
-//! whatever the sign of their quaternions.
+//! whatever the sign of their quaternions. The comparison keeps the plugin's
+//! sample of 2500 points per crown in the collision check, its delays
+//! against a neighbour that never moves and its delays that do not lower the
+//! worst overlap of the pair over the plan; what the port's own defaults,
+//! every crown point and neither kind of delay, change is stated in
+//! `every_crown_point_changes_the_demo_plans_as_stated`,
+//! `no_delay_against_a_still_neighbour_leaves_the_demo_plans_as_they_are` and
+//! `only_delays_that_lower_the_worst_overlap_leave_the_demo_plans_as_they_are`.
 
 use std::path::PathBuf;
 
@@ -133,16 +140,43 @@ fn load(case: &str) -> Case {
     }
 }
 
-fn plan_of(c: &Case) -> staging::Plan {
+/// Crown points the plugin's collision check keeps (`sample_points`).
+const PLUGIN_SAMPLE: usize = 2500;
+
+/// The staging parameters `p` with the plugin's sample of the crowns (2500
+/// points, every k-th of the list), its delays against a neighbour that
+/// never moves and its delays that do not lower the worst overlap of the
+/// pair over the plan: the plugin's plans are reproduced with them. The
+/// port's own defaults use every crown point
+/// ([`staging::Params::sample_points`]) and leave such collisions listed
+/// instead ([`staging::Params::delay_against_still`],
+/// [`staging::Params::delay_without_gain`]); what they change on the demo
+/// cases is stated in [`every_crown_point_changes_the_demo_plans_as_stated`],
+/// [`no_delay_against_a_still_neighbour_leaves_the_demo_plans_as_they_are`]
+/// and [`only_delays_that_lower_the_worst_overlap_leave_the_demo_plans_as_they_are`].
+fn plugin(p: Params) -> Params {
+    Params {
+        sample_points: Some(PLUGIN_SAMPLE),
+        delay_against_still: true,
+        delay_without_gain: true,
+        ..p
+    }
+}
+
+fn plan_with(c: &Case, p: &Params) -> staging::Plan {
     staging::run(
         &staging::Input {
             moves: &c.moves,
             ipr: &c.ipr,
             complexity: c.complexity,
         },
-        &Params::default(),
+        p,
     )
     .unwrap()
+}
+
+fn plan_of(c: &Case) -> staging::Plan {
+    plan_with(c, &plugin(Params::default()))
 }
 
 /// Largest pose difference between two movements: millimetres of the
@@ -202,7 +236,7 @@ fn stored_target_poses_of_either_quaternion_sign_give_the_plugins_aligners() {
                     ipr: &c.ipr,
                     complexity: c.complexity,
                 },
-                &Params::default(),
+                &plugin(Params::default()),
             )
             .unwrap();
             let n = want["n_stages"].as_u64().unwrap() as u32;
@@ -375,6 +409,150 @@ fn the_staging_matches_the_plugin_on_the_demo_cases() {
     }
 }
 
+/// What every crown point (the port's default, [`staging::Params::sample_points`]
+/// `None`, departure of 2026-11-23) changes on the demo cases against the
+/// plugin's plans, made with its sample of 2500 points per crown:
+/// * the same number of aligners, the same collisions left and the same
+///   poses of every aligner;
+/// * the IPR of a few contacts one or two aligners earlier or later (the
+///   aligner where the crowns first touch beyond the tolerance);
+/// * final overlaps up to 0.12 mm deeper (0.07 to 0.11 mm on the six
+///   cases): the sample missed the deepest points of the crowns.
+#[test]
+fn every_crown_point_changes_the_demo_plans_as_stated() {
+    for case in CASES {
+        let c = load(case);
+        let plan = plan_with(
+            &c,
+            &Params {
+                delay_against_still: true,
+                delay_without_gain: true,
+                ..Params::default()
+            },
+        );
+        let want = &c.plan;
+        let n = want["n_stages"].as_u64().unwrap() as u32;
+        assert_eq!(plan.n_stages, n, "{case}: number of aligners");
+        assert_eq!(
+            plan.unresolved.len(),
+            want["unresolved"].as_array().unwrap().len(),
+            "{case}: collisions left"
+        );
+        for (f, want_q) in want["q"].as_object().unwrap() {
+            let got = &plan.q[&fdi(f.parse().unwrap())];
+            for (k, (g, w)) in got.iter().zip(want_q.as_array().unwrap()).enumerate() {
+                let (mm, deg) = pose_error(g, &q6(w));
+                assert!(
+                    mm < TOL_MM && deg < TOL_DEG,
+                    "{case} {f} stage {k}: {mm} mm {deg} deg"
+                );
+            }
+        }
+        let want_ipr = want["ipr_stage"].as_array().unwrap();
+        assert_eq!(plan.ipr_stage.len(), want_ipr.len(), "{case}");
+        for (g, w) in plan.ipr_stage.iter().zip(want_ipr) {
+            assert_eq!(u64::from(g.a.get()), w[0].as_u64().unwrap(), "{case}");
+            assert_eq!(u64::from(g.b.get()), w[1].as_u64().unwrap(), "{case}");
+            assert!(
+                u64::from(g.stage).abs_diff(w[2].as_u64().unwrap()) <= 2,
+                "{case} IPR {}|{}: aligner {} (plugin {})",
+                g.a,
+                g.b,
+                g.stage,
+                w[2]
+            );
+        }
+        for (g, w) in plan
+            .final_overlap
+            .iter()
+            .zip(want["final_overlap"].as_array().unwrap())
+        {
+            assert!(
+                (g.mm - num(&w[2])).abs() < 0.12,
+                "{case} {}|{}: {} vs {}",
+                g.a,
+                g.b,
+                g.mm,
+                w[2]
+            );
+        }
+    }
+}
+
+/// What leaving a collision against a neighbour that never moves (the port's
+/// default, [`staging::Params::delay_against_still`] off, departure of
+/// 2026-11-23) changes on the demo cases against the plugin's plans: nothing.
+/// On the plugin's setups of these cases no tooth runs into a still
+/// neighbour, so the plugin delays none and the plans stay the same (on the
+/// port's own setups of the demo arches, as the commands chain them, it is
+/// what shortens `demo_lower_severe` from 30 to 18 aligners and
+/// `demo_upper_moderate` from 25 to 9, each still listing its collision).
+#[test]
+fn no_delay_against_a_still_neighbour_leaves_the_demo_plans_as_they_are() {
+    for case in CASES {
+        let c = load(case);
+        let want = plan_of(&c);
+        let plan = plan_with(
+            &c,
+            &Params {
+                sample_points: Some(PLUGIN_SAMPLE),
+                delay_without_gain: true,
+                ..Params::default()
+            },
+        );
+        assert_eq!(plan.n_stages, want.n_stages, "{case}: number of aligners");
+        assert_eq!(plan.q, want.q, "{case}: poses");
+        assert_eq!(plan.unresolved, want.unresolved, "{case}: collisions left");
+        assert_eq!(plan.log, want.log, "{case}: notes");
+    }
+}
+
+/// What keeping only the delays that lower the worst overlap of their pair
+/// over the whole plan (the port's default,
+/// [`staging::Params::delay_without_gain`] off, departure of 2026-11-23)
+/// changes on the demo cases against the plugin's plans: nothing. The one
+/// delay the plugin makes on its setups of these cases, 41 by 7 aligners in
+/// `demo_lower_mild`, lowers the worst overlap of 41 and its neighbour over
+/// the plan, so it stays. A delay that would only move a collision to a
+/// later aligner is not made and the collision is listed instead (the unit
+/// test `a_delay_that_only_moves_a_collision_later_is_not_kept`); on the
+/// port's own setups of the demo arches under segmentation noise it shortens
+/// plans that the plugin's delays stretched to 50-54 aligners to 23-36
+/// (measured 2026-11-23).
+#[test]
+fn only_delays_that_lower_the_worst_overlap_leave_the_demo_plans_as_they_are() {
+    for case in CASES {
+        let c = load(case);
+        let want = plan_of(&c);
+        let plan = plan_with(
+            &c,
+            &Params {
+                sample_points: Some(PLUGIN_SAMPLE),
+                delay_against_still: true,
+                ..Params::default()
+            },
+        );
+        assert_eq!(plan.n_stages, want.n_stages, "{case}: number of aligners");
+        assert_eq!(plan.q, want.q, "{case}: poses");
+        assert_eq!(plan.unresolved, want.unresolved, "{case}: collisions left");
+        assert_eq!(plan.log, want.log, "{case}: notes");
+        let delays: Vec<&String> = plan
+            .log
+            .iter()
+            .filter(|l| l.starts_with("Anti-collision delays"))
+            .collect();
+        if case == "demo_lower_mild" {
+            assert_eq!(
+                delays,
+                ["Anti-collision delays (aligners): 41: 7"],
+                "{case}"
+            );
+        } else {
+            assert!(delays.is_empty(), "{case}: {delays:?}");
+        }
+    }
+}
+
 /// The staging settings of the case with the scene settings of the oracle
 /// (`STAGING_PARAMS` of `golden/oracle/stages.py`, the plugin's names) and
 /// the pattern `pattern`.
@@ -466,7 +644,7 @@ fn non_default_settings_and_a_slowed_tooth_match_the_plugin() {
                     ipr: &c.ipr,
                     complexity: c.complexity,
                 },
-                &Params::from_settings(&settings.staging),
+                &plugin(Params::from_settings(&settings.staging)),
             )
             .unwrap();
             let (worst_mm, worst_deg) = assert_plan_matches(&label, &plan, &entry["plan"]);

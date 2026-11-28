@@ -135,11 +135,14 @@ fn check_against_oracle(name: &str) -> [f64; 3] {
         &unpack(&c.oracle["vertex_labels_transfer"]),
     )
     .unwrap();
-    let fin = label_agreement(&out.labels, &unpack(&c.oracle["vertex_labels"])).unwrap();
+    let oracle_final = unpack(&c.oracle["vertex_labels"]);
+    let fin = label_agreement(&out.labels, &oracle_final).unwrap();
     let gt = label_agreement(&out.labels, &c.truth).unwrap();
+    let (iou, worst) = worst_tooth_iou(&out.labels, &oracle_final, &c.seeds);
     println!(
         "{name}: vs oracle faces {:.4} transfer {:.4} final {:.4}; vs truth {:.4} \
-         (oracle {:.4}); {} CG iterations (oracle {}); {secs:.2} s",
+         (oracle {:.4}); worst tooth {worst} IoU {iou:.4}; {} CG iterations (oracle {}); \
+         {secs:.2} s",
         faces,
         transfer,
         fin,
@@ -150,7 +153,43 @@ fn check_against_oracle(name: &str) -> [f64; 3] {
         out.diagnostics.cg_iterations,
         c.oracle["diagnostics"]["cg_iterations"],
     );
+    // every seed gives its own tooth, none merged into a neighbour
+    assert_eq!(out.teeth, c.seeds.len(), "{name}: teeth found");
+    // per tooth, not only over the whole arch: a partial merge of a small
+    // tooth (1-2 % of the vertices) passes the 99 % of the arch
+    assert!(
+        iou >= TOOTH_IOU,
+        "{name}: tooth {worst} agrees with the oracle at IoU {iou:.4}"
+    );
     [faces, transfer, fin]
+}
+
+/// Lowest intersection over union allowed, per tooth, between our labels
+/// and the oracle's.
+const TOOTH_IOU: f64 = 0.9;
+
+/// The lowest intersection over union, over the teeth of `seeds`, of the
+/// vertices labelled with that tooth in `a` and in `b`, and its tooth.
+fn worst_tooth_iou(a: &[u16], b: &[u16], seeds: &[(Fdi, DVec3)]) -> (f64, u16) {
+    assert_eq!(a.len(), b.len());
+    seeds
+        .iter()
+        .map(|(f, _)| {
+            let l = u16::from(f.get());
+            let (mut inter, mut union) = (0usize, 0usize);
+            for (&x, &y) in a.iter().zip(b) {
+                inter += usize::from(x == l && y == l);
+                union += usize::from(x == l || y == l);
+            }
+            let iou = if union == 0 {
+                0.0
+            } else {
+                inter as f64 / union as f64
+            };
+            (iou, l)
+        })
+        .min_by(|x, y| x.0.total_cmp(&y.0))
+        .unwrap_or((1.0, 0))
 }
 
 fn assert_agrees(name: &str) {
@@ -161,6 +200,38 @@ fn assert_agrees(name: &str) {
     {
         assert!(x >= 0.99, "{name}: {what} agree with the oracle at {x:.4}");
     }
+}
+
+/// The per-tooth check catches what the whole-arch agreement lets through:
+/// half of the smallest tooth given to its neighbour.
+#[test]
+fn a_partial_merge_of_a_small_tooth_fails_the_per_tooth_check() {
+    let c = load("demo_lower_mild");
+    let oracle = unpack(&c.oracle["vertex_labels"]);
+    let (iou, _) = worst_tooth_iou(&oracle, &oracle, &c.seeds);
+    assert_eq!(iou, 1.0);
+    let count = |l: u16| oracle.iter().filter(|&&x| x == l).count();
+    let small = c
+        .seeds
+        .iter()
+        .map(|(f, _)| u16::from(f.get()))
+        .min_by_key(|&l| count(l))
+        .unwrap();
+    let other = c
+        .seeds
+        .iter()
+        .map(|(f, _)| u16::from(f.get()))
+        .find(|&l| l != small)
+        .unwrap();
+    let mut merged = oracle.clone();
+    let half = count(small) / 2;
+    for x in merged.iter_mut().filter(|x| **x == small).take(half) {
+        *x = other;
+    }
+    let whole = label_agreement(&merged, &oracle).unwrap();
+    assert!(whole >= 0.99, "the whole-arch check passes: {whole:.4}");
+    let (iou, worst) = worst_tooth_iou(&merged, &oracle, &c.seeds);
+    assert!(iou < TOOTH_IOU, "tooth {worst} IoU {iou:.4}");
 }
 
 #[test]
@@ -204,6 +275,7 @@ fn full_pipeline_agrees_with_the_ground_truth() {
             out.decimated_tris.len(),
             out.teeth
         );
+        assert_eq!(out.teeth, c.seeds.len(), "{name}: teeth found");
         assert!(gt >= oracle_gt - 0.005, "{name}: {gt:.4} vs truth");
         // deterministic: the same labels on a second run
         let again = segmentation::run(&input, &Params::default()).unwrap();

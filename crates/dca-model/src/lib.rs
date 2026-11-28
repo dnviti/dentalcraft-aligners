@@ -13,6 +13,7 @@
 mod aligner_view;
 mod bite;
 mod bite_report;
+mod bite_use;
 mod components;
 mod migrate;
 mod print;
@@ -30,6 +31,7 @@ pub use bite::{
 pub use bite_report::{
     BiteFit, BiteMethod, BiteRegistration, BiteReport, BiteScanFit, BiteVerdict,
 };
+pub use bite_use::{BiteUse, StoredBite, bite_use};
 pub use components::{ComponentEdits, TOOTH_SCALE_MAX, TOOTH_SCALE_MIN, ToothScale, tooth_centre};
 pub use migrate::{ModelError, migrate};
 pub use print::{
@@ -46,9 +48,9 @@ pub use settings::{
     StudyBaseSettings, StudyBaseStyle, TOOTH_SPEED, TrimMode, TrimParams, production_out_of_range,
 };
 pub use state::{
-    AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, Diagnosis, IprStep, Seed,
-    SegmentationRun, Setup, SetupSummary, Stage, StagingSummary, TeethBasis, TeethChange,
-    ToothFrame, ToothMeasures, other_arch_fdi, other_arch_label,
+    AlignersState, ArchDetails, ArchEdits, ArchSpace, CLEARED_IDS, CollisionLeft, Diagnosis,
+    IprStep, Seed, SegmentationRun, Setup, SetupSummary, Stage, StagingSummary, TeethBasis,
+    TeethChange, ToothFrame, ToothMeasures, other_arch_fdi, other_arch_label,
 };
 pub use visit::{Decision, ToothDeviation, ToothTracking, Visit};
 
@@ -57,5 +59,6 @@ pub const MODULE_ID: &str = "aligners";
 
 /// Newest schema version of [`AlignersState`] (written on save). Version 2
 /// added the print tracking ([`AlignersState::prints`]) and the last export
-/// folder ([`AlignersState::export_dir`]).
-pub const SCHEMA_VERSION: u32 = 2;
+/// folder ([`AlignersState::export_dir`]); version 3 gave effect to the
+/// recess between the teeth ([`TrimParams::recess_mm`], [`migrate`]).
+pub const SCHEMA_VERSION: u32 = 3;

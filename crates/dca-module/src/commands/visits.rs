@@ -53,7 +53,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::messages;
-use super::staging::{aligners_data, arch_name, complexity_of, md_sign, open_labelled_scan};
+use super::staging::{
+    aligners_data, arch_name, check_staging_settings, complexity_of, md_sign, open_labelled_scan,
+    staging_error,
+};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -97,7 +100,7 @@ pub(crate) struct Params {
     /// (default the evidence value, 2).
     angular_deg: Option<f64>,
     /// Velocity factor of the teeth that are behind, for the new aligners
-    /// (default the evidence value, 0.75).
+    /// (0.3-1, the plugin's slider; default the evidence value, 0.75).
     lag_speed: Option<f64>,
     /// Segment the scan with seeds on the achieved crowns (default true).
     segment: Option<bool>,
@@ -120,9 +123,18 @@ impl Params {
                 *target = v;
             }
         }
-        if p.lag_speed > 1.0 {
-            return Err(CommandError::Invalid(
-                "lag_speed is a factor between 0 and 1".to_owned(),
+        // the plugin's slider: a lower factor would stretch the new plan into
+        // hundreds of aligners
+        let (lo, hi) = visits::LAG_SPEED;
+        if !(lo - 1e-9..=hi + 1e-9).contains(&p.lag_speed) {
+            return Err(messages::invalid(
+                "aligners-err-staging-settings-range",
+                &[
+                    ("name", "lag_speed"),
+                    ("value", &p.lag_speed.to_string()),
+                    ("min", &lo.to_string()),
+                    ("max", &hi.to_string()),
+                ],
             ));
         }
         Ok(p)
@@ -765,6 +777,8 @@ fn run_replan(
             });
         }
     }
+    // the stored settings are checked like the ones of the automatic staging
+    check_staging_settings(&data.settings.staging)?;
     let mut sp = staging::Params::from_settings(&data.settings.staging);
     if let Some(p) = params.pattern {
         sp.pattern = p;
@@ -783,7 +797,7 @@ fn run_replan(
         &sp,
         &mut progress,
     )
-    .map_err(|_| CommandError::Cancelled)?;
+    .map_err(staging_error)?;
 
     // the delivered aligners of the arch, then the new series numbered from there
     let mut series: Vec<Stage> = (1..=from)
@@ -823,6 +837,7 @@ fn run_replan(
     merge_arch(&mut data.stages, arch, &series, &seq);
     // the result line of the automatic staging described the plan replaced here
     data.staging_results.remove(&arch.role());
+    data.staging_collisions.remove(&arch.role());
     let total = data.stages.len();
 
     let teeth_out: Map<String, Value> = plan
@@ -971,7 +986,33 @@ mod tests {
         assert!(bad(&s, json!({ "scan": "x.stl", "stage": 99 })));
         assert!(bad(&s, json!({ "scan": "x.stl", "arch": "upper" })));
         assert!(bad(&s, json!({ "scan": "x.stl", "lag_speed": 2.0 })));
+        // below the plugin's slider (0.3): a hundred times the aligners, or a hang
+        for lag in [0.29, 1e-6, 1e-300, -0.5, 0.0] {
+            assert!(
+                bad(&s, json!({ "scan": "x.stl", "lag_speed": lag })),
+                "{lag}"
+            );
+        }
         assert!(exec(ID, &s, json!({ "scan": "x.stl", "nope": 1 })).is_err());
+    }
+
+    #[test]
+    fn the_lag_speed_has_the_range_of_the_plugins_slider() {
+        let with = |lag: f64| {
+            Params {
+                lag_speed: Some(lag),
+                ..Params::default()
+            }
+            .visit_params()
+        };
+        assert_eq!(with(0.3).unwrap().lag_speed, 0.3);
+        assert_eq!(with(1.0).unwrap().lag_speed, 1.0);
+        for lag in [0.29, 1e-6, 1e-300, 1.01] {
+            let Err(CommandError::Invalid(msg)) = with(lag) else {
+                panic!("{lag} accepted");
+            };
+            assert!(msg.contains("lag_speed"), "{msg}");
+        }
     }
 
     #[test]

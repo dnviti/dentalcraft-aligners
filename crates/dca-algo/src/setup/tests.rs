@@ -72,10 +72,12 @@ struct Mal {
     shift: Vec<(u8, DVec3)>,
     rot: Vec<(u8, f64)>,
     widths: Vec<(u8, f64)>,
+    /// Space (mm) along the arch on the mesial side of a tooth.
+    gaps: Vec<(u8, f64)>,
 }
 
 /// `make_arch`: a regular synthetic lower arch with shifted, rotated or
-/// resized teeth.
+/// resized teeth, and spaces.
 fn make_arch(m: &Mal) -> Synth {
     let (p, s) = curve();
     let xs: Vec<f64> = p.iter().map(|q| q.x).collect();
@@ -91,6 +93,7 @@ fn make_arch(m: &Mal) -> Synth {
         for i in 1..8u8 {
             let f = quadrant * 10 + i;
             let w = get(&m.widths, f).unwrap_or(width_of(i));
+            acc += get(&m.gaps, f).unwrap_or(0.0);
             let sc = sign * (acc + w / 2.0);
             acc += w;
             let (x, y) = (interp(sc, &s, &xs), interp(sc, &s, &ys));
@@ -240,7 +243,7 @@ fn has(res: &SetupResult, pred: impl Fn(&Note) -> bool) -> bool {
 #[test]
 fn the_line_passes_through_the_cusps_of_a_regular_arch() {
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     for f in seq() {
         assert!(max_dist(&l, &a.cusps[&f]) < 0.12, "{f}");
     }
@@ -252,7 +255,7 @@ fn the_line_is_not_dragged_by_a_tooth_out_of_the_arch() {
         shift: vec![(32, DVec3::new(0.0, -1.5, 0.0))],
         ..Mal::default()
     });
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     let d = line_distance(&l, &a.cusps[&fdi(32)]);
     assert!(d.iter().sum::<f64>() / d.len() as f64 > 0.7);
 }
@@ -260,7 +263,7 @@ fn the_line_is_not_dragged_by_a_tooth_out_of_the_arch() {
 #[test]
 fn the_line_runs_from_the_first_to_the_last_tooth() {
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     let near = |f: u8, p: DVec3| {
         a.cusps[&fdi(f)]
             .iter()
@@ -296,6 +299,7 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
         &[1.0; 4],
         &[false, true, true, false],
         false,
+        None,
     );
     assert_eq!(ch.deficit, 0.0);
     assert_eq!((ch.u[1], ch.u[2]), (2.0, 1.5));
@@ -304,11 +308,48 @@ fn neighbouring_fixed_teeth_are_not_crowding() {
 #[test]
 fn stretches_between_fixed_teeth() {
     let fixed = [true, false, false, true];
-    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false);
+    let ch = solve_chain(&[0.0, 1.0, 0.5, 2.0], &[1.0; 4], &fixed, false, None);
     assert_eq!(ch.deficit, 0.0);
     assert_eq!(ch.u, vec![0.0, 0.75, 0.75, 2.0]);
-    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false);
+    let ch = solve_chain(&[2.0, 1.0, 1.0, 0.5], &[1.0; 4], &fixed, false, None);
     assert!((ch.deficit - 1.5).abs() < 1e-12);
+}
+
+#[test]
+fn the_last_tooth_of_a_side_never_goes_distally() {
+    // the chain needs 1 mm more than the room between its last teeth: the plugin pushes the
+    // last teeth distally, the port finds crowding (the space is made by the therapy)
+    let u0 = [1.0, 1.0, 0.0, 0.0];
+    let free = [false; 4];
+    let plugin = solve_chain(&u0, &[1.0; 4], &free, true, None);
+    assert_eq!(plugin.deficit, 0.0);
+    assert!(plugin.u[0] < u0[0] && plugin.u[3] > u0[3]);
+    let port = solve_chain(&u0, &[1.0; 4], &free, true, Some(0.0));
+    assert!((port.deficit - 1.0).abs() < 1e-12);
+    assert_eq!((port.segs[0].left, port.segs[0].right), (-1, 4));
+}
+
+#[test]
+fn the_teeth_behind_a_space_close_it_against_a_fixed_tooth() {
+    // a space of 1.5 mm before the fixed tooth 2: the plugin leaves it, the port brings the
+    // free teeth mesially against the fixed tooth, none of them distally
+    let u0 = [0.0, 0.5, 2.0];
+    let fixed = [false, false, true];
+    let plugin = solve_chain(&u0, &[1.0; 3], &fixed, true, None);
+    assert_eq!(plugin.u, vec![0.25, 0.25, 2.0]);
+    let port = solve_chain(&u0, &[1.0; 3], &fixed, true, Some(0.0));
+    assert_eq!(port.u, vec![2.0, 2.0, 2.0]);
+    assert_eq!((port.deficit, port.spacing), (0.0, 0.0));
+    // without a fixed tooth the chain closes where its weights say, the last teeth no further
+    // out than they were
+    let port = solve_chain(
+        &[0.0, 0.0, 1.0, 1.0],
+        &[1.0; 4],
+        &[false; 4],
+        true,
+        Some(0.0),
+    );
+    assert_eq!(port.u, vec![0.5; 4]);
 }
 
 // ---- conservative setup -------------------------------------------------------------------------------
@@ -358,7 +399,9 @@ fn molars_held_and_crowding_spread() {
         t.contact_m = c + t.e_md * t.width_md / 2.0;
         t.contact_d = c - t.e_md * t.width_md / 2.0;
     }
-    let res = setup(&a, &full(|_| {}));
+    // the plugin moves the midline into the space of the other side; by default each side
+    // makes its own room (`each_side_makes_its_own_room_and_the_midline_stays`)
+    let res = setup(&a, &full(|c| c.plugin_spaces = true));
     let mv = moved(&res, &a.cusps);
     for f in [47, 46, 36, 37] {
         assert_eq!(mv[&fdi(f)], 0.0, "{f}");
@@ -436,14 +479,51 @@ fn a_rotation_below_the_threshold_is_not_corrected() {
 }
 
 #[test]
-fn a_rotation_above_the_threshold_is_corrected() {
+fn a_rotation_above_the_threshold_is_corrected_by_the_excess() {
     let a = make_arch(&Mal {
         rot: vec![(42, 12.0)],
         ..Mal::default()
     });
+    // tolerance 5 degrees: the plugin turns 42 fully onto the line, the port 5 degrees less
+    let plugin = setup(
+        &a,
+        &full(|c| {
+            c.rot_tol_deg = 5.0;
+            c.plugin_derotation = true;
+        }),
+    );
+    let full_turn = angle(&plugin.targets[&fdi(42)]);
+    assert!(full_turn > 8.0 && full_turn < 13.0, "{full_turn}");
     let res = setup(&a, &full(|c| c.rot_tol_deg = 5.0));
     let ang = angle(&res.targets[&fdi(42)]);
-    assert!(ang > 8.0 && ang < 13.0, "{ang}");
+    assert!(
+        (full_turn - ang - 5.0).abs() < 0.1,
+        "{ang} against {full_turn}"
+    );
+}
+
+#[test]
+fn the_derotation_grows_from_nothing_beyond_the_tolerance() {
+    // tolerance 1 degree: the plugin turns a tooth fully onto the line, the port by the
+    // excess over the tolerance, and not at all under half a degree of excess
+    for rot in [1.2, 2.5, 4.0, 8.0] {
+        let a = make_arch(&Mal {
+            rot: vec![(42, rot)],
+            ..Mal::default()
+        });
+        let plugin = setup(&a, &full(|c| c.plugin_derotation = true));
+        let full_turn = plugin.targets.get(&fdi(42)).map_or(0.0, angle);
+        let res = setup(&a, &full(|_| {}));
+        let turn = res.targets.get(&fdi(42)).map_or(0.0, angle);
+        if full_turn - 1.0 < MIN_DEROTATION_DEG - 0.1 {
+            assert_eq!(turn, 0.0, "{rot}: {turn} against {full_turn}");
+        } else {
+            assert!(
+                (full_turn - turn - 1.0).abs() < 0.1,
+                "{rot}: {turn} against {full_turn}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -460,7 +540,7 @@ fn crowding_without_space_uses_ipr() {
 #[test]
 fn a_drawn_line_is_followed() {
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], false);
     let n = line_normals(&l, interior(&a.cusps, &seq()));
     let l2: Vec<DVec3> = l
         .iter()
@@ -497,13 +577,15 @@ fn a_small_offset_from_the_line_is_corrected() {
 }
 
 #[test]
-fn a_small_rotation_is_corrected() {
+fn a_small_rotation_is_corrected_by_the_excess() {
     let a = make_arch(&Mal {
         rot: vec![(44, 3.0)],
         ..Mal::default()
     });
+    // 3 degrees, tolerance 1: turned by 2
     let res = setup(&a, &full(|_| {}));
-    assert!(angle(&res.targets[&fdi(44)]) > 2.0);
+    let ang = angle(&res.targets[&fdi(44)]);
+    assert!((ang - 2.0).abs() < 0.3, "{ang}");
 }
 
 #[test]
@@ -555,7 +637,8 @@ fn severe_crowding_does_not_push_on_the_molars() {
 fn the_order_of_the_therapy() {
     let a = crowded(&[(42, 6.3), (41, 5.8), (31, 5.8), (32, 6.3)]);
     let ipr_first = setup(&a, &full(|_| {}));
-    assert!(ipr_first.ipr.values().sum::<f64>() > 1.0);
+    // 1.6 mm of crowding: the five anterior contacts at their cap (0.2 mm each)
+    assert!(ipr_first.ipr.values().sum::<f64>() >= 1.0 - 1e-9);
     assert_eq!(ipr_first.expansion, 0.0);
     let exp_first = setup(
         &a,
@@ -698,6 +781,224 @@ fn premolars_and_molars_stay() {
     let mv = moved(&premolars, &a.cusps);
     assert!(mv[&fdi(44)] > 0.5);
     assert_eq!(mv[&fdi(46)], 0.0);
+}
+
+// ---- the spaces of the arch (2026-11-24) -------------------------------------------------------------
+
+/// Gap along the arch of each contact (mm, negative: overlap) between the
+/// contact points that face each other, at rest (`None`) or moved by the
+/// targets of `res`.
+fn contact_gaps(a: &Synth, res: Option<&SetupResult>) -> Vec<(u8, u8, f64)> {
+    let mv = |f: Fdi, p: DVec3| {
+        res.and_then(|r| r.targets.get(&f))
+            .map_or(p, |d| d.transform_point3(p))
+    };
+    seq()
+        .windows(2)
+        .map(|w| {
+            let pt = |f: Fdi, g: Fdi| {
+                let t = &a.teeth[&f];
+                let p = match facing_surface(f, g) {
+                    Surface::Mesial => t.contact_m,
+                    _ => t.contact_d,
+                };
+                mv(f, p)
+            };
+            let (pa, pb) = (pt(w[0], w[1]), pt(w[1], w[0]));
+            let (ca, cb) = (
+                mv(w[0], mean(&a.cusps[&w[0]])),
+                mv(w[1], mean(&a.cusps[&w[1]])),
+            );
+            let u = (cb - ca).truncate().normalize();
+            (w[0].get(), w[1].get(), (pb - pa).truncate().dot(u))
+        })
+        .collect()
+}
+
+/// Movement of each tooth towards the midline along the arch (mm).
+fn mesial_moves(a: &Synth, res: &SetupResult) -> BTreeMap<u8, f64> {
+    seq()
+        .iter()
+        .map(|f| {
+            let c = mean(&a.cusps[f]);
+            let d = res.targets.get(f).map_or(c, |d| d.transform_point3(c)) - c;
+            (f.get(), d.truncate().dot(a.teeth[f].e_md.truncate()))
+        })
+        .collect()
+}
+
+/// The synthetic arch with spaces (`gaps`) and the teeth of `widths` wider
+/// or narrower where they are (overlapping their neighbours, or apart).
+fn spaced(gaps: &[(u8, f64)], widths: &[(u8, f64)]) -> Synth {
+    let mut a = make_arch(&Mal {
+        gaps: gaps.to_vec(),
+        ..Mal::default()
+    });
+    for &(f, w) in widths {
+        let c = mean(&a.cusps[&fdi(f)]);
+        let t = a.teeth.get_mut(&fdi(f)).unwrap();
+        t.width_md = w;
+        t.contact_m = c + t.e_md * w / 2.0;
+        t.contact_d = c - t.e_md * w / 2.0;
+    }
+    a
+}
+
+#[test]
+fn spaces_between_canines_and_premolars_close_with_the_posterior_teeth() {
+    // 1.2 mm between each canine and its first premolar, every other contact closed
+    let a = spaced(&[(34, 1.2), (44, 1.2)], &[]);
+    for (x, y, g) in contact_gaps(&a, None) {
+        let want = if [(44, 43), (33, 34)].contains(&(x, y)) {
+            1.2
+        } else {
+            0.0
+        };
+        assert!((g - want).abs() < 0.1, "at rest {x}-{y}: {g:.2} mm");
+    }
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    for (x, y, g) in contact_gaps(&a, Some(&res)) {
+        assert!(g.abs() < 0.2, "final {x}-{y}: {g:.2} mm");
+    }
+    // the premolars and the molars go mesially to close them (none distally), the space is
+    // not stripped
+    let along = mesial_moves(&a, &res);
+    for f in [44, 45, 46, 47, 34, 35, 36, 37] {
+        assert!(along[&f] > 0.8, "{f}: {:.2} mm", along[&f]);
+    }
+    assert!(along.values().all(|&d| d > -0.1), "{along:?}");
+    assert!(res.ipr.is_empty(), "{:?}", res.ipr);
+}
+
+#[test]
+fn no_ipr_while_the_arch_has_spaces() {
+    // the lower incisors 1.2 mm too wide together, 2 mm of space between the second premolars
+    // and the first molars: the space covers the crowding, no enamel is removed
+    let a = spaced(
+        &[(36, 1.0), (46, 1.0)],
+        &[(41, 5.7), (42, 6.2), (31, 5.7), (32, 6.2)],
+    );
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    assert!(res.ipr.is_empty(), "{:?}", res.ipr);
+    assert!(res.residual < 1e-6, "{}", res.residual);
+    for (x, y, g) in contact_gaps(&a, Some(&res)) {
+        assert!(g.abs() < 0.2, "final {x}-{y}: {g:.2} mm");
+    }
+}
+
+#[test]
+fn no_ipr_on_a_contact_open_at_rest() {
+    // 2.4 mm of crowding in the incisors and 0.5 mm of space between 33 and 34: IPR makes the
+    // rest, at the closed contacts only, and the space closes
+    let a = spaced(&[(34, 0.5)], &[(41, 6.0), (42, 6.5), (31, 6.0), (32, 6.5)]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    assert!(!res.ipr.is_empty());
+    assert!(!res.ipr.contains_key(&(fdi(33), fdi(34))), "{:?}", res.ipr);
+    let g = contact_gaps(&a, Some(&res));
+    let g34 = g.iter().find(|x| (x.0, x.1) == (33, 34)).unwrap().2;
+    assert!(g34.abs() < 0.2, "{g34:.2} mm");
+}
+
+#[test]
+fn a_crowded_arch_moves_no_tooth_distally_to_make_room() {
+    // 2.4 mm of crowding in the incisors, made by IPR: the last molars do not go distally to
+    // make room (the teeth between them and the incisors go into the space the IPR makes)
+    let a = spaced(&[], &[(41, 6.0), (42, 6.5), (31, 6.0), (32, 6.5)]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    let along = mesial_moves(&a, &res);
+    for f in [36, 37, 46, 47] {
+        assert!(along[&f] > -0.01, "{f}: {:.2} mm", along[&f]);
+    }
+    let total: f64 = res.ipr.values().sum();
+    assert!(total > 1.5, "{:?}", res.ipr);
+}
+
+#[test]
+fn the_last_tooth_goes_distally_at_most_the_setting() {
+    // 2.4 mm of crowding in the incisors: by default the last molars stay and the IPR makes
+    // the room; with 0.5 mm allowed they take up to 0.5 mm each, and the IPR is less
+    let a = spaced(&[], &[(41, 6.0), (42, 6.5), (31, 6.0), (32, 6.5)]);
+    let r0 = setup(&a, &Params::default().config(Arch::Lower));
+    let p5 = Params {
+        distal_max_mm: 0.5,
+        ..Params::default()
+    };
+    let r5 = setup(&a, &p5.config(Arch::Lower));
+    let (m0, m5) = (mesial_moves(&a, &r0), mesial_moves(&a, &r5));
+    for f in [37, 47] {
+        assert!(m0[&f] > -0.01, "{f}: {:.2} mm", m0[&f]);
+        assert!(m5[&f] > -0.51 && m5[&f] < -0.2, "{f}: {:.2} mm", m5[&f]);
+    }
+    let ipr = |r: &SetupResult| r.ipr.values().sum::<f64>();
+    assert!(ipr(&r5) < ipr(&r0) - 0.5, "{:?} {:?}", r5.ipr, r0.ipr);
+    assert!(r5.midline_shift.abs() < 0.1, "{}", r5.midline_shift);
+}
+
+#[test]
+fn no_enamel_is_removed_to_derotate_a_molar() {
+    // a first molar turned 20 degrees in an arch without spaces: turned back it is longer
+    // along the arch, and the last molar behind it never goes distally. Its derotation is
+    // given up as far as the arch needs; no IPR and no tooth pushed to make room for it
+    let mut a = make_arch(&Mal {
+        rot: vec![(46, 20.0)],
+        ..Mal::default()
+    });
+    // ... and 0.5 mm longer than the room it has
+    let c = mean(&a.cusps[&fdi(46)]);
+    let t = a.teeth.get_mut(&fdi(46)).unwrap();
+    t.width_md += 0.5;
+    t.contact_m = c + t.e_md * t.width_md / 2.0;
+    t.contact_d = c - t.e_md * t.width_md / 2.0;
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    assert!(res.ipr.is_empty(), "{:?}", res.ipr);
+    let along = mesial_moves(&a, &res);
+    for f in [41, 42, 43, 44, 45] {
+        assert!(along[&f].abs() < 0.1, "{f}: {:.2} mm", along[&f]);
+    }
+    assert!(res.midline_shift.abs() < 0.1, "{}", res.midline_shift);
+}
+
+#[test]
+fn the_midline_stays_where_it_is_when_a_space_closes() {
+    // 1.2 mm between 44 and 43 only: the posterior teeth of that side close it, the central
+    // incisors stay (the midline kept), the other side does not move
+    let a = spaced(&[(44, 1.2)], &[]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    let along = mesial_moves(&a, &res);
+    for f in [41, 31] {
+        assert!(along[&f].abs() < 0.1, "{f}: {:.2} mm", along[&f]);
+    }
+    for f in [44, 45, 46, 47] {
+        assert!(along[&f] > 0.9, "{f}: {:.2} mm", along[&f]);
+    }
+    assert!(res.midline_shift.abs() < 0.1, "{}", res.midline_shift);
+}
+
+#[test]
+fn each_side_makes_its_own_room_and_the_midline_stays() {
+    // 1 mm of space between 43 and 42, the left incisors 1.2 mm too wide together: the space
+    // of the right side is not given to the crowding of the left side by moving the midline
+    let a = spaced(&[(43, 1.0)], &[(31, 5.9), (32, 6.6)]);
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    let along = mesial_moves(&a, &res);
+    assert!(
+        res.midline_shift.abs() < 0.1,
+        "{} {along:?}",
+        res.midline_shift
+    );
+    // the central incisors open their own overlap symmetrically
+    assert!((along[&41] - along[&31]).abs() < 0.1, "{along:?}");
+    // the right side closes its space with its own teeth, the left side makes its own room
+    for f in [43, 44, 45, 46, 47] {
+        assert!(along[&f] > 0.6, "{f}: {:.2} mm", along[&f]);
+    }
+    let right = |x: Fdi| anatomy::is_right(x);
+    assert!(
+        res.ipr.keys().all(|&(x, y)| !right(x) && !right(y)),
+        "{:?}",
+        res.ipr
+    );
+    assert!(res.ipr.values().sum::<f64>() > 0.9, "{:?}", res.ipr);
 }
 
 #[test]
@@ -1060,7 +1361,7 @@ fn the_midline_can_go_to_the_centre() {
 }
 
 #[test]
-fn the_default_parameters_are_the_plugin_scene_settings() {
+fn the_default_parameters_are_the_plugin_scene_settings_but_the_scope_and_the_molars() {
     let p = Params::default();
     let lower = p.config(Arch::Lower);
     assert_eq!(lower.ipr_zone, IprZone::AnteriorPremolars);
@@ -1073,10 +1374,17 @@ fn the_default_parameters_are_the_plugin_scene_settings() {
         (upper.expansion_posterior, upper.expansion_canine),
         (2.0, 2.0)
     );
+    // every tooth aligned and no molar held (2026-11-24), the plugin's dataclass otherwise
+    assert_eq!(
+        (lower.align_scope, lower.fix_molars),
+        (AlignScope::All, false)
+    );
     let base = Config::default();
     assert_eq!(
         Config {
             ipr_zone: IprZone::Anterior,
+            align_scope: AlignScope::Anterior,
+            fix_molars: true,
             ..lower
         },
         base
@@ -1105,6 +1413,13 @@ fn scenarios() -> Vec<(&'static str, SetupResult)> {
                    crowns: Option<BTreeMap<Fdi, Vec<DVec3>>>,
                    poses: BTreeMap<Fdi, DMat4>| {
         let fixed: Vec<Fdi> = fixed.iter().map(|&n| fdi(n)).collect();
+        // the plugin derotates fully, and leaves the spaces as it does
+        let cfg = Config {
+            plugin_derotation: true,
+            plugin_line_scale: true,
+            plugin_spaces: true,
+            ..cfg
+        };
         let r = conservative_setup(
             &a.teeth,
             &seq(),
@@ -1151,7 +1466,7 @@ fn scenarios() -> Vec<(&'static str, SetupResult)> {
         BTreeMap::from([(fdi(42), DMat4::IDENTITY)]),
     );
     let a = regular();
-    let l = cusp_line(&a.cusps, &seq(), 5.0, &[]);
+    let l = cusp_line(&a.cusps, &seq(), 5.0, &[], true);
     let n = line_normals(&l, interior(&a.cusps, &seq()));
     let l2: Vec<DVec3> = l
         .iter()

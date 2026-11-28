@@ -309,15 +309,21 @@ fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> [f64; 3] {
 
 /// The arch line `(n, 3)` through the real cusps `cusps` in the order `seq`,
 /// from the first to the last tooth, extended straight by 4 mm at the ends.
-/// Robust weights per tooth (biweight of the mean residual of its cusps,
-/// scale 6 x the median residual, at least 0.6 mm): a tooth out of the arch
-/// does not drag the line. `anchors`: reference teeth (locked by the
-/// clinician) that weigh 10 and are never down-weighted.
+/// Robust weights per tooth (biweight of the mean residual of its cusps, a
+/// continuous weight that reaches its floor at the scale): a tooth out of
+/// the arch does not drag the line. The scale is taken once, from the first
+/// line: 6 x the median residual of the canines and premolars (their single
+/// cusps hold when the segmentation moves; every tooth when fewer than two),
+/// at least 0.6 mm; with `plugin_scale` it is the plugin's, 6 x the median
+/// residual of every tooth taken again at every round, which moves the whole
+/// line when one residual crosses the median. `anchors`: reference teeth
+/// (locked by the clinician) that weigh 10 and are never down-weighted.
 pub fn cusp_line(
     cusps: &BTreeMap<Fdi, Vec<DVec3>>,
     seq: &[Fdi],
     sigma: f64,
     anchors: &[Fdi],
+    plugin_scale: bool,
 ) -> Vec<DVec3> {
     let (p, lab) = order_points(cusps, seq);
     if p.len() < 3 {
@@ -337,6 +343,7 @@ pub fn cusp_line(
     let mut teeth: Vec<Fdi> = lab.clone();
     teeth.sort();
     teeth.dedup();
+    let mut first_scale = None;
     for _ in 0..ROBUST {
         let r = offsets_3d(&l, &p);
         let rt: Vec<f64> = teeth
@@ -351,7 +358,20 @@ pub fn cusp_line(
                 v.iter().sum::<f64>() / v.len() as f64
             })
             .collect();
-        let scale = (6.0 * median(&rt)).max(MIN_SCALE);
+        let scale = if plugin_scale {
+            (6.0 * median(&rt)).max(MIN_SCALE)
+        } else {
+            *first_scale.get_or_insert_with(|| {
+                let stable: Vec<f64> = teeth
+                    .iter()
+                    .zip(&rt)
+                    .filter(|(f, _)| (3..=5).contains(&crate::anatomy::index(**f)))
+                    .map(|(_, x)| *x)
+                    .collect();
+                let base = if stable.len() >= 2 { &stable } else { &rt };
+                (6.0 * median(base)).max(MIN_SCALE)
+            })
+        };
         let wt: Vec<f64> = rt
             .iter()
             .map(|&x| {
@@ -450,7 +470,17 @@ pub struct Chain {
 /// teeth held. With `pack` the free teeth of a stretch stay together (one
 /// `u` for the whole stretch: the weighted mean, within the fixed teeth;
 /// the spaces close).
-pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool) -> Chain {
+///
+/// The two open ends of the chain (before the first fixed tooth, after the
+/// last one) are free with `ends` `None`, as in the plugin: there the last
+/// tooth of each side can go distally as far as the chain needs. With
+/// `Some(slack)` the last tooth of each side goes distally at most `slack`
+/// (its `u` stays on the mesial side of its `u0 - slack`; none with 0) but
+/// goes mesially as far as needed: a chain longer than that room is
+/// crowding (a [`Crowded`] stretch with `left` `-1` or `right` `n`), and
+/// with `pack` a stretch between an open end and a fixed tooth closes
+/// against the fixed tooth, so no space is left at the end of the arch.
+pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool, ends: Option<f64>) -> Chain {
     let n = u0.len();
     let mut u = u0.to_vec();
     let mut bounds: Vec<i64> = vec![-1];
@@ -459,17 +489,28 @@ pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool) -> Chain {
     let (mut total, mut segs, mut spacing) = (0.0, Vec::new(), 0.0);
     for ab in bounds.windows(2) {
         let (a, b) = (ab[0], ab[1]);
+        let idx: Vec<usize> = ((a + 1)..b).map(|i| i as usize).collect();
+        // an open end bounded by the last tooth of its side, which goes distally at most by the
+        // slack
+        let (lo_end, hi_end) = (
+            a < 0 && ends.is_some() && !idx.is_empty(),
+            b >= n as i64 && ends.is_some() && !idx.is_empty(),
+        );
+        let slack = ends.unwrap_or(0.0);
         let lo = if a >= 0 {
             u0[a as usize]
+        } else if lo_end {
+            u0[idx[0]] - slack
         } else {
             f64::NEG_INFINITY
         };
         let hi = if b < n as i64 {
             u0[b as usize]
+        } else if hi_end {
+            u0[idx[idx.len() - 1]] + slack
         } else {
             f64::INFINITY
         };
-        let idx: Vec<usize> = ((a + 1)..b).map(|i| i as usize).collect();
         // two fixed teeth side by side (no free tooth between them) do not move: their overlap
         // at rest is not crowding to resolve
         let deficit = if lo.is_finite() && hi.is_finite() && !idx.is_empty() {
@@ -498,11 +539,16 @@ pub fn solve_chain(u0: &[f64], w: &[f64], fixed: &[bool], pack: bool) -> Chain {
         } else if pack {
             let num: f64 = y.iter().zip(&ww).map(|(a, b)| a * b).sum();
             let den: f64 = ww.iter().sum();
-            let m = clip(num / den, lo, hi);
+            // against the fixed tooth when the other end is the end of the arch
+            let m = match (lo_end, hi_end) {
+                (true, false) if hi.is_finite() => hi,
+                (false, true) if lo.is_finite() => lo,
+                _ => clip(num / den, lo, hi),
+            };
             for &i in &idx {
                 u[i] = m;
             }
-            if lo.is_finite() && hi.is_finite() {
+            if a >= 0 && b < n as i64 {
                 spacing += hi - lo;
             }
         } else {

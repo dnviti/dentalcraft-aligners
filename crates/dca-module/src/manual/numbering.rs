@@ -128,7 +128,8 @@ pub(crate) fn run_renumber(
         relabelled = new.iter().zip(&l.labels).filter(|(a, b)| a != b).count();
         store_labels(&mut next, &mut data, &mut stale, arch, &l.closed, new);
     }
-    // seeds: the two exchange their numbers
+    // seeds: the two exchange their numbers; what the automatic numbering
+    // doubted on the seeds of the arch goes with them (corrected by hand)
     for seed in &mut data.seeds {
         if seed.fdi == src {
             seed.fdi = dst;
@@ -136,6 +137,7 @@ pub(crate) fn run_renumber(
             seed.fdi = src;
         }
     }
+    data.forget_numbering_doubts(arch.role());
     if !swap {
         data.missing.remove(&dst); // the number is taken: the tooth is there
     }
@@ -213,6 +215,9 @@ pub(crate) fn run_missing(
     let seeds = data.seeds.len();
     data.seeds.retain(|s| s.fdi != f);
     let seed_removed = data.seeds.len() != seeds;
+    // the teeth of the arch are numbered by hand: what the automatic
+    // numbering doubted on them goes
+    data.forget_numbering_doubts(arch.role());
     // labels to gingiva
     let mut relabelled = 0;
     if data.labels.contains_key(&arch.role()) && state.case.scan(arch.role()).is_some() {

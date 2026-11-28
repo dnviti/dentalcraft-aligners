@@ -6,12 +6,28 @@
 //! (a mesh blob in `labels`). A scan of the same arch already in the case is
 //! replaced; the other arch is kept. The world frame is reset: it belonged to
 //! the previous scans.
+//!
+//! A demo arch never fills in the arch a patient's case lacks: the command
+//! refuses a case that holds, besides the scan it replaces, a scan it did
+//! not make (with one arch there is no bite to make up an arch for:
+//! [`dca_model::bite_use`]).
 
 use dc_case::{CaseState, ModuleState, Scan};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::{CommandOutput, CommandSpec};
 use dca_model::{AlignersState, MODULE_ID};
 use serde_json::json;
+
+use super::messages;
+
+/// How the id of every scan the demo makes starts (the rest is the arch and
+/// the seed).
+const DEMO_ID: &str = "de300000-0000-4000-8000-";
+
+/// `scan` was made by the demo.
+fn is_demo(scan: &Scan) -> bool {
+    scan.id.to_string().starts_with(DEMO_ID)
+}
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -30,6 +46,17 @@ fn run_demo(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    // a synthetic arch goes only next to synthetic scans: never into the
+    // case of a patient, whose missing arch it would make up
+    let role = params.arch.role();
+    if state
+        .case
+        .scans
+        .iter()
+        .any(|s| s.role != role && !is_demo(s))
+    {
+        return Err(messages::invalid("aligners-err-demo-patient-case", &[]));
+    }
     // the data of the module as it is, or new ones; unknown data is not overwritten
     let mut data = match state.module(MODULE_ID) {
         None => AlignersState::default(),
@@ -40,7 +67,7 @@ fn run_demo(
     };
     let demo = dca_algo::demo::run(&params);
     ctx.check_cancelled()?;
-    let role = demo.arch.role();
+    debug_assert_eq!(demo.arch.role(), role);
 
     let mut next = state.clone();
     // blobs of the scan and labels this one replaces
@@ -62,7 +89,7 @@ fn run_demo(
     // deterministic id: the same parameters always give the same case content
     let id = (u64::from(params.arch.is_upper()) | (params.seed << 1)) & 0xffff_ffff_ffff;
     let scan: Scan = serde_json::from_value(json!({
-        "id": format!("de300000-0000-4000-8000-{id:012x}"),
+        "id": format!("{DEMO_ID}{id:012x}"),
         "role": role,
         "source_name": format!(
             "demo-{}-{:?}-seed{}",
@@ -213,6 +240,29 @@ mod tests {
             again.case.scan(ScanRole::Lower),
             both.case.scan(ScanRole::Lower)
         );
+    }
+
+    #[test]
+    fn a_demo_arch_never_fills_in_the_arch_of_a_patient() {
+        // the upper arch of a patient (a scan the demo did not make)
+        let (mut patient, _) = run(&CaseState::default(), json!({ "arch": "upper" })).unwrap();
+        patient.case.scans[0].id = "11111111-2222-4333-8444-555555555555".parse().unwrap();
+        let err = run(&patient, json!({ "arch": "lower" })).unwrap_err();
+        let want = messages::tr("aligners-err-demo-patient-case", &[]);
+        assert!(
+            matches!(&err, CommandError::Invalid(m) if *m == want),
+            "{err}"
+        );
+        // nor next to the bite scan of a patient
+        let (mut bite, _) = run(&CaseState::default(), json!({ "arch": "lower" })).unwrap();
+        let mut scan = bite.case.scans[0].clone();
+        scan.role = ScanRole::Bite;
+        scan.id = "11111111-2222-4333-8444-555555555556".parse().unwrap();
+        bite.case.scans.push(scan);
+        assert!(run(&bite, json!({ "arch": "upper" })).is_err());
+        // in place of the scan it replaces, it makes a demo case
+        let (demo, _) = run(&patient, json!({ "arch": "upper", "seed": 3 })).unwrap();
+        assert!(demo.case.scans.iter().all(is_demo));
     }
 
     #[test]

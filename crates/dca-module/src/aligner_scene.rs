@@ -251,6 +251,14 @@ fn moved(c: &Moving<'_>, base: &AlignerBase, k: u32, mesh: &Arc<TriMesh>) -> Mov
     Moved::Mesh(TriMesh::new(av::deform(&binding, &rel), mesh.tris.clone()))
 }
 
+/// `e` is an aligner entry of this module's scene.
+pub(crate) fn is_aligner(e: &SceneEntry) -> bool {
+    matches!(
+        &e.item,
+        SceneItem::Mesh { coloring: MeshColoring::Uniform(c), pickable: false, .. } if *c == ALIGNER_COLOR
+    )
+}
+
 /// The aligner of every arch at stage `stage` (`None`: the initial
 /// position) while the case shows it; the flag is `false` when an arch is
 /// left out until its binding is ready (only without `wait`).

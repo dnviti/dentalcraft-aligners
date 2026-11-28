@@ -137,6 +137,8 @@ pub(crate) struct SettingsPatch {
     ipr_surface_cap_mm: Option<f64>,
     /// Largest fraction of the enamel removed (0.1-0.5).
     enamel_fraction: Option<f64>,
+    /// Largest distal movement of the last tooth of each side (0-0.5 mm).
+    distal_max_mm: Option<f64>,
     /// Vertical levelling (`smooth`, `flat`, `none`).
     leveling: Option<SetupLeveling>,
     /// Largest vertical correction (0-3 mm).
@@ -195,6 +197,7 @@ fn check(params: &setup::Params) -> Result<Vec<Fdi>, CommandError> {
         params.retract_max_mm,
         params.ipr_surface_cap_mm,
         params.enamel_fraction,
+        params.distal_max_mm,
     ];
     if numbers.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return Err(invalid(
@@ -203,6 +206,9 @@ fn check(params: &setup::Params) -> Result<Vec<Fdi>, CommandError> {
     }
     if params.line_sigma_mm <= 0.0 || params.incisor_weight <= 0.0 {
         return Err(invalid("line_sigma_mm and incisor_weight must be positive"));
+    }
+    if params.distal_max_mm > 0.5 {
+        return Err(invalid("distal_max_mm goes from 0 to 0.5 mm"));
     }
     if !params.line.is_empty() {
         if params.arch == Which::All {
@@ -553,6 +559,7 @@ fn run_settings(
         ipr_zone,
         ipr_surface_cap_mm,
         enamel_fraction,
+        distal_max_mm,
         leveling,
         vertical_max_mm,
         level_tol_mm,
@@ -693,10 +700,16 @@ mod tests {
             .map(|v| fdi(v.as_u64().unwrap() as u8))
             .collect();
         assert!(!moved.is_empty());
-        // only incisors and canines are aligned by default
-        for f in &moved {
-            assert!(dca_algo::anatomy::index(*f) <= 3, "{f}");
-        }
+        // every tooth is aligned by default (2026-11-24): the scope note says so
+        assert!(
+            report["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["kind"] == "scope" && n["scope"] == "all"),
+            "{}",
+            report["notes"]
+        );
         let posed: Vec<Fdi> = d.setup.poses.keys().copied().collect();
         assert_eq!(posed, moved);
         for (f, p) in &d.setup.poses {
@@ -741,7 +754,9 @@ mod tests {
         let (pa, pb) = (data(&a).setup.poses, data(&b).setup.poses);
         assert_eq!(pa.keys().collect::<Vec<_>>(), pb.keys().collect::<Vec<_>>());
         for (f, p) in &pa {
-            assert!(p.approx_eq(&pb[f], 1e-9, 1e-9), "{f}");
+            // the angle between two quaternions is an arc cosine, which turns the 1e-16 of a
+            // norm not exactly 1 into 1e-8 rad: the same pose is within 1e-7 rad
+            assert!(p.approx_eq(&pb[f], 1e-9, 1e-7), "{f}: {p:?} {:?}", pb[f]);
         }
     }
 
@@ -1020,6 +1035,7 @@ mod tests {
         for bad in [
             json!({ "advance_max_mm": 4.5 }),
             json!({ "enamel_fraction": 0.05 }),
+            json!({ "distal_max_mm": 0.6 }),
             json!({ "line_sigma_mm": 0.5 }),
             json!({ "adjust_step_deg": 0.0 }),
             json!({ "ipr_zone": "everywhere" }),
@@ -1048,24 +1064,27 @@ mod tests {
         let state = demo(&CaseState::default(), "lower", "moderate");
         let (plain, _) = run(&state, Value::Null).unwrap();
         assert!(!data(&plain).setup.ipr.is_empty(), "the demo needs IPR");
-        // stored: no IPR anywhere, all the teeth aligned
+        // stored: no IPR anywhere, the incisors and canines only
         let (set, _) = exec(
             SETUP_SETTINGS,
             &state,
-            json!({ "ipr_zone": "none", "align_scope": "all" }),
+            json!({ "ipr_zone": "none", "align_scope": "anterior" }),
         )
         .unwrap();
         let (stored, out) = run(&set, Value::Null).unwrap();
         assert!(data(&stored).setup.ipr.is_empty());
         // the same as giving them to the command
-        let (given, out_given) =
-            run(&state, json!({ "ipr_zone": "none", "align_scope": "all" })).unwrap();
+        let (given, out_given) = run(
+            &state,
+            json!({ "ipr_zone": "none", "align_scope": "anterior" }),
+        )
+        .unwrap();
         assert_eq!(data(&given).setup.poses, data(&stored).setup.poses);
         assert_eq!(out["lower"]["moved"], out_given["lower"]["moved"]);
-        // a parameter given wins over the stored one
+        // a parameter given wins over the stored one (here the defaults back)
         let (over, _) = run(
             &set,
-            json!({ "ipr_zone": "anterior_premolars", "align_scope": "anterior" }),
+            json!({ "ipr_zone": "anterior_premolars", "align_scope": "all" }),
         )
         .unwrap();
         assert_eq!(data(&over).setup.poses, data(&plain).setup.poses);
@@ -1073,6 +1092,33 @@ mod tests {
         // not an object: refused
         assert!(matches!(
             run(&state, json!([1])),
+            Err(CommandError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn the_last_teeth_go_distally_only_as_far_as_the_setting_allows() {
+        let state = demo(&CaseState::default(), "lower", "moderate");
+        let total = |s: &CaseState| data(s).setup.ipr.iter().map(|x| x.amount_mm).sum::<f64>();
+        // by default no tooth goes distally to make room: the crowding takes IPR
+        let (none, _) = run(&state, Value::Null).unwrap();
+        assert!(total(&none) > 0.0, "the demo needs IPR");
+        // up to 0.5 mm at the last tooth of each side: less IPR
+        let (some, _) = run(&state, json!({ "distal_max_mm": 0.5 })).unwrap();
+        assert!(
+            total(&some) < total(&none),
+            "{} {}",
+            total(&some),
+            total(&none)
+        );
+        // stored, the same
+        let (set, _) = exec(SETUP_SETTINGS, &state, json!({ "distal_max_mm": 0.5 })).unwrap();
+        assert_eq!(data(&set).settings.setup.distal_max_mm, 0.5);
+        let (stored, _) = run(&set, Value::Null).unwrap();
+        assert_eq!(data(&stored).setup.ipr, data(&some).setup.ipr);
+        // beyond 0.5 mm: refused
+        assert!(matches!(
+            run(&state, json!({ "distal_max_mm": 0.6 })),
             Err(CommandError::Invalid(_))
         ));
     }

@@ -624,6 +624,81 @@ fn marking_missing_drops_the_movements_of_the_tooth() {
 
 // ---- seeds ----------------------------------------------------------------------------------------------------
 
+/// The check of a region is worded in the module from its typed issues:
+/// the errors first, otherwise the size of the region and its warnings.
+#[test]
+fn the_region_check_is_worded_from_its_typed_issues() {
+    use dca_algo::manual::{RegionIssue, RegionReport};
+    let low = RegionReport {
+        errors: vec![RegionIssue::TooLow { height_mm: 0.4 }],
+        ..Default::default()
+    };
+    let m = super::region::region_message(&low, fdi(36));
+    assert!(
+        m.starts_with("Tooth 36: ") && m.contains("gingiva") && m.contains("0.4"),
+        "{m}"
+    );
+    let split = RegionReport {
+        vertices: 120,
+        area_mm2: 95.0,
+        width_mm: 11.0,
+        warnings: vec![RegionIssue::Split {
+            parts: 2,
+            share_pct: 80.0,
+        }],
+        ..Default::default()
+    };
+    let m = super::region::region_message(&split, fdi(36));
+    assert!(m.starts_with("Tooth 36: 120 vertices"), "{m}");
+    assert!(
+        m.contains("Warning") && m.contains("2 parts") && m.contains("80%"),
+        "{m}"
+    );
+}
+
+/// A deciduous tooth number is refused with its own message, never dropped
+/// into a neighbour or the gum (deciduous teeth are not supported).
+#[test]
+fn deciduous_tooth_numbers_are_refused_by_name() {
+    let state = demo();
+    for op in [
+        json!({ "op": "add", "fdi": 75, "position": [0.0, 0.0, 0.0] }),
+        json!({ "op": "move", "fdi": 85, "position": [0.0, 0.0, 0.0] }),
+    ] {
+        let msg = invalid(exec(SEEDS, &state, op));
+        assert!(msg.contains("75") || msg.contains("85"), "{msg}");
+        assert!(msg.contains("deciduous"), "{msg}");
+    }
+    // a number that is no tooth keeps its own message
+    let r = exec(SEEDS, &state, json!({ "op": "delete", "fdi": 99 }));
+    let msg = invalid(r);
+    assert!(msg.contains("99") && !msg.contains("deciduous"), "{msg}");
+}
+
+/// A mark put within half a tooth of another is accepted with a warning
+/// naming both teeth; a mark on its own tooth gives none.
+#[test]
+fn a_mark_on_top_of_another_is_warned_about() {
+    let state = demo();
+    let near = seed(&state, 35) + DVec3::new(0.5, 0.0, 0.0);
+    let (_, out) = ok(
+        SEEDS,
+        &state,
+        json!({ "op": "move", "fdi": 36, "position": near.to_array() }),
+    );
+    let warnings = out["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{out}");
+    let w = warnings[0].as_str().unwrap();
+    assert!(w.contains("36") && w.contains("35"), "{w}");
+    let own = seed(&state, 36);
+    let (_, out) = ok(
+        SEEDS,
+        &state,
+        json!({ "op": "move", "fdi": 36, "position": own.to_array() }),
+    );
+    assert_eq!(out["warnings"], json!([]), "{out}");
+}
+
 #[test]
 fn seeds_are_refused_on_a_scan_whose_arch_is_a_guess() {
     let mut state = demo();

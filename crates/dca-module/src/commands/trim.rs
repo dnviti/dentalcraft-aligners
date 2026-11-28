@@ -67,6 +67,9 @@ pub(crate) struct TrimLineParams {
     margin_gap_mm: Option<f64>,
     /// Smooth: height of the scallops (mm).
     scallop_mm: Option<f64>,
+    /// Smooth: least height of the border above the gingival margin, so
+    /// round every papilla (mm, 0 to 3; 0: the plugin's border).
+    papilla_relief_mm: Option<f64>,
     /// Equator: border beyond the equator, towards the gingiva (mm).
     equator_offset_mm: Option<f64>,
     /// Straight, scalloped: extension below the gingival margin (mm).
@@ -79,6 +82,9 @@ pub(crate) struct TrimLineParams {
     thickness_mm: Option<f64>,
     /// Internal clearance (mm).
     clearance_mm: Option<f64>,
+    /// Space between the shell and the gingiva it covers, the papillae too
+    /// (mm, 0 to 1; default the case setting).
+    gum_clearance_mm: Option<f64>,
     /// Detail of the shell (mm).
     voxel_mm: f64,
     /// Crevices narrower than twice this are filled before the shell (mm;
@@ -94,12 +100,14 @@ impl Default for TrimLineParams {
             mode: None,
             margin_gap_mm: None,
             scallop_mm: None,
+            papilla_relief_mm: None,
             equator_offset_mm: None,
             extension_mm: None,
             round_mm: None,
             insertion_axis: None,
             thickness_mm: None,
             clearance_mm: None,
+            gum_clearance_mm: None,
             voxel_mm: 0.1,
             blockout_mm: None,
         }
@@ -131,6 +139,7 @@ pub(crate) fn case_trim_params(t: &dca_model::TrimParams) -> trim::Params {
         mode: mode_of(t.mode),
         margin_gap_mm: t.margin_gap_mm,
         scallop_mm: t.scallop_mm,
+        papilla_relief_mm: t.papilla_relief_mm,
         equator_offset_mm: t.equator_offset_mm,
         extension_mm: t.extension_mm,
         round_mm: None,
@@ -150,6 +159,7 @@ fn run_trim_line(
         mode: params.mode.unwrap_or(case.mode),
         margin_gap_mm: params.margin_gap_mm.unwrap_or(case.margin_gap_mm),
         scallop_mm: params.scallop_mm.unwrap_or(case.scallop_mm),
+        papilla_relief_mm: params.papilla_relief_mm.unwrap_or(case.papilla_relief_mm),
         equator_offset_mm: params.equator_offset_mm.unwrap_or(case.equator_offset_mm),
         extension_mm: params.extension_mm.unwrap_or(case.extension_mm),
         round_mm: params.round_mm,
@@ -159,14 +169,19 @@ fn run_trim_line(
         .thickness_mm
         .unwrap_or(data.settings.shell_thickness_mm);
     let clearance = params.clearance_mm.unwrap_or(data.settings.clearance_mm);
+    let gum = params
+        .gum_clearance_mm
+        .unwrap_or(data.settings.gum_clearance_mm);
     let ok = |v: f64, lo: f64, hi: f64| v.is_finite() && (lo..=hi).contains(&v);
     if !ok(wall, 0.3, 2.0)
         || !ok(clearance, 0.0, 0.3)
+        || !ok(gum, 0.0, 1.0)
         || !ok(params.voxel_mm, 0.04, 0.5)
         || params.blockout_mm.is_some_and(|b| !ok(b, 0.0, 1.0))
     {
         return Err(CommandError::Invalid(
-            "thickness_mm 0.3..2, clearance_mm 0..0.3, voxel_mm 0.04..0.5 and blockout_mm 0..1"
+            "thickness_mm 0.3..2, clearance_mm 0..0.3, gum_clearance_mm 0..1, voxel_mm \
+             0.04..0.5 and blockout_mm 0..1"
                 .to_owned(),
         ));
     }
@@ -281,6 +296,10 @@ fn trim_arch(
         } else {
             dca_algo::shell::BLOCKOUT_MM
         });
+    // over the gingiva the shell stands the space asked for farther out
+    let gum = params
+        .gum_clearance_mm
+        .unwrap_or(data.settings.gum_clearance_mm);
     let shell_of = |extra: &[dc_mesh::TriMesh]| {
         let mut m = arch_mesh.clone();
         for e in extra {
@@ -288,7 +307,14 @@ fn trim_arch(
             m.positions.extend_from_slice(&e.positions);
             m.tris.extend(e.tris.iter().map(|t| t.map(|v| v + off)));
         }
-        model::untrimmed_shell(&m, params.voxel_mm, blockout, clearance, wall)
+        model::untrimmed_shell(
+            &m,
+            params.voxel_mm,
+            blockout,
+            clearance,
+            wall,
+            Some((&parts.gingiva, gum)),
+        )
     };
     let shell = shell_of(&[]).map_err(|e| CommandError::Failed(format!("{name} arch: {e}")))?;
     ctx.check_cancelled()?;
@@ -306,6 +332,9 @@ fn trim_arch(
         thickness_mm: wall,
         cut: None,
         rebuild: Some(trim::Rebuild(&rebuild)),
+        // the shell of the trim line is laid on the scan, without the
+        // interproximal block-out of the print files
+        blocked_out: false,
     };
     let done = trim::run(&input, tp).map_err(|e| match e {
         trim::TrimError::Invalid(m) => CommandError::Invalid(format!("{name} arch: {m}")),
@@ -345,6 +374,7 @@ fn trim_arch(
         "mode": done.mode,
         "fallback": done.fallback,
         "round_mm": done.round_mm,
+        "papilla_relief_mm": done.papilla_relief_mm,
         "vertices": aligner.vertex_count(),
         "faces": aligner.face_count(),
         "watertight": check.is_watertight(),

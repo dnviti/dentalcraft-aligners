@@ -40,7 +40,11 @@
 //!   the teeth left out (3 nearest), the reach of the aligner from that
 //!   tooth only [`smooth::SMOOTH_END_NEAR_MM`] past its wall. With fewer than
 //!   two covered teeth with a margin it falls back to Scalloped, as the
-//!   plugin does, and [`Output::fallback`] says so.
+//!   plugin does, and [`Output::fallback`] says so. Round every papilla the
+//!   border is raised to `papilla_relief_mm` above the margin, in a rounded
+//!   notch under the contact of the two crowns ([`smooth::papilla_lift`];
+//!   not in the plugin, whose border comes down onto the tip of the papilla:
+//!   `0` gives it back).
 //!
 //! Rim: the shell is opened by the rim radius (the rounded rim of
 //! `_sdf_group`); when that opens a hole through a thin web of the wall the
@@ -50,6 +54,15 @@
 //! still left is plugged where it is when it is small, or opened to the
 //! border by a slot of the trim surface and the shell built again
 //! ([`holes`]: `_open_holes`, `_plug_holes`, `_window_cuts`).
+//!
+//! STRAIGHT, SCALLOPED, SMOOTH: the trim surface is held under the flat
+//! walls of the shell it would run along inside ([`flat`]): where a crown's
+//! label stops short of its gingival margin the border taken from it runs
+//! over the top of the crown, and the surface sliced the occlusal wall into
+//! a lace of holes. Every stretch where it lies inside a flat wall along the
+//! wall is held two voxels under it (the cap kept whole, cut across where
+//! the surface comes back up), and so is a window it would open through the
+//! wall; a stretch across a wall, the rim, is left as it is.
 //!
 //! One piece ([`bars`], `_weak_pairs`, `_bar`): two consecutive caps (arch
 //! order, a missing tooth skipped) in different pieces of the meshed shell,
@@ -79,11 +92,14 @@
 //! past the end of the line of the arch (the plugin skips them) and the reach
 //! from its crown is [`smooth::SMOOTH_END_NEAR_MM`], not `SMOOTH_NEAR_MM`
 //! ([`smooth_near`]): on a scan with a flange behind the last molar the
-//! plugin's rules cut a notch into its cap and leave ragged tongues.
+//! plugin's rules cut a notch into its cap and leave ragged tongues. The
+//! plugin lets a margin border run inside a flat wall and plugs or opens the
+//! holes left ([`flat`] keeps the cap instead).
 
 pub mod bars;
 pub mod checks;
 pub mod cutter;
+pub mod flat;
 pub mod grid;
 pub mod holes;
 pub mod line;
@@ -191,6 +207,11 @@ pub struct Params {
     pub margin_gap_mm: f64,
     /// SMOOTH: height of the scallops (mm).
     pub scallop_mm: f64,
+    /// SMOOTH: the edge stays at least this far above the gingival margin
+    /// all along the arch, so round every papilla it passes in a rounded
+    /// notch, never within 0.5 mm of the contact of the two crowns (mm; `0`:
+    /// the plugin's border, which comes down onto the tip of the papilla).
+    pub papilla_relief_mm: f64,
     /// EQUATOR: border beyond the equator, towards the gingiva (mm; negative
     /// towards the occlusal surface).
     pub equator_offset_mm: f64,
@@ -210,6 +231,7 @@ impl Default for Params {
             mode: Mode::Smooth,
             margin_gap_mm: 1.5,
             scallop_mm: 1.5,
+            papilla_relief_mm: smooth::PAPILLA_RELIEF_MM,
             equator_offset_mm: evidence::param_f64("trim_equator_offset").unwrap_or(0.0),
             extension_mm: evidence::param_f64("trim_extension").unwrap_or(2.0),
             round_mm: None,
@@ -223,13 +245,15 @@ impl Params {
         let ok = |v: f64, lo: f64, hi: f64| v.is_finite() && (lo..=hi).contains(&v);
         if !ok(self.margin_gap_mm, -2.0, 5.0)
             || !ok(self.scallop_mm, 0.0, 4.0)
+            || !ok(self.papilla_relief_mm, 0.0, 3.0)
             || !ok(self.equator_offset_mm, -2.0, 1.5)
             || !ok(self.extension_mm, 0.0, 4.0)
             || self.round_mm.is_some_and(|r| !ok(r, 0.0, 1.0))
         {
             return Err(TrimError::Invalid(format!(
                 "parameters out of range (margin_gap_mm -2..5, scallop_mm 0..4, \
-                 equator_offset_mm -2..1.5, extension_mm 0..4, round_mm 0..1): {self:?}"
+                 papilla_relief_mm 0..3, equator_offset_mm -2..1.5, extension_mm 0..4, \
+                 round_mm 0..1): {self:?}"
             )));
         }
         Ok(())
@@ -288,6 +312,11 @@ pub struct Input<'a> {
     /// space between two caps, arch coordinates: [`bars`]). `None`: no bar can
     /// be added, and caps left in pieces apart are an error.
     pub rebuild: Option<Rebuild<'a>>,
+    /// The shell stands on the interproximal block-out under the contacts of
+    /// the crowns that touch ([`crate::shell::model_parts_inset`]): the SMOOTH
+    /// border is not raised round the papillae under them
+    /// ([`smooth::PAPILLA_BLOCKED_MM`]). `false`: a shell without it.
+    pub blocked_out: bool,
 }
 
 /// The builder of [`Input::rebuild`]: the shell field of the model with the
@@ -353,6 +382,10 @@ pub struct Output {
     /// EQUATOR: the checks of the border built (labial cover, offsets
     /// reached; [`checks::checks`]).
     pub checks: Option<checks::Checks>,
+    /// SMOOTH: the least height of the border above the margin round the
+    /// papillae it was built with (mm; under [`Params::papilla_relief_mm`]
+    /// when that left a hole through the wall or a cap apart: [`run`]).
+    pub papilla_relief_mm: f64,
 }
 
 impl Output {
@@ -670,8 +703,31 @@ fn smooth_points(
         .filter_map(|f| Some((f, input.teeth.iter().find(|t| t.fdi == f)?.margin.clone())))
         .collect();
     let gap = params.margin_gap_mm;
-    let (mut c, high) =
-        smooth::smooth_border(&marg, &crowns, &covered, outer, gap, params.scallop_mm)?;
+    // under the block-out the border stands at the equator of every tooth
+    // (the height of contour along the vertical), `equator_offset_mm` beyond it
+    let loops: BTreeMap<Fdi, line::ToothLoop> = if input.blocked_out {
+        input
+            .teeth
+            .iter()
+            .filter(|t| t.covered)
+            .filter_map(|t| Some((t.fdi, line::tooth_equator(t, line::EQUATOR_AZIMUTHS)?)))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let (mut c, high) = smooth::smooth_border_at(
+        &marg,
+        &crowns,
+        &covered,
+        outer,
+        gap,
+        params.scallop_mm,
+        params.papilla_relief_mm,
+        input.blocked_out,
+        input
+            .blocked_out
+            .then_some((&loops, params.equator_offset_mm)),
+    )?;
     line::border_floor(&mut c, input.scan_border, (-gap).max(0.0) + 0.5);
     let mut ctrl = c.clone();
     ctrl.extend(high);
@@ -913,10 +969,22 @@ fn near_with_strips(
     Ok(near)
 }
 
+/// The relief round the papillae tried in turn when the border raised round
+/// them leaves a hole through the wall or a cap apart, as shares of
+/// [`Params::papilla_relief_mm`] ([`run`]).
+pub const PAPILLA_RETRY_SHARES: [f64; 2] = [0.5, 0.0];
+
 /// Trims the shell of one aligner: the trim line of the mode, the trim
 /// surface, the cut of the shell along it with a rounded rim, in one piece
 /// (two caps in pieces apart, or joined too thinly, are joined by a bar over
 /// the space between them and the shell built again: [`bars`]).
+///
+/// SMOOTH: where the border raised round the papillae
+/// ([`Params::papilla_relief_mm`]) still leaves a hole through the wall or
+/// a cap on another piece (the notch thins the wall that joins two caps
+/// beside their contact), the shell is trimmed again with the relief of
+/// [`PAPILLA_RETRY_SHARES`] in turn, and the result with the fewest holes is
+/// kept ([`Output::papilla_relief_mm`] says which).
 ///
 /// # Errors
 /// [`TrimError::Invalid`] for parameters out of range, a shell grid not on
@@ -924,8 +992,57 @@ fn near_with_strips(
 /// [`TrimError::Geom`] when a distance field operation fails or the shell
 /// cannot be built again with the bars; [`TrimError::Split`] when the cap of
 /// a covered tooth is left on another piece than the aligner kept.
-#[allow(clippy::too_many_lines)]
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
+    let first = trim_once(input, params);
+    let relief = params.papilla_relief_mm;
+    let failed = |r: &Result<Output, TrimError>| match r {
+        Ok(o) => o.genus > 0,
+        Err(e) => matches!(e, TrimError::Split(_)),
+    };
+    let smooth = match &first {
+        Ok(o) => o.mode == Mode::Smooth,
+        Err(_) => params.mode == Mode::Smooth,
+    };
+    if relief <= 0.0 || !smooth || !failed(&first) {
+        return first;
+    }
+    // a border the relief did not raise anywhere: the hole is not its own
+    if let Ok(o) = &first {
+        let plain = Params {
+            papilla_relief_mm: 0.0,
+            ..params.clone()
+        };
+        let outer = input.clearance_mm + input.thickness_mm;
+        let line = smooth_points(input, &plain, outer).map(|(_, line)| line);
+        if o.lines.first().map(|l| &l.points) == line.as_ref() {
+            return first;
+        }
+    }
+    let mut best = first;
+    for share in PAPILLA_RETRY_SHARES {
+        let p = Params {
+            papilla_relief_mm: share * relief,
+            ..params.clone()
+        };
+        let next = trim_once(input, &p);
+        let better = match (&best, &next) {
+            (Err(_), Ok(_)) => true,
+            (Ok(b), Ok(n)) => n.genus < b.genus,
+            _ => false,
+        };
+        if better {
+            best = next;
+        }
+        if !failed(&best) {
+            break;
+        }
+    }
+    best
+}
+
+/// [`run`] with the relief round the papillae of `params` only.
+#[allow(clippy::too_many_lines)]
+fn trim_once(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     params.check()?;
     let (cl, wall) = (input.clearance_mm, input.thickness_mm);
     if !(cl.is_finite() && cl >= 0.0 && wall.is_finite() && wall > 0.0) {
@@ -1057,7 +1174,16 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
     let voxel = f64::from(input.shell.voxel_size);
     let r =
         rim_round(wall, params.round_mm).min(((wall - RIM_MIN_WALL_VOXELS * voxel) / 2.0).max(0.0));
+    // a border from the margins: held under the flat walls it would slice
+    // ([`flat`]; the EQUATOR field keeps the caps itself)
+    let floor = lo.z - outer - 1.0;
+    let flat_walls = |z: &mut Vec<f64>, shell: &SdfGrid| {
+        if eq.is_none() {
+            flat::under_flat_walls(&grid, z, shell, wall, z_top, floor);
+        }
+    };
     let mut z = surface(&[]);
+    flat_walls(&mut z, input.shell);
     let near = if mode == Mode::Smooth {
         let end = near_r - smooth::SMOOTH_NEAR_MM + smooth::SMOOTH_END_NEAR_MM;
         smooth_near(input, &smooth_order(input), near_r, end, input.shell)?
@@ -1118,6 +1244,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
                 ));
             }
             z = surface(&made);
+            flat_walls(&mut z, &shell);
             b = Build {
                 shell: Cow::Owned(shell),
                 near: near_with_strips(b.near, &made, near_r, input.shell)?,
@@ -1256,6 +1383,11 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, TrimError> {
         bars: made,
         weak: joins.weak,
         checks,
+        papilla_relief_mm: if mode == Mode::Smooth {
+            params.papilla_relief_mm
+        } else {
+            0.0
+        },
     })
 }
 

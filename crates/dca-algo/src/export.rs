@@ -354,16 +354,47 @@ fn io_err(path: &Path, e: impl std::fmt::Display) -> ExportError {
     }
 }
 
-/// Writes a file atomically: to `<name>.tmp`, then renamed.
+/// Writes a file atomically: to `<name>.tmp`, synced to the disk, then
+/// renamed, and the folder synced (best effort), so a power loss never
+/// leaves a short file under the final name.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ExportError> {
+    use std::io::Write as _;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).map_err(|e| io_err(&tmp, e))?;
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    };
+    write().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        io_err(&tmp, e)
+    })?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         io_err(path, e)
-    })
+    })?;
+    // the rename itself (best effort: a folder cannot be synced everywhere)
+    let _ = sync_dir(path);
+    Ok(())
+}
+
+/// Syncs the folder of `path` (its entries: a rename into it).
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Windows and the rest: the folder cannot be opened as a file; NTFS logs
+/// the rename in its journal.
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn stl_bytes(mesh: &TriMesh) -> Result<Vec<u8>, ExportError> {
@@ -719,6 +750,24 @@ mod tests {
         let d = std::env::temp_dir().join(format!("dca-export-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temporary() {
+        let dir = temp_dir("atomic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.stl");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second, longer").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second, longer");
+        assert!(!dir.join("a.stl.tmp").exists());
+        // a folder that does not exist: an error naming the temporary file
+        let missing = dir.join("no/such.stl");
+        assert!(matches!(
+            write_atomic(&missing, b"x"),
+            Err(ExportError::Io { path, .. }) if path.ends_with("such.stl.tmp")
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

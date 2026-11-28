@@ -272,7 +272,8 @@ fn check_setup(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, DMat4> {
         .iter()
         .map(|(f, t)| (*f, ToothInput::from(t)))
         .collect();
-    let out = setup::run(
+    // with the plugin's derotation (the port derotates only the excess over the tolerance)
+    let out = setup::run_with(
         &setup::Input {
             arch: s.arch,
             vertices: &s.vertices,
@@ -283,7 +284,16 @@ fn check_setup(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, DMat4> {
             fixed: &[],
             poses: &BTreeMap::new(),
         },
-        &setup::Params::default(),
+        // the plugin's derotation, line scale, spaces and default scope (the incisors and
+        // canines, the molars held)
+        &setup::Config {
+            plugin_derotation: true,
+            plugin_line_scale: true,
+            plugin_spaces: true,
+            align_scope: setup::AlignScope::Anterior,
+            fix_molars: true,
+            ..setup::Params::default().config(s.arch)
+        },
     )
     .unwrap_or_else(|e| panic!("scan {}: setup: {e}", s.letter));
     let res = &out.result;
@@ -421,7 +431,15 @@ fn plan(s: &Scan, moves: &[ToothMove]) -> staging::Plan {
             ipr: &ipr,
             complexity,
         },
-        &Params::default(),
+        // the plugin's sample of the crowns and its delays against a still neighbour or
+        // without gain (the port's defaults use every point and list such a collision
+        // instead)
+        &Params {
+            sample_points: Some(2500),
+            delay_against_still: true,
+            delay_without_gain: true,
+            ..Params::default()
+        },
     )
     .unwrap()
 }

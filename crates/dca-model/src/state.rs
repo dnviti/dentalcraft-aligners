@@ -339,6 +339,27 @@ pub struct StagingSummary {
     pub overcorrection: bool,
 }
 
+/// A collision between neighbouring crowns that no anti-collision delay of
+/// the last automatic staging of an arch could solve (the plugin's
+/// `plan["unresolved"]`, which its report lists). It goes with the aligners
+/// of the arch, like [`StagingSummary`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CollisionLeft {
+    /// Aligner where the crowns collide (1 is the first).
+    pub stage: u32,
+    /// First tooth of the contact.
+    pub a: Fdi,
+    /// Second tooth of the contact.
+    pub b: Fdi,
+    /// Interpenetration of the two crowns (mm).
+    pub penetration_mm: f64,
+    /// The interpenetration the plan allows the contact (mm), which
+    /// `penetration_mm` exceeds: the overlap of the crowns at rest plus the
+    /// tolerance and the IPR of the contact, or the overlap in the final
+    /// position plus the tolerance, the larger.
+    pub allowed_mm: f64,
+}
+
 /// What one automatic separation of an arch gave.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SegmentationRun {
@@ -380,6 +401,12 @@ pub struct AlignersState {
     /// arch.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub staging_results: BTreeMap<ScanRole, StagingSummary>,
+    /// The collisions between neighbouring crowns that the last automatic
+    /// staging of each arch left, the list behind
+    /// [`StagingSummary::collisions_left`]. It goes with the aligners of the
+    /// arch.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub staging_collisions: BTreeMap<ScanRole, Vec<CollisionLeft>>,
     /// The teeth slowed by hand in the staging and their relative speed
     /// ([`crate::TOOTH_SPEED`], below 1; the plugin's `speed_json`, set by
     /// `oa.tooth_speed`): their limits per aligner are multiplied by it.
@@ -424,12 +451,27 @@ pub struct AlignersState {
     /// What the check of the separated teeth
     /// (`aligners.preparation.segmentation.check`) left implausible in each
     /// arch, in words (its problems, then its notes): the plugin's
-    /// `segmentation_doubts`. The export and the report warn about them
-    /// (the aligners must not be delivered without checking the tooth marks
-    /// and their numbers). They go when the arch is separated again, its
-    /// colours are corrected by hand, its teeth are rebuilt by hand, or what
-    /// depends on its labels is cleared.
+    /// `segmentation_doubts`, after what the automatic numbering left in
+    /// doubt on the teeth ([`AlignersState::numbering_doubts`]). The export
+    /// and the report warn about them (the aligners must not be delivered
+    /// without checking the tooth marks and their numbers). They go when the
+    /// arch is separated again, its colours are corrected by hand, its teeth
+    /// are rebuilt by hand, or what depends on its labels is cleared.
     pub segmentation_doubts: BTreeMap<ScanRole, Vec<String>>,
+    /// What the automatic tooth finding
+    /// (`aligners.preparation.numbering.automatic`) left in doubt on the
+    /// teeth it found in each arch, in words: an end tooth that may be the
+    /// base of a model, an end of the arch on such a base left out, a
+    /// stretch with no crown counted as a space, a low stretch left as
+    /// found. They describe the seeds the numbering proposed: they go when
+    /// the arch is numbered again, its seeds or their numbers are changed
+    /// by hand ([`AlignersState::forget_numbering_doubts`]) or it is
+    /// cleared; the automatic corrections of the check keep them. The
+    /// separation and the check of the separated teeth put them first in
+    /// [`AlignersState::segmentation_doubts`], so the export, the report and
+    /// the whole run warn about them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub numbering_doubts: BTreeMap<ScanRole, Vec<String>>,
     /// The last automatic separation of each arch
     /// (`aligners.preparation.segmentation.automatic`): how many teeth it
     /// gave and how long it took, for the line the inspector shows. It goes
@@ -701,8 +743,10 @@ impl AlignersState {
         if self.study_models.remove(&role).is_some() {
             cleared.push("study_models");
         }
-        // a correction of the scan that was replaced
+        // a correction of the scan that was replaced, and what the numbering
+        // doubted on its teeth
         self.occlusal_flipped.remove(&role);
+        self.numbering_doubts.remove(&role);
         cleared
     }
 
@@ -1083,6 +1127,7 @@ impl AlignersState {
     /// empty go.
     fn drop_stages_of(&mut self, role: ScanRole) -> bool {
         let summary = self.staging_results.remove(&role).is_some();
+        self.staging_collisions.remove(&role);
         let mut held = false;
         for s in &mut self.stages {
             let n = s.ipr.len();
@@ -1123,10 +1168,45 @@ impl AlignersState {
     /// empty when the seeds did not change.
     pub fn edit_arch_seeds(&mut self, role: ScanRole, seeds: &[Seed]) -> Vec<&'static str> {
         if self.set_arch_seeds(role, seeds) {
+            // the seeds are no longer those the numbering doubted
+            self.forget_numbering_doubts(role);
             self.seed_dependents(role)
         } else {
             Vec::new()
         }
+    }
+
+    /// Forgets what the automatic numbering doubted on the seeds of the arch
+    /// `role` ([`AlignersState::numbering_doubts`]), and its copies among
+    /// the doubts of the arch ([`AlignersState::segmentation_doubts`]): the
+    /// seeds or their numbers were corrected by hand, or numbered again.
+    pub fn forget_numbering_doubts(&mut self, role: ScanRole) {
+        let Some(gone) = self.numbering_doubts.remove(&role) else {
+            return;
+        };
+        if let Some(d) = self.segmentation_doubts.get_mut(&role) {
+            d.retain(|x| !gone.contains(x));
+            if d.is_empty() {
+                self.segmentation_doubts.remove(&role);
+            }
+        }
+    }
+
+    /// What the automatic numbering of the arch `role` doubted on the seeds
+    /// it found, in place of what it doubted before (and of its copies);
+    /// while the arch keeps its separation (the same seeds) they come first
+    /// among its doubts too ([`AlignersState::segmentation_doubts`]).
+    pub fn set_numbering_doubts(&mut self, role: ScanRole, doubts: Vec<String>) {
+        self.forget_numbering_doubts(role);
+        if doubts.is_empty() {
+            return;
+        }
+        if self.labels.contains_key(&role) {
+            let d = self.segmentation_doubts.entry(role).or_default();
+            d.retain(|x| !doubts.contains(x));
+            d.splice(0..0, doubts.iter().cloned());
+        }
+        self.numbering_doubts.insert(role, doubts);
     }
 
     /// The ids of the groups [`AlignersState::clear_seed_dependents`] would
@@ -1187,6 +1267,11 @@ impl dc_case::ModuleData for AlignersState {
     }
     fn to_json(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::to_value(self)
+    }
+    /// Every serialized number is checked: saving refuses a NaN or an
+    /// infinity instead of writing it as `null`.
+    fn find_non_finite(&self) -> Option<String> {
+        dc_case::find_non_finite(self)
     }
     /// The label, closed crown, gingiva, control-visit scan, study model and
     /// view aligner blobs are the blob references in the state (the other
@@ -1310,6 +1395,23 @@ mod tests {
         });
         st.stages.push(stage);
         st
+    }
+
+    #[test]
+    fn a_nan_in_the_data_is_reported_before_saving() {
+        use dc_case::ModuleData;
+        let mut st = sample();
+        assert_eq!(st.find_non_finite(), None);
+        st.stages[0].poses.insert(
+            Fdi::new(21).unwrap(),
+            Pose::from_translation(DVec3::new(f64::NAN, 0.0, 0.0)),
+        );
+        let path = st.find_non_finite().expect("a NaN pose is found");
+        assert!(path.contains("stages"), "{path}");
+        let mut st = sample();
+        st.tooth_speed.insert(Fdi::new(11).unwrap(), f64::INFINITY);
+        let path = st.find_non_finite().expect("an infinite speed is found");
+        assert!(path.contains("tooth_speed"), "{path}");
     }
 
     #[test]
@@ -1443,6 +1545,59 @@ mod tests {
         json.as_object_mut().unwrap().remove("segmentation_doubts");
         let back: AlignersState = serde_json::from_value(json).unwrap();
         assert!(back.segmentation_doubts.is_empty());
+    }
+
+    /// The doubts of the numbering go with the seeds they describe: an
+    /// edit by hand (with their copies among the doubts of the arch, the
+    /// doubts of the check stay) or a cleared arch; a case saved without
+    /// them (or by an older version) loads with none, and none are written
+    /// when empty.
+    #[test]
+    fn the_doubts_of_the_numbering_go_with_its_seeds() {
+        let mut st = sample();
+        let json = serde_json::to_value(&st).unwrap();
+        assert!(json.get("numbering_doubts").is_none());
+        let back: AlignersState = serde_json::from_value(json).unwrap();
+        assert!(back.numbering_doubts.is_empty());
+        for role in [ScanRole::Upper, ScanRole::Lower] {
+            st.numbering_doubts
+                .insert(role, vec!["no crown".to_owned()]);
+        }
+        let back: AlignersState =
+            serde_json::from_value(serde_json::to_value(&st).unwrap()).unwrap();
+        assert_eq!(back.numbering_doubts, st.numbering_doubts);
+        // the same seeds again keep them
+        let upper: Vec<Seed> = st
+            .seeds
+            .iter()
+            .filter(|s| in_arch(s.fdi, ScanRole::Upper))
+            .copied()
+            .collect();
+        st.edit_arch_seeds(ScanRole::Upper, &upper);
+        assert!(st.numbering_doubts.contains_key(&ScanRole::Upper));
+        // the automatic corrections keep them, a hand edit does not, nor
+        // their copy among the doubts of the arch (the check's stay)
+        st.replace_arch_seeds(ScanRole::Upper, &upper[1..]);
+        assert!(st.numbering_doubts.contains_key(&ScanRole::Upper));
+        st.segmentation_doubts.insert(
+            ScanRole::Upper,
+            vec!["no crown".to_owned(), "12 is narrow".to_owned()],
+        );
+        st.edit_arch_seeds(ScanRole::Upper, &upper);
+        assert!(!st.numbering_doubts.contains_key(&ScanRole::Upper));
+        assert_eq!(
+            st.segmentation_doubts[&ScanRole::Upper],
+            vec!["12 is narrow".to_owned()]
+        );
+        // with nothing else the arch has no doubts left
+        st.numbering_doubts
+            .insert(ScanRole::Upper, vec!["no crown".to_owned()]);
+        st.segmentation_doubts
+            .insert(ScanRole::Upper, vec!["no crown".to_owned()]);
+        st.forget_numbering_doubts(ScanRole::Upper);
+        assert!(!st.segmentation_doubts.contains_key(&ScanRole::Upper));
+        st.clear_arch(ScanRole::Lower);
+        assert!(st.numbering_doubts.is_empty());
     }
 
     #[test]

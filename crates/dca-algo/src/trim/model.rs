@@ -189,10 +189,12 @@ pub fn parts(
 
 /// The untrimmed shell field of a closed model: the closing by `blockout`
 /// of its field (crevices narrower than twice it filled, cavities filled),
-/// then the material between the offsets at `clearance` and `clearance +
-/// thickness` (`max(S - outer, inner - S)`). A stand-in for the field of
-/// the shell stage, with the same operations, for a model that is already
-/// one closed solid (or a union of closed parts).
+/// with the region within `gum.1` of the gingiva `gum.0` added
+/// ([`crate::shell::gum_relieved`]: the shell stands that far off the
+/// gingiva), then the material between the offsets at `clearance` and
+/// `clearance + thickness` (`max(S - outer, inner - S)`). A stand-in for the
+/// field of the shell stage, with the same operations, for a model that is
+/// already one closed solid (or a union of closed parts).
 ///
 /// # Errors
 /// [`TrimError::Geom`] when a distance field operation fails.
@@ -202,6 +204,7 @@ pub fn untrimmed_shell(
     blockout: f64,
     clearance: f64,
     thickness: f64,
+    gum: Option<(&TriMesh, f64)>,
 ) -> Result<SdfGrid, TrimError> {
     let band = ((blockout / voxel).ceil() + 3.0) * voxel;
     let mut closed = SdfGrid::from_mesh(
@@ -216,6 +219,11 @@ pub fn untrimmed_shell(
         closed.close(blockout as f32).map_err(geom)?;
     }
     closed.fill_interior().map_err(geom)?;
+    if let Some((gum, gap)) = gum
+        && let Some(relieved) = crate::shell::gum_relieved(&closed, gum, gap).map_err(geom)?
+    {
+        closed = relieved;
+    }
     let mut shell = closed.clone();
     shell.offset((clearance + thickness) as f32).map_err(geom)?;
     if clearance > 0.0 {

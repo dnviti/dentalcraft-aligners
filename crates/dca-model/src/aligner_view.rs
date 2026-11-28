@@ -19,14 +19,17 @@ use crate::AlignersState;
 /// What the aligners of the view are built from, as a key: the data of the
 /// module but what never changes an aligner (the calendar and the staging
 /// settings, the clinical review, the case analysis, the visits, the reports
-/// of the steps, the study models and the view itself), and the scans of the
-/// case. Another key: the aligners built before are out of date.
+/// of the steps, the study models and the view itself; with one arch, what
+/// the case stores of a bite, which no aligner of it uses:
+/// [`crate::bite_use`]), and the scans of the case. Another key: the aligners
+/// built before are out of date.
 pub fn view_key(state: &CaseState, data: &AlignersState) -> String {
     let mut d = data.clone();
     d.aligner_view = AlignerView::default();
     d.diagnosis = Default::default();
     d.setup = Default::default();
     d.staging_results.clear();
+    d.staging_collisions.clear();
     d.tooth_speed.clear();
     d.visits.clear();
     d.bite_report = None;
@@ -35,6 +38,17 @@ pub fn view_key(state: &CaseState, data: &AlignersState) -> String {
     d.teeth_basis.clear();
     d.review.clear();
     d.study_models.clear();
+    let has = |role| state.case.scan(role).is_some();
+    if crate::bite_use(
+        has(ScanRole::Upper),
+        has(ScanRole::Lower),
+        crate::StoredBite::of(data),
+    )
+    .one_arch()
+    {
+        d.aligner_bite = Default::default();
+        d.bite_registered = false;
+    }
     let s = &mut d.settings;
     s.staging = Default::default();
     s.interval_days = 0;
@@ -156,6 +170,39 @@ mod tests {
         let mut quality = d;
         quality.settings.quality = crate::Quality::Draft;
         assert_ne!(view_key(&s, &quality), k);
+    }
+
+    #[test]
+    fn with_one_arch_what_the_case_stores_of_a_bite_changes_no_aligner() {
+        let scan = |role: ScanRole, n: u8| -> dc_case::Scan {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("00000000-0000-4000-8000-00000000000{n}"),
+                "role": role,
+                "source_name": format!("scan-{n}.stl"),
+                "source_units": "mm",
+                "import_xform": { "t": [0.0, 0.0, 0.0], "q": [0.0, 0.0, 0.0, 1.0] },
+                "mesh": BlobRef::of_bytes(&[n]),
+            }))
+            .unwrap()
+        };
+        let mut one = CaseState::default();
+        one.case.scans.push(scan(ScanRole::Upper, 1));
+        let d = AlignersState::default();
+        let mut bitten = d.clone();
+        bitten.bite_registered = true;
+        bitten.aligner_bite.occlusal.mode = crate::OcclusalMode::Manual;
+        bitten.aligner_bite.ramps.enabled = true;
+        bitten.aligner_bite.ramps.ramps.push(crate::Ramp {
+            fdi: dc_case::Fdi::new(11).unwrap(),
+            pose: dc_case::Pose::IDENTITY,
+            size_mm: [3.0, 2.0, 1.5],
+            kind: crate::RampKind::Manual,
+        });
+        assert_eq!(view_key(&one, &bitten), view_key(&one, &d));
+        // both arches: the bite shapes the aligners, so it is in the key
+        let mut two = one.clone();
+        two.case.scans.push(scan(ScanRole::Lower, 2));
+        assert_ne!(view_key(&two, &bitten), view_key(&two, &d));
     }
 
     #[test]

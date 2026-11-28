@@ -211,10 +211,17 @@ pub struct TrimParams {
     /// Distance of the edge from the gingival margin, positive on the
     /// crown (mm).
     pub margin_gap_mm: f64,
-    /// Recess between adjacent teeth (mm).
+    /// Smooth edge: the labial and lingual faces of the block-out filling
+    /// the embrasure under every contact stand this far inside the lines
+    /// tangent to the two crowns (mm): the shell bridges from one crown to
+    /// the other at most about this far inside them, never down onto the
+    /// papilla (the smaller, the straighter the bridge).
     pub recess_mm: f64,
     /// Height of the scallops (mm).
     pub scallop_mm: f64,
+    /// Smooth edge: least height above the gingival margin, so round every
+    /// papilla (mm; 0: the edge may come down onto the papilla).
+    pub papilla_relief_mm: f64,
     /// Edge beyond the equator (mm).
     pub equator_offset_mm: f64,
     /// Edge extension (mm).
@@ -228,8 +235,9 @@ impl Default for TrimParams {
         Self {
             mode: TrimMode::Smooth,
             margin_gap_mm: 1.5,
-            recess_mm: 1.6,
+            recess_mm: 0.0,
             scallop_mm: 1.5,
+            papilla_relief_mm: 1.0,
             equator_offset_mm: 0.0,
             extension_mm: 2.0,
             insertion_axis: InsertionAxis::PerTooth,
@@ -443,8 +451,8 @@ impl StampSettings {
 /// The groups of the production settings `aligners.settings.production`
 /// changes ([`crate::AlignersState::production_values`]): the trim line
 /// (`trim`, [`TrimParams`]), the shell (`shell`: `shell_thickness_mm`,
-/// `clearance_mm` of [`Settings`]), the identification text (`stamp`,
-/// [`StampSettings`]), the bite with the aligners worn (`bite`,
+/// `clearance_mm`, `gum_clearance_mm` of [`Settings`]), the identification
+/// text (`stamp`, [`StampSettings`]), the bite with the aligners worn (`bite`,
 /// [`crate::OcclusalSettings`]), the ramps (`ramps`,
 /// [`crate::RampSettings`] without the ramps) and the print quality
 /// (`quality`).
@@ -452,14 +460,16 @@ pub const PRODUCTION_GROUPS: [&str; 6] = ["trim", "shell", "stamp", "bite", "ram
 
 /// The numeric production settings with the range of the plugin's slider
 /// (`props.py:537-661`): group, field, smallest and largest value.
-pub const PRODUCTION_NUMBERS: [(&str, &str, f64, f64); 21] = [
+pub const PRODUCTION_NUMBERS: [(&str, &str, f64, f64); 23] = [
     ("trim", "margin_gap_mm", -2.0, 5.0),
-    ("trim", "recess_mm", 0.6, 2.5),
+    ("trim", "recess_mm", 0.0, 2.5),
     ("trim", "scallop_mm", 0.0, 4.0),
+    ("trim", "papilla_relief_mm", 0.0, 3.0),
     ("trim", "equator_offset_mm", -2.0, 1.5),
     ("trim", "extension_mm", 0.0, 4.0),
     ("shell", "shell_thickness_mm", 0.3, 2.0),
     ("shell", "clearance_mm", 0.0, 0.3),
+    ("shell", "gum_clearance_mm", 0.0, 1.0),
     ("stamp", "height_mm", 0.3, 2.5),
     ("stamp", "depth_mm", 0.02, 0.30),
     ("stamp", "min_wall_mm", 0.2, 1.0),
@@ -668,32 +678,39 @@ pub enum SetupLeveling {
 
 /// Parameters of "Final position" (the plugin's scene settings,
 /// `props.py:388-468`, read by `case_plan.conservative_config`), with the
-/// plugin's defaults, and the steps of the − and + buttons of "Move a
-/// tooth" (`adjust_step_mm`, `adjust_step_deg`, `props.py:686-687`). The
+/// plugin's defaults but two, and the steps of the − and + buttons of "Move
+/// a tooth" (`adjust_step_mm`, `adjust_step_deg`, `props.py:686-687`). The
 /// automatic final position uses them for every parameter it is not given;
 /// `aligners.settings.setup` changes them inside the ranges of the plugin's
 /// sliders ([`SetupSettings::NUMBERS`]). The field names are those of the
-/// parameters of `aligners.planning.setup.automatic`.
+/// parameters of `aligners.planning.setup.automatic`. The two defaults
+/// that are not the plugin's (2026-11-24): every tooth is aligned
+/// (`align_scope`, the plugin's are the incisors and canines) and the
+/// molars are not held along the arch (`fix_molars`, held in the plugin),
+/// so the final position corrects the whole arch and closes its spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SetupSettings {
-    /// Teeth to align.
+    /// Teeth to align (every tooth by default).
     pub align_scope: SetupScope,
     /// Smoothing of the arch line from the cusps (mm).
     pub line_sigma_mm: f64,
     /// Incisors and canines: distance from the line below which they stay (mm).
     pub normal_tol_mm: f64,
-    /// Incisors and canines: rotation below which they stay (degrees).
+    /// Incisors and canines: rotation they keep (degrees); beyond it only the
+    /// excess is derotated, not at all under half a degree of excess.
     pub rot_tol_deg: f64,
     /// Premolars and molars: distance from the line below which they stay (mm).
     pub post_normal_tol_mm: f64,
-    /// Premolars and molars: rotation below which they stay (degrees).
+    /// Premolars and molars: rotation they keep (degrees); beyond it only the
+    /// excess is derotated, not at all under half a degree of excess.
     pub post_rot_tol_deg: f64,
     /// Move along the arch below which a tooth stays where it is (mm).
     pub pos_tol_mm: f64,
     /// Overlap already present left as it is (mm).
     pub contact_tol_mm: f64,
-    /// First and second molars held along the arch (anchorage).
+    /// First and second molars held along the arch (anchorage; off by
+    /// default: they go mesially as far as the spaces need, never distally).
     pub fix_molars: bool,
     /// The teeth held along the arch are still derotated and put on the line.
     pub align_fixed: bool,
@@ -723,6 +740,9 @@ pub struct SetupSettings {
     pub ipr_surface_cap_mm: f64,
     /// Largest fraction of the enamel removed.
     pub enamel_fraction: f64,
+    /// Largest distal movement of the last tooth of each side (mm; advanced,
+    /// 0 by default: no tooth goes distally to make room).
+    pub distal_max_mm: f64,
     /// Vertical levelling.
     pub leveling: SetupLeveling,
     /// Largest vertical correction (mm).
@@ -740,7 +760,7 @@ pub struct SetupSettings {
 impl Default for SetupSettings {
     fn default() -> Self {
         Self {
-            align_scope: SetupScope::Anterior,
+            align_scope: SetupScope::All,
             line_sigma_mm: 5.0,
             normal_tol_mm: 0.1,
             rot_tol_deg: 1.0,
@@ -748,7 +768,7 @@ impl Default for SetupSettings {
             post_rot_tol_deg: 5.0,
             pos_tol_mm: 0.1,
             contact_tol_mm: 0.15,
-            fix_molars: true,
+            fix_molars: false,
             align_fixed: true,
             fix_third: true,
             midline: SetupMidline::Keep,
@@ -763,6 +783,7 @@ impl Default for SetupSettings {
             ipr_zone: SetupIprZone::AnteriorPremolars,
             ipr_surface_cap_mm: 0.25,
             enamel_fraction: 0.5,
+            distal_max_mm: 0.0,
             leveling: SetupLeveling::Smooth,
             vertical_max_mm: 1.0,
             level_tol_mm: 0.5,
@@ -776,7 +797,7 @@ impl Default for SetupSettings {
 impl SetupSettings {
     /// The numeric settings with the range of the plugin's slider
     /// (`props.py`): field name, smallest and largest value.
-    pub const NUMBERS: [(&'static str, f64, f64); 19] = [
+    pub const NUMBERS: [(&'static str, f64, f64); 20] = [
         ("line_sigma_mm", 1.0, 20.0),
         ("normal_tol_mm", 0.0, 2.0),
         ("rot_tol_deg", 0.0, 30.0),
@@ -792,6 +813,7 @@ impl SetupSettings {
         ("retract_max_mm", 0.0, 4.0),
         ("ipr_surface_cap_mm", 0.0, 0.5),
         ("enamel_fraction", 0.1, 0.5),
+        ("distal_max_mm", 0.0, 0.5),
         ("vertical_max_mm", 0.0, 3.0),
         ("level_tol_mm", 0.0, 2.0),
         ("adjust_step_mm", 0.01, 1.0),
@@ -841,6 +863,7 @@ impl SetupSettings {
             "retract_max_mm" => &mut self.retract_max_mm,
             "ipr_surface_cap_mm" => &mut self.ipr_surface_cap_mm,
             "enamel_fraction" => &mut self.enamel_fraction,
+            "distal_max_mm" => &mut self.distal_max_mm,
             "vertical_max_mm" => &mut self.vertical_max_mm,
             "level_tol_mm" => &mut self.level_tol_mm,
             "adjust_step_mm" => &mut self.adjust_step_mm,
@@ -870,6 +893,9 @@ pub struct Settings {
     pub shell_thickness_mm: f64,
     /// Internal clearance between tooth and shell (mm).
     pub clearance_mm: f64,
+    /// Space between the shell and the gingiva it covers, the papillae
+    /// between the teeth too (mm; 0: the shell lies on the gingiva).
+    pub gum_clearance_mm: f64,
     /// Study-model bases.
     pub study_base: StudyBaseSettings,
     /// "Find the teeth": third molars and teeth known to be missing.
@@ -894,6 +920,7 @@ impl Default for Settings {
             wear_hours: 22.0,
             shell_thickness_mm: 1.0,
             clearance_mm: 0.0,
+            gum_clearance_mm: 0.3,
             study_base: StudyBaseSettings::default(),
             find_teeth: FindTeethSettings::default(),
             segmentation: SegmentationSettings::default(),
@@ -909,14 +936,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_settings_saved_without_them_load_the_plugin_defaults() {
+    fn setup_settings_saved_without_them_load_the_defaults() {
         let mut v = serde_json::to_value(Settings::default()).unwrap();
         v.as_object_mut().unwrap().remove("setup");
         let s: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(s.setup, SetupSettings::default());
-        // the plugin's defaults (`props.py`, `evidence.py`)
+        // the plugin's defaults (`props.py`, `evidence.py`) but the scope and the molars
+        // (2026-11-24): every tooth aligned, no molar held along the arch
         let d = SetupSettings::default();
-        assert_eq!(d.align_scope, SetupScope::Anterior);
+        assert_eq!(d.align_scope, SetupScope::All);
+        assert!(!d.fix_molars && d.fix_third);
         assert_eq!(d.priority, SpacePriority::IprExpPro);
         assert_eq!(d.ipr_zone, SetupIprZone::AnteriorPremolars);
         assert_eq!((d.adjust_step_mm, d.adjust_step_deg), (0.1, 1.0));
@@ -927,6 +956,8 @@ mod tests {
         assert_eq!(s.setup.ipr_zone, SetupIprZone::None);
         assert_eq!(s.setup.advance_max_mm, 2.5);
         assert_eq!(s.setup.retract_max_mm, 2.0);
+        // a project saved before the setting: no tooth goes distally to make room
+        assert_eq!((d.distal_max_mm, s.setup.distal_max_mm), (0.0, 0.0));
     }
 
     #[test]

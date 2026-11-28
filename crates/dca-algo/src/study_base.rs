@@ -8,8 +8,10 @@
 //! model). Every angle and distance is a [`Params`] field.
 //!
 //! # Frame and landmarks
-//! Common occlusion frame (the arches are in occlusion in case coordinates,
-//! after a bite registration or the virtual bite):
+//! Two arches in occlusion in case coordinates (after a bite registration
+//! or the virtual bite: their occlusal sides facing each other, their
+//! crowns within [`OCCLUSION_REACH_MM`]) are based as a pair, on a common
+//! occlusion frame:
 //! * `z`: normal of the occlusal plane fitted through the cusp tips of both
 //!   arches (the highest vertex of every tooth label towards the
 //!   antagonist), pointing from the lower to the upper arch; origin on it;
@@ -19,6 +21,12 @@
 //!   and through their midpoints. Fallbacks: the same on the lower arch
 //!   (the dental midline), then the `y` of the arch frame from the seeds;
 //! * `x = y × z` (the patient's right).
+//!
+//! Two arches that are not in occlusion (the scans as read, before the
+//! bite: both facing the scanner, side by side) are each based on its own,
+//! as when alone: the common frame would take the occlusal side of one for
+//! that of the other and turn that arch upside down. One arch alone is
+//! framed the same way, its `z` its own occlusal direction.
 //!
 //! Each arch is worked in its own frame with `+Z` occlusal (the upper arch
 //! turned 180° about `y`), so its base plane is `z = −H`.
@@ -54,13 +62,38 @@
 //!     (or `eu_side_angle_deg`), optional heels; upper front tip on the
 //!     raphe with the lateral corners at the canines, lower front flat with
 //!     the corners at the canines; clearance `vestibule_clear_mm`.
-//! * Solid: the scan of the protected anatomy thickened by a fraction of a
-//!   voxel and swept down (its undercuts filled), cut by the outline prism
-//!   from the base plane, joined to the slab of the outline from the base
-//!   plane up to the land (the art portion `z = −A`, or [`LAND_GAP_MM`]
-//!   under the deepest protected point when that is higher, so that the
-//!   walls rise to the land without burying the sulcus); the narrow-band SDF of `dc_geom` meshes it closed and
-//!   manifold. Optional hollowing and drain holes are not built.
+//! * Solid: the scan of the protected anatomy as it is, undercuts included
+//!   (nothing of it is filled or moved), followed into the cycles of its
+//!   open edges as the base of the import does ([`scan_base`]: folded
+//!   triangles taken out, a point where the boundary passes twice parted):
+//!   its holes capped, its open borders (the cycles that enclose at least
+//!   [`scan_base::BORDER_SHARE`] of it seen from above) walled straight down
+//!   into the slab of the outline, from the base plane up to the land (the
+//!   art portion `z = −A`, or [`LAND_GAP_MM`] under the deepest protected
+//!   point when that is higher, so that the walls rise to the land without
+//!   burying the sulcus). A piece of the scan with no open border (a model
+//!   that is closed already, with a base of its own, holes or the leftovers
+//!   of an old closing) is the anatomy as it is, whole: the protection does
+//!   not cut it, as a cut through its walls would open it where no wall can
+//!   close it again; it is seated on the land along all of its bottom (the
+//!   flat faces of its lowest part, within [`LAND_GAP_MM`] of their plane,
+//!   tilted or not, swept down to the base plane), so that it is one block
+//!   with the base and what an old closing left inside it (a chimney walled
+//!   down from a hole) stays inside. All of it thickened into a shell,
+//!   filled where it encloses and brought back onto the scan, cut by the
+//!   outline prism from the base plane; the narrow-band SDF of `dc_geom`
+//!   meshes it closed and manifold. What the meshing leaves apart (slivers,
+//!   blobs the scanner closed) and its cavities are left out; a larger
+//!   piece that came apart stays, for the check to count. A tunnel
+//!   through the model (a handle of its surface) that the scan does not
+//!   have, made where the walls and the land meet the anatomy, is closed on
+//!   the level set where it is narrowest ([`tunnels`]); one of the scan
+//!   itself (through the embrasure under a contact point) is closed only
+//!   when that keeps the surface within a voxel (the resolution of the
+//!   model) of the scan, otherwise it is kept and listed in the report. The
+//!   model is counted as a solid ([`dc_mesh::solid_topology`]): a model that
+//!   is not one closed piece, or keeps a tunnel the scan does not have, gets
+//!   a warning. Optional hollowing and drain holes are not built.
 //!
 //! The report gives the frame, the planes, the outline, the design angles
 //! and the angles and heights measured back on the meshes.
@@ -68,6 +101,7 @@
 mod outline;
 #[cfg(test)]
 mod tests;
+mod tunnels;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -81,6 +115,8 @@ pub use outline::{HalfPlane, Outline};
 
 use crate::anatomy::Arch;
 use crate::frame::{self, ArchFrame};
+use crate::scan_base::{self, BORDER_SHARE, convex_hull};
+use crate::trim::holes;
 
 /// Style of the base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -258,18 +294,21 @@ pub enum StudyBaseError {
     Geometry(#[from] dc_geom::GeomError),
 }
 
-/// One arch: its scan in occlusion (case coordinates) and its tooth labels.
+/// One arch: its scan (case coordinates) and its tooth labels.
 #[derive(Debug, Clone, Copy)]
 pub struct ArchInput<'a> {
     /// The scan (open surface, teeth and gingiva).
     pub scan: &'a TriMesh,
     /// FDI number per scan vertex, `0` for the gingiva.
     pub labels: &'a [u16],
-    /// The arch frame (seeds or mesh), for the fallbacks of the frame.
+    /// The arch frame (seeds or mesh): its occlusal direction tells
+    /// whether two arches are in occlusion, and the fallbacks of the frame.
     pub arch_frame: ArchFrame,
 }
 
-/// The arches to base (at least one), in occlusion in case coordinates.
+/// The arches to base (at least one). Two in occlusion in case coordinates
+/// (facing each other, their crowns within [`OCCLUSION_REACH_MM`]) are
+/// based as a pair; two that are not are each based on its own.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Input<'a> {
     /// The upper arch.
@@ -296,7 +335,8 @@ impl Plane {
     }
 }
 
-/// The common occlusion frame (case coordinates).
+/// The occlusion frame of the pair, or of one arch based on its own (case
+/// coordinates).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommonFrame {
     /// Origin, on the occlusal plane and the raphe.
@@ -318,7 +358,8 @@ pub struct CommonFrame {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Warning {
     /// Stable code (`height_raised`, `art_portion_reached`, `wall_pushed`,
-    /// `no_canine`, `heel_missing`, `mirrored_labels`, `single_arch`).
+    /// `no_canine`, `heel_missing`, `mirrored_labels`, `single_arch`,
+    /// `not_solid`).
     pub code: String,
     /// Arch (`upper`, `lower`) or empty.
     pub arch: String,
@@ -360,7 +401,10 @@ pub struct ArchReport {
     pub land_mm: f64,
     /// The base plane.
     pub base_plane: Plane,
-    /// The outline (common frame, plan).
+    /// The frame its outline and walls are given in: the occlusion frame of
+    /// the pair, or its own when the arches are based apart.
+    pub frame: CommonFrame,
+    /// The outline (its frame, plan).
     pub outline: Outline,
     /// Interior angles of the outline as designed (degrees).
     pub design_angles_deg: BTreeMap<String, f64>,
@@ -374,12 +418,50 @@ pub struct ArchReport {
     pub measured_height_mm: f64,
     /// Triangles of the base.
     pub faces: usize,
-    /// Closed and manifold.
+    /// One clean solid: closed, every edge of two triangles, counted as an
+    /// STL file is (points identified by position).
     pub watertight: bool,
-    /// Connected pieces.
+    /// Pieces of the model, counted the same way (`1` for one solid).
     pub components: usize,
+    /// Holes through the model (handles), when it is closed: tunnels of
+    /// the scan itself kept ([`ArchReport::tunnels`]), and any the builder
+    /// made that could not be closed.
+    pub genus: Option<i64>,
+    /// Tunnels the builder made, closed where they were narrowest.
+    pub tunnels_closed: usize,
+    /// Tunnels of the scan itself (through the embrasure under a contact
+    /// point) kept, as closing them would move the surface more than a
+    /// voxel (the resolution of the model) from the scan.
+    pub tunnels: Vec<Tunnel>,
+    /// Edges of one triangle of the model.
+    pub open_edges: usize,
+    /// Edges of more than two triangles of the model.
+    pub nonmanifold_edges: usize,
+    /// Slivers of the meshing, blobs the scanner closed and cavities
+    /// left out of the model.
+    pub loose_pieces: usize,
     /// Seconds spent.
     pub seconds: f64,
+}
+
+impl ArchReport {
+    /// Tunnels of the model that the scan does not have (made by the build
+    /// and not closed).
+    #[must_use]
+    pub fn tunnels_made(&self) -> i64 {
+        self.genus
+            .map_or(0, |g| g - self.tunnels.len() as i64)
+            .max(0)
+    }
+}
+
+/// A tunnel of the scan kept in a study model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Tunnel {
+    /// The middle of its shortest loop (case coordinates).
+    pub at: [f64; 3],
+    /// Length of that loop (mm).
+    pub loop_mm: f64,
 }
 
 /// The report of [`run`].
@@ -387,12 +469,18 @@ pub struct ArchReport {
 pub struct Report {
     /// Style built.
     pub style: Style,
-    /// The common occlusion frame.
+    /// The common occlusion frame (of the upper arch when the arches are
+    /// based apart; each arch's own is in its report).
     pub frame: CommonFrame,
-    /// The occlusal plane.
+    /// The occlusal plane (of the frame).
     pub occlusal_plane: Plane,
-    /// The back plane, shared by both arches.
+    /// The back plane, shared by both arches of a pair.
     pub back_plane: Plane,
+    /// The two arches were in occlusion and are based as a pair (one
+    /// frame, the back plane shared); `false` for one arch, or for two
+    /// that are not in occlusion (the scans as read, before the bite), each
+    /// based on its own as when alone.
+    pub paired: bool,
     /// Per arch (`upper`, `lower`).
     pub arches: BTreeMap<String, ArchReport>,
     /// Upper base to lower base, designed (mm; both arches only).
@@ -622,8 +710,82 @@ fn common_frame(
     ))
 }
 
+/// Two arches whose occlusal directions are farther than this from
+/// opposite are not in occlusion (degrees).
+pub const OCCLUSION_FACING_DEG: f64 = 45.0;
+
+/// The crowns of two arches in occlusion are within this of each other
+/// (mm): their centroids lie a few millimetres apart (the overjet, the
+/// height of the crowns), those of scans as read a jaw or more.
+pub const OCCLUSION_REACH_MM: f64 = 20.0;
+
+/// The two arches are in occlusion in case coordinates (after a bite
+/// registration or the virtual bite): their occlusal directions (of the
+/// arch frames) face each other, within [`OCCLUSION_FACING_DEG`], and the
+/// centroids of their crowns (every labelled point, whatever its number)
+/// are within [`OCCLUSION_REACH_MM`].
+fn in_occlusion(upper: &ArchInput<'_>, lower: &ArchInput<'_>) -> bool {
+    let facing = upper
+        .arch_frame
+        .n
+        .normalize_or_zero()
+        .dot(lower.arch_frame.n.normalize_or_zero());
+    let crowns = |a: &ArchInput<'_>| {
+        let (mut sum, mut n) = (DVec3::ZERO, 0.0);
+        for (p, &l) in a.scan.positions.iter().zip(a.labels) {
+            if l > 0 {
+                sum += p.as_dvec3();
+                n += 1.0;
+            }
+        }
+        sum / f64::max(n, 1.0)
+    };
+    facing < -OCCLUSION_FACING_DEG.to_radians().cos()
+        && crowns(upper).distance(crowns(lower)) < OCCLUSION_REACH_MM
+}
+
+/// The output of two arches based each on its own ([`run`] of each
+/// alone): not a pair (no total height, no back planes to compare), the
+/// frame of the report the upper's, each arch's own in its report.
+fn apart(upper: Output, lower: Output) -> Output {
+    let mut report = upper.report;
+    report.paired = false;
+    report.arches.extend(lower.report.arches);
+    report.warnings.extend(lower.report.warnings);
+    report.warnings.retain(|w| w.code != "single_arch");
+    Output {
+        upper_base: upper.upper_base,
+        lower_base: lower.lower_base,
+        report,
+    }
+}
+
 /// The land stays at least this far under the deepest protected point (mm).
 pub const LAND_GAP_MM: f64 = 1.0;
+
+/// A piece of the scan that stands on the land (a model closed already)
+/// is seated on the faces of its lowest part that lie within this of flat
+/// (degrees): the plane of the bottom of its own base, tilted or not.
+const SEAT_FLAT_DEG: f64 = 30.0;
+
+/// The tunnels of a model are looked for and closed at most this many
+/// times ([`tunnels`]): a disk that closes one can leave another.
+const TUNNEL_ROUNDS: usize = 8;
+
+/// When the disks of a round together leave as many tunnels, the shortest
+/// this many are tried each on its own.
+const SINGLE_DISKS: usize = 4;
+
+/// A piece of the meshed model apart from its main body that holds at
+/// least this share of its volume is a part of it that came apart, not a
+/// sliver: it stays in the model, for the check to count it.
+const PART_SHARE: f64 = 0.05;
+
+/// A model with more tunnels than this (those of the scan kept aside) is
+/// not closed tunnel by tunnel, each try meshing it again: it is reported
+/// as it is (the protected anatomy crossed by the base, not a few tunnels
+/// where the walls meet the land).
+const TUNNEL_MAX: i64 = 16;
 
 /// Plan cell of the protection masks (mm).
 const MASK_CELL: f64 = 0.5;
@@ -671,38 +833,6 @@ fn protect(v: &[DVec3], labels: &[u16], reach: f64, palate: bool) -> Vec<bool> {
                 || (hull.len() >= 3 && in_convex(&hull, p.truncate()))
         })
         .collect()
-}
-
-/// Convex hull, counter-clockwise (monotone chain).
-fn convex_hull(pts: &[DVec2]) -> Vec<DVec2> {
-    let mut p: Vec<DVec2> = pts.to_vec();
-    p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-    p.dedup();
-    if p.len() < 3 {
-        return p;
-    }
-    let mut h: Vec<DVec2> = Vec::with_capacity(2 * p.len());
-    for pass in 0..2 {
-        let start = h.len();
-        let it: Box<dyn Iterator<Item = &DVec2>> = if pass == 0 {
-            Box::new(p.iter())
-        } else {
-            Box::new(p.iter().rev())
-        };
-        for q in it {
-            while h.len() >= start + 2 {
-                let (a, b) = (h[h.len() - 2], h[h.len() - 1]);
-                if (b - a).perp_dot(*q - a) <= 0.0 {
-                    h.pop();
-                } else {
-                    break;
-                }
-            }
-            h.push(*q);
-        }
-        h.pop();
-    }
-    h
 }
 
 fn in_convex(hull: &[DVec2], p: DVec2) -> bool {
@@ -860,6 +990,215 @@ fn prism(poly: &[DVec2], z0: f64, z1: f64) -> TriMesh {
     TriMesh::new(positions, tris)
 }
 
+/// The anatomy the solid is built from, out of the scan: the triangles
+/// `tris` on the points `v` (working frame, `+Z` occlusal), with what closes
+/// it as it is: nothing of it moves and its undercuts stay. The points that
+/// share a position are joined, so that only the real border is open, and
+/// the scan is repaired and followed into the cycles of its open edges as
+/// the base of the import does ([`scan_base`]). A piece of the scan that
+/// has no open border (a cycle that encloses at least
+/// [`scan_base::BORDER_SHARE`] of it seen from above) is closed already: it
+/// is the anatomy whole, as it is; of the other pieces only the triangles
+/// with every point `protected`. In what is kept, the cycles that enclose
+/// that much (the open border, and the lingual border of a lower arch
+/// whose protected scan goes round the tongue) get a wall straight down to
+/// `floor`, the quad between each of their edges and its copy, as the
+/// plugin's `make_base` walls a scan; every other cycle (a hole) a cap, a
+/// fan from its middle point. An open edge that closes no cycle gets
+/// neither. An open surface, without a side: the caller thickens it into a
+/// shell, ends the walls in the slab of the land and fills what they
+/// enclose.
+///
+/// Also gives the seat of each piece with no wall (a closed model, e.g. the
+/// demo typodont or a scan closed by an old base, which nothing walls
+/// down): its triangles within `band` of the plane of its lowest flat faces
+/// ([`SEAT_FLAT_DEG`]; the bottom of its own base, tilted or not), for the
+/// caller to seat it on the land; and the rings of the walls on `floor`,
+/// to close the anatomy for the tunnels of the scan ([`closed_on_floor`]).
+fn walled_anatomy(
+    v: &[DVec3],
+    tris: &[[u32; 3]],
+    protected: &[bool],
+    floor: f64,
+    band: f64,
+) -> Walled {
+    let key = |i: u32| {
+        let p = v[i as usize];
+        (p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+    };
+    let mut order: Vec<u32> = (0..v.len() as u32).collect();
+    order.sort_unstable_by_key(|&i| (key(i), i));
+    let mut canon: Vec<u32> = (0..v.len() as u32).collect();
+    for w in order.windows(2) {
+        if key(w[0]) == key(w[1]) {
+            canon[w[1] as usize] = canon[w[0] as usize];
+        }
+    }
+    // the scan with its points joined, and which triangles are protected
+    let mut sheet: Vec<[u32; 3]> = Vec::with_capacity(tris.len());
+    let mut kept_by_mask: Vec<bool> = Vec::with_capacity(tris.len());
+    for t in tris {
+        let w = t.map(|i| canon[i as usize]);
+        if w[0] != w[1] && w[1] != w[2] && w[0] != w[2] {
+            sheet.push(w);
+            kept_by_mask.push(t.iter().all(|&i| protected[i as usize]));
+        }
+    }
+    let positions: Vec<Vec3> = v.iter().map(|p| p.as_vec3()).collect();
+    // the pieces with an open border: cut by the protection
+    let whole = scan_base::openings(&positions, &sheet, DVec3::Z);
+    let mut open = vec![false; whole.footprints.len()];
+    for c in &whole.cycles {
+        if whole.share(c) >= BORDER_SHARE {
+            open[c.piece as usize] = true;
+        }
+    }
+    let keep: Vec<[u32; 3]> = sheet
+        .iter()
+        .zip(&whole.kept)
+        .zip(&kept_by_mask)
+        .filter(|((t, k), m)| **k && (**m || !open[whole.piece_of[t[0] as usize] as usize]))
+        .map(|((t, _), _)| *t)
+        .collect();
+    drop(whole);
+    let op = scan_base::openings(&positions, &keep, DVec3::Z);
+    let walled: Vec<bool> = op
+        .cycles
+        .iter()
+        .map(|c| op.share(c) >= BORDER_SHARE)
+        .collect();
+    // the seat of each piece nothing walls down that is a model (a tenth of
+    // the footprint of the largest piece, not a blob the scanner closed):
+    // its faces within `band` of the plane it stands on, the plane of its
+    // lowest faces that lie flat (the bottom of the base of its own, tilted
+    // or not), so that all of that bottom is swept down onto the land, not
+    // only its lowest corner
+    let largest = op.footprints.iter().copied().fold(0.0, f64::max);
+    let mut standing: Vec<bool> = op
+        .footprints
+        .iter()
+        .map(|&f| f >= BORDER_SHARE * largest)
+        .collect();
+    for (c, _) in op.cycles.iter().zip(&walled).filter(|(_, w)| **w) {
+        standing[c.piece as usize] = false;
+    }
+    let piece = |t: &[u32; 3]| op.piece_of[t[0] as usize] as usize;
+    let mut lowest = vec![f64::INFINITY; op.footprints.len()];
+    for t in keep.iter().filter(|t| standing[piece(t)]) {
+        for &w in t {
+            lowest[piece(t)] = lowest[piece(t)].min(v[w as usize].z);
+        }
+    }
+    let flat = SEAT_FLAT_DEG.to_radians().cos();
+    // the plane of the flat faces in the lowest part (wholly, or when none
+    // is, reaching it: a fan of the bottom reaches it from its middle point)
+    let plane_of = |wholly: bool| {
+        let mut down = vec![DVec3::ZERO; op.footprints.len()];
+        for t in keep.iter().filter(|t| standing[piece(t)]) {
+            let [a, b, c] = t.map(|w| v[w as usize]);
+            let low = |p: &DVec3| p.z <= lowest[piece(t)] + band;
+            let reach = if wholly {
+                [a, b, c].iter().all(low)
+            } else {
+                [a, b, c].iter().any(low)
+            };
+            // twice its area along its normal, turned down
+            let n = (b - a).cross(c - a);
+            if reach && n.z.abs() >= flat * n.length() {
+                down[piece(t)] -= n * n.z.signum();
+            }
+        }
+        down
+    };
+    let down: Vec<DVec3> = plane_of(true)
+        .into_iter()
+        .zip(plane_of(false))
+        .map(|(n, m)| {
+            n.try_normalize()
+                .or_else(|| m.try_normalize())
+                .unwrap_or(DVec3::NEG_Z)
+        })
+        .collect();
+    let mut seat = vec![f64::NEG_INFINITY; op.footprints.len()];
+    for t in keep.iter().filter(|t| standing[piece(t)]) {
+        for &w in t {
+            seat[piece(t)] = seat[piece(t)].max(down[piece(t)].dot(v[w as usize]));
+        }
+    }
+    let feet: Vec<[u32; 3]> = keep
+        .iter()
+        .filter(|t| {
+            let k = piece(t);
+            standing[k]
+                && t.iter()
+                    .all(|&w| down[k].dot(v[w as usize]) >= seat[k] - band)
+        })
+        .copied()
+        .collect();
+
+    let mut positions = positions;
+    let mut tris = keep;
+    let mut copy: HashMap<u32, u32> = HashMap::new();
+    let mut rings = Vec::new();
+    for (c, &wall) in op.cycles.iter().zip(&walled) {
+        if wall {
+            for (a, b) in scan_base::ring_edges(&c.points) {
+                let [a2, b2] = [a, b].map(|w| {
+                    *copy.entry(w).or_insert_with(|| {
+                        let p = v[w as usize];
+                        positions.push(DVec3::new(p.x, p.y, floor).as_vec3());
+                        (positions.len() - 1) as u32
+                    })
+                });
+                tris.push([b, a, a2]);
+                tris.push([b, a2, b2]);
+            }
+            rings.push(c.points.iter().map(|w| copy[w]).collect());
+        } else {
+            let center = positions.len() as u32;
+            let mid =
+                c.points.iter().map(|&w| v[w as usize]).sum::<DVec3>() / c.points.len() as f64;
+            positions.push(mid.as_vec3());
+            tris.extend(scan_base::ring_edges(&c.points).map(|(a, b)| [b, a, center]));
+        }
+    }
+    Walled {
+        mesh: TriMesh::new(positions, tris),
+        feet,
+        rings,
+    }
+}
+
+/// What [`walled_anatomy`] builds.
+struct Walled {
+    /// The anatomy with its holes capped and its open borders walled down.
+    mesh: TriMesh,
+    /// The seats of the pieces with no wall (points of `mesh`).
+    feet: Vec<[u32; 3]>,
+    /// The rings of the walls on the floor (points of `mesh`), in the
+    /// order of their border.
+    rings: Vec<Vec<u32>>,
+}
+
+/// `walled` closed on the floor: each ring of its walls capped by a fan from
+/// its middle point, the other way round. A closed surface whose handles
+/// are the tunnels of the scan itself (the walls and the caps make none).
+fn closed_on_floor(walled: &Walled) -> TriMesh {
+    let mut positions = walled.mesh.positions.clone();
+    let mut tris = walled.mesh.tris.clone();
+    for ring in &walled.rings {
+        let center = positions.len() as u32;
+        let mid = ring
+            .iter()
+            .map(|&w| positions[w as usize].as_dvec3())
+            .sum::<DVec3>()
+            / ring.len() as f64;
+        positions.push(mid.as_vec3());
+        tris.extend(scan_base::ring_edges(ring).map(|(a, b)| [b, a, center]));
+    }
+    TriMesh::new(positions, tris)
+}
+
 /// A mesh moved by `m`.
 fn moved(mesh: &TriMesh, m: &DMat4) -> TriMesh {
     TriMesh::new(
@@ -869,6 +1208,86 @@ fn moved(mesh: &TriMesh, m: &DMat4) -> TriMesh {
             .collect(),
         mesh.tris.clone(),
     )
+}
+
+/// The model of `mesh` without what the meshing leaves apart from it: the
+/// piece (triangles joined by their points) that holds the most volume, and
+/// any other that holds at least [`PART_SHARE`] of it (a part of the model
+/// that came apart: kept, for the check to count it). The smaller pieces
+/// (slivers of the meshing, blobs the scanner closed) and the cavities
+/// (pieces turned inwards, a volume of the other sign: filled) are left
+/// out and counted.
+fn main_piece(mesh: TriMesh) -> (TriMesh, usize) {
+    let pieces = mesh.connected_components();
+    if pieces.len() <= 1 {
+        return (mesh, 0);
+    }
+    let volume = |faces: &[u32]| {
+        faces
+            .iter()
+            .map(|&f| {
+                let [a, b, c] = mesh.triangle(f as usize).map(|p| p.as_dvec3());
+                a.dot(b.cross(c))
+            })
+            .sum::<f64>()
+            / 6.0
+    };
+    let volumes: Vec<f64> = pieces.iter().map(|p| volume(p)).collect();
+    let main = (0..pieces.len())
+        .max_by(|&a, &b| volumes[a].abs().total_cmp(&volumes[b].abs()))
+        .unwrap_or(0);
+    let sign = volumes[main].signum();
+    let part = PART_SHARE * volumes[main].abs();
+    let kept: Vec<usize> = (0..pieces.len())
+        .filter(|&k| k == main || volumes[k] * sign >= part)
+        .collect();
+    let mut faces: Vec<u32> = kept
+        .iter()
+        .flat_map(|&k| pieces[k].iter().copied())
+        .collect();
+    faces.sort_unstable();
+    let mut index = vec![u32::MAX; mesh.positions.len()];
+    let mut positions = Vec::new();
+    let tris = faces
+        .iter()
+        .map(|&f| {
+            mesh.tris[f as usize].map(|w| {
+                if index[w as usize] == u32::MAX {
+                    index[w as usize] = positions.len() as u32;
+                    positions.push(mesh.positions[w as usize]);
+                }
+                index[w as usize]
+            })
+        })
+        .collect();
+    (TriMesh::new(positions, tris), pieces.len() - kept.len())
+}
+
+/// The study model `mesh` counted as a solid, as the print check counts it
+/// ([`dc_mesh::solid_topology`]: points identified by position, as in an
+/// STL file), `kept` tunnels of the scan kept in it; a `not_solid` warning
+/// for the arch `key` when it is not one closed piece with every edge of
+/// two triangles, or has more tunnels than those of the scan.
+fn solid_check(
+    mesh: &TriMesh,
+    kept: usize,
+    key: &str,
+    warnings: &mut Vec<Warning>,
+) -> dc_mesh::SolidTopology {
+    let solid = dc_mesh::solid_topology(mesh);
+    let made = solid.genus.map_or(0, |g| g - kept as i64).max(0);
+    if !solid.is_closed() || solid.pieces != 1 || made > 0 {
+        warn(
+            warnings,
+            "not_solid",
+            key,
+            format!(
+                "the {key} study model is not one clean solid: {} pieces, {} open edges, {} edges of more than two faces, {made} tunnels the scan does not have",
+                solid.pieces, solid.boundary_edges, solid.nonmanifold_edges
+            ),
+        );
+    }
+    solid
 }
 
 /// The faces of `mesh` (common frame) whose normal is within `max_deg` of
@@ -933,6 +1352,28 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
             )));
         }
         case_v.push(to_vec(a.scan));
+    }
+    // two arches not in occlusion (the scans as read, before the bite) are
+    // each based on its own, as when alone: the common frame would take the
+    // occlusal side of one for that of the other
+    if let (Some(u), Some(l)) = (input.upper, input.lower)
+        && !in_occlusion(&u, &l)
+    {
+        let up = run(
+            &Input {
+                upper: Some(u),
+                lower: None,
+            },
+            params,
+        )?;
+        let lo = run(
+            &Input {
+                upper: None,
+                lower: Some(l),
+            },
+            params,
+        )?;
+        return Ok(apart(up, lo));
     }
     if arches.len() == 1 {
         warn(
@@ -1273,39 +1714,146 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
                 }
             })
             .collect();
-        // the protected scan, thickened and swept down
-        let keep: Vec<[u32; 3]> = p
-            .input
-            .scan
-            .tris
-            .iter()
-            .filter(|t| t.iter().all(|&i| p.protected[i as usize]))
-            .copied()
-            .collect();
-        let anat_mesh = TriMesh::new(p.v.iter().map(|q| q.as_vec3()).collect(), keep);
-        let top = p.v.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max) + 2.0;
-        let mut solid = SdfGrid::from_mesh(&anat_mesh, &sdf)?;
-        drop(anat_mesh);
-        solid.shift(0.75 * vs)?;
-        solid.sweep_down((-h) as f32 - 2.0 * vs)?;
-        let walls = SdfGrid::from_mesh(&prism(&work_poly, -h, top), &sdf)?;
-        solid.intersect(&walls)?;
-        drop(walls);
         // the land: the outline is solid up to just under the deepest
         // protected point (or the art portion when that is higher), so no
         // anatomy is buried and no surface grazes it
         let land = a.min(p.depth + (4.0 * params.voxel_mm).max(LAND_GAP_MM));
-        let slab = SdfGrid::from_mesh(&prism(&work_poly, -h, -land), &sdf)?;
+        // the protected scan as it is (a closed model whole), its holes
+        // capped and its open border walled straight down into the slab of
+        // the land, which spans the anatomy and the outline from under the
+        // base plane: as a shell of 1.5 voxels (whatever the winding of the
+        // scan, its walls crossing each other or not), filled where they
+        // enclose, then brought back onto the scan; the outline prism cuts it
+        let top = p.v.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max) + 2.0;
+        let mut walled = walled_anatomy(
+            &p.v,
+            &p.input.scan.tris,
+            &p.protected,
+            -0.5 * (land + h),
+            LAND_GAP_MM,
+        );
+        let mut solid = SdfGrid::from_mesh(&walled.mesh, &sdf)?;
+        solid.shift(0.75 * vs)?;
+        // a piece with no open border is seated on the land along all of
+        // its bottom: the shell of its seat swept down to the base plane,
+        // then given its true depth (swept, the shell is only as deep as
+        // it was thick, and the shrink back onto the scan below would leave
+        // slits where the tilted seat crosses the layers of voxels)
+        let feet = std::mem::take(&mut walled.feet);
+        if !feet.is_empty() {
+            let feet = TriMesh::new(walled.mesh.positions.clone(), feet);
+            let mut stand = SdfGrid::from_mesh(&feet, &sdf)?;
+            drop(feet);
+            stand.shift(0.75 * vs)?;
+            stand.sweep_down((-h) as f32 - 2.0 * vs)?;
+            stand.redistance()?;
+            solid.union(&stand)?;
+        }
+        let (mut lo, mut hi) = (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY));
+        for q in work_poly.iter().copied().chain(
+            p.v.iter()
+                .zip(&p.protected)
+                .filter(|(_, k)| **k)
+                .map(|(q, _)| q.truncate()),
+        ) {
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+        let (lo, hi) = (lo - DVec2::ONE, hi + DVec2::ONE);
+        let rect = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
+        let slab = SdfGrid::from_mesh(&prism(&rect, -h - 2.0 * params.voxel_mm, -land), &sdf)?;
         solid.union(&slab)?;
         drop(slab);
-        let full = solid.to_mesh()?;
-        drop(solid);
+        solid.fill_interior()?;
+        solid.shift(-0.75 * vs)?;
+        let walls = SdfGrid::from_mesh(&prism(&work_poly, -h, top), &sdf)?;
+        solid.intersect(&walls)?;
+        // slivers the meshing leaves apart from the model and its cavities
+        let (mut full, mut loose_pieces) = main_piece(solid.to_mesh()?);
+        // the tunnels the builder made closed on the level set, those of
+        // the scan kept unless closing them stays within a voxel of it
+        let (mut tunnels_closed, mut kept, mut scan) = (0, Vec::new(), None);
+        // a disk must leave the protected scan where it was (within a voxel)
+        let anatomy: Vec<Vec3> =
+            p.v.iter()
+                .zip(&p.protected)
+                .filter(|(_, k)| **k)
+                .map(|(q, _)| q.as_vec3())
+                .collect();
+        for _ in 0..TUNNEL_ROUNDS {
+            let genus = holes::genus(full.positions.len(), &full.tris);
+            let left = genus - kept.len() as i64;
+            if left <= 0 || left > TUNNEL_MAX {
+                break;
+            }
+            let scan = match &mut scan {
+                Some(s) => s,
+                none => none.insert(tunnels::Scan::new(
+                    &closed_on_floor(&walled),
+                    1.5 * params.voxel_mm,
+                )?),
+            };
+            let plan = tunnels::plan(&full, &solid, scan, params.voxel_mm, &kept);
+            kept.extend(plan.kept);
+            // every disk at once; when that leaves as many tunnels (a disk
+            // made others), the shortest ones each on its own, added or taken
+            // away as the middle of their loop says, then the other way
+            let flipped: Vec<tunnels::Disk> = plan
+                .disks
+                .iter()
+                .take(SINGLE_DISKS)
+                .map(tunnels::Disk::flipped)
+                .collect();
+            let mut groups: Vec<(usize, Vec<&tunnels::Disk>)> =
+                vec![(usize::MAX, plan.disks.iter().collect())];
+            for (k, (d, f)) in plan.disks.iter().zip(&flipped).enumerate() {
+                if plan.disks.len() > 1 {
+                    groups.push((k, vec![d]));
+                }
+                groups.push((k, vec![f]));
+            }
+            let mut progress = false;
+            let mut closed_disk = vec![false; flipped.len()];
+            for (k, group) in groups.into_iter().filter(|(_, g)| !g.is_empty()) {
+                if closed_disk.get(k).copied().unwrap_or(false) {
+                    continue;
+                }
+                let now = holes::genus(full.positions.len(), &full.tris);
+                let next = tunnels::apply(&solid, &group, vs, &sdf, &walls)?;
+                if !tunnels::keeps_anatomy(&solid, &next, &group, &anatomy, vs) {
+                    continue;
+                }
+                let (mesh, loose) = main_piece(next.to_mesh()?);
+                let left = holes::genus(mesh.positions.len(), &mesh.tris);
+                if left >= now {
+                    continue;
+                }
+                tunnels_closed += (now - left) as usize;
+                (solid, full, loose_pieces) = (next, mesh, loose);
+                progress = true;
+                if k == usize::MAX {
+                    break;
+                }
+                closed_disk[k] = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+        drop((solid, walls, walled, scan));
         let to_case = frame::rigid_inverse(&p.to_work);
         let reduced = crate::shell::reduce_to(&full, params.tolerance_mm, Some(&to_case))
             .map_err(|e| StudyBaseError::Invalid(e.to_string()))?;
         drop(full);
         let case_mesh = moved(&reduced, &to_case);
         drop(reduced);
+        let kept: Vec<Tunnel> = kept
+            .iter()
+            .map(|k| Tunnel {
+                at: to_case.transform_point3(k.at).to_array(),
+                loop_mm: k.loop_mm,
+            })
+            .collect();
 
         // measures, in the common frame
         let common = moved(&case_mesh, &to_common);
@@ -1373,7 +1921,8 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
         }
         let zs = common.positions.iter().map(|q| f64::from(q.z) * sgn);
         let measured_height = zs.fold(f64::NEG_INFINITY, f64::max);
-        let v = case_mesh.validate();
+        let solid = solid_check(&case_mesh, kept.len(), key, &mut warnings);
+        let watertight = solid.is_closed();
         let origin = DVec3::from(frame_report.origin);
         reports.insert(
             key.to_owned(),
@@ -1384,15 +1933,22 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
                 depth_mm: p.depth,
                 land_mm: land,
                 base_plane: Plane::new(origin + z_axis * (sgn * h), z_axis * sgn),
+                frame: frame_report.clone(),
                 outline: o.clone(),
                 design_angles_deg: design[key].clone(),
                 measured_angles_deg: measured_angles,
                 walls: walls_m,
                 base_tilt_deg: base_tilt,
                 measured_height_mm: measured_height,
-                faces: v.faces,
-                watertight: v.is_watertight(),
-                components: v.components,
+                faces: case_mesh.tris.len(),
+                watertight,
+                components: solid.pieces,
+                genus: solid.genus,
+                tunnels_closed,
+                tunnels: kept,
+                open_edges: solid.boundary_edges,
+                nonmanifold_edges: solid.nonmanifold_edges,
+                loose_pieces,
                 seconds: t0.elapsed().as_secs_f64(),
             },
         );
@@ -1420,6 +1976,7 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, StudyBaseError>
         style: params.style,
         occlusal_plane: Plane::new(origin, z_axis),
         back_plane: Plane::new(origin + y * back_y, -y),
+        paired: prepared.len() == 2,
         frame: frame_report,
         arches: reports,
         total_height_mm: total,

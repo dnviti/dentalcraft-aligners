@@ -366,6 +366,93 @@ pub fn signed_volume(v: &[DVec3], tris: &[[u32; 3]]) -> f64 {
         / 6.0
 }
 
+/// Distance from `p` to the triangle `t` (Ericson, *Real-Time Collision
+/// Detection*, 5.1.5).
+pub fn point_triangle_distance(p: DVec3, t: &[DVec3; 3]) -> f64 {
+    let [a, b, c] = *t;
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return ap.length();
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return bp.length();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return (p - (a + ab * (d1 / (d1 - d3)))).length();
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return cp.length();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return (p - (a + ac * (d2 / (d2 - d6)))).length();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+        return (p - (b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))))).length();
+    }
+    let sum = va + vb + vc;
+    if sum <= 0.0 {
+        // a degenerate triangle: its corners
+        return ap.length().min(bp.length()).min(cp.length());
+    }
+    (p - (a + ab * (vb / sum) + ac * (vc / sum))).length()
+}
+
+/// The triangles lying within `reach` of another triangle that faces away
+/// from them (normals more than 120° apart) and shares no point with them
+/// (from their centre or a corner): the two sides of a part of the surface
+/// thinner than `reach`, a fold or the walls of a tunnel.
+pub fn thin_faces(v: &[DVec3], tris: &[[u32; 3]], reach: f64) -> Vec<bool> {
+    let (n, _) = tri_normals(v, tris);
+    let corners: Vec<[DVec3; 3]> = tris.iter().map(|t| t.map(|i| v[i as usize])).collect();
+    let centres: Vec<DVec3> = corners.iter().map(|c| (c[0] + c[1] + c[2]) / 3.0).collect();
+    // two triangles within `reach` have their centres within the cell
+    let half = corners
+        .iter()
+        .zip(&centres)
+        .flat_map(|(c, m)| c.iter().map(move |p| (*p - *m).length()))
+        .fold(0.0f64, f64::max);
+    let cell = (2.0 * half + reach).max(1e-9);
+    let key = |p: DVec3| {
+        let k = (p / cell).floor();
+        (k.x as i64, k.y as i64, k.z as i64)
+    };
+    let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (f, m) in centres.iter().enumerate() {
+        grid.entry(key(*m)).or_default().push(f);
+    }
+    let mut out = vec![false; tris.len()];
+    for f in 0..tris.len() {
+        let (kx, ky, kz) = key(centres[f]);
+        let probes = [centres[f], corners[f][0], corners[f][1], corners[f][2]];
+        let near = (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                (-1..=1).any(|dz| {
+                    grid.get(&(kx + dx, ky + dy, kz + dz)).is_some_and(|list| {
+                        list.iter().any(|&g| {
+                            n[f].dot(n[g]) < -0.5
+                                && !tris[g].iter().any(|i| tris[f].contains(i))
+                                && probes
+                                    .iter()
+                                    .any(|&p| point_triangle_distance(p, &corners[g]) < reach)
+                        })
+                    })
+                })
+            })
+        });
+        out[f] = near;
+    }
+    out
+}
+
 /// `v / |v|`, `v` itself when it is zero (`mu.normalize`).
 pub fn normalize(v: DVec3) -> DVec3 {
     let n = v.length();

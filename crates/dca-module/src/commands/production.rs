@@ -72,10 +72,16 @@ pub(crate) struct TrimPatch {
     mode: Option<TrimMode>,
     /// Edge above the gingival margin, positive on the tooth (-2 to 5 mm).
     margin_gap_mm: Option<f64>,
-    /// Recess between the teeth (0.6 to 2.5 mm).
+    /// Smooth edge: how far inside the tangents to the two crowns the
+    /// block-out of the embrasure under every contact stands, the depth of
+    /// the bridge of the shell from one crown to the other (0 to 2.5 mm;
+    /// 0 for a straight bridge).
     recess_mm: Option<f64>,
     /// Height of the scallops (0 to 4 mm).
     scallop_mm: Option<f64>,
+    /// Smooth edge: least height above the gingival margin, so round every
+    /// papilla (0 to 3 mm; 0: the edge may come down onto the papilla).
+    papilla_relief_mm: Option<f64>,
     /// Edge beyond the equator (-2 to 1.5 mm).
     equator_offset_mm: Option<f64>,
     /// Edge extension (0 to 4 mm).
@@ -92,6 +98,9 @@ pub(crate) struct ShellPatch {
     shell_thickness_mm: Option<f64>,
     /// Inner clearance between tooth and shell (0 to 0.3 mm).
     clearance_mm: Option<f64>,
+    /// Space between the shell and the gingiva it covers, the papillae too
+    /// (0 to 1 mm; 0: the shell lies on the gingiva).
+    gum_clearance_mm: Option<f64>,
 }
 
 /// The identification text (the plugin's `stamp_*`).
@@ -418,7 +427,7 @@ mod tests {
         assert_eq!(d.trim.mode, TrimMode::Equator);
         assert_eq!(d.trim.margin_gap_mm, -1.0);
         assert_eq!(d.trim.insertion_axis, InsertionAxis::Common);
-        assert_eq!(d.trim.recess_mm, 1.6);
+        assert_eq!(d.trim.recess_mm, dca_model::TrimParams::default().recess_mm);
         assert_eq!(d.settings.shell_thickness_mm, 0.8);
         assert_eq!(d.settings.clearance_mm, 0.0);
         assert_eq!(d.settings.stamp.tooth, StampTooth::SecondPremolarLeft);

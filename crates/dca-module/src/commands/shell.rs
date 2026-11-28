@@ -291,6 +291,8 @@ pub(crate) struct StageGeometry {
 pub(crate) fn shell_error(e: shell::ShellError) -> CommandError {
     match e {
         shell::ShellError::Invalid(m) => CommandError::Invalid(m),
+        e @ (shell::ShellError::VoxelOutOfRange { .. }
+        | shell::ShellError::WallThinnerThanVoxel { .. }) => CommandError::Invalid(e.to_string()),
         other => failed(other),
     }
 }
@@ -323,9 +325,15 @@ fn stage_report(out: &StageSolids, design: &Design) -> Result<Value, CommandErro
         let (lo, hi) = outer
             .iter()
             .fold((f64::INFINITY, 0.0f64), |(a, b), x| (a.min(*x), b.max(*x)));
+        // over the gingiva the outer side stands the space over it farther out
         rep.insert(
             "wall_mm".to_owned(),
-            json!({ "target": design.clearance_mm + design.thickness_mm, "min": lo, "max": hi }),
+            json!({
+                "target": design.clearance_mm + design.thickness_mm,
+                "over_gum": design.clearance_mm + design.gum_clearance_mm + design.thickness_mm,
+                "min": lo,
+                "max": hi,
+            }),
         );
     }
     rep.insert(
@@ -392,7 +400,11 @@ fn run_print(
     }
     out.insert(
         "design".to_owned(),
-        json!({ "thickness_mm": design.thickness_mm, "clearance_mm": design.clearance_mm }),
+        json!({
+            "thickness_mm": design.thickness_mm,
+            "clearance_mm": design.clearance_mm,
+            "gum_clearance_mm": design.gum_clearance_mm,
+        }),
     );
     // nothing is stored: the case is returned as it was
     Ok((state.clone(), Value::Object(out)))
@@ -467,6 +479,26 @@ mod tests {
     }
 
     #[test]
+    fn bad_voxels_and_thin_walls_are_invalid_params() {
+        for e in [
+            shell::ShellError::VoxelOutOfRange {
+                what: "shell_voxel_mm",
+                value: 0.001,
+            },
+            shell::ShellError::WallThinnerThanVoxel {
+                thickness_mm: 0.5,
+                voxel_mm: 0.3,
+            },
+        ] {
+            assert!(matches!(shell_error(e), CommandError::Invalid(_)));
+        }
+        assert!(!matches!(
+            shell_error(shell::ShellError::Geometry("x".into())),
+            CommandError::Invalid(_)
+        ));
+    }
+
+    #[test]
     fn without_closed_teeth_the_command_says_what_is_missing() {
         let state = CaseState::default();
         assert!(matches!(
@@ -518,6 +550,13 @@ mod tests {
 
     /// The commands on a golden case with the closed teeth and the gingiva of
     /// the other stages (coarse voxels): every solid closed, the wall thick.
+    /// The wall is measured between the two sheets of the untrimmed shell
+    /// (from every point of its outer side over the teeth to its fitting
+    /// side): both are levels of the same relieved field, so the wall is the
+    /// thickness over the crowns and over the gingiva relieved alike. The
+    /// distance of the outer side to the printed model is no wall: the model
+    /// has no relief over the gingiva and no closing of its crevices, and
+    /// the untrimmed shell goes round all of it (0.5 to 3.5 mm).
     #[test]
     #[ignore = "reconstruction, gingiva and two stages of print geometry: run with --release --ignored"]
     fn a_reconstructed_case_gives_closed_solids() {
@@ -540,7 +579,7 @@ mod tests {
         s1.poses
             .insert(f, Pose::from_translation(glam::DVec3::new(0.25, 0.0, 0.0)));
         data.stages = vec![s1];
-        state.set_module(MODULE_ID, dc_case::ModuleState::new(data));
+        state.set_module(MODULE_ID, dc_case::ModuleState::new(data.clone()));
         let params = json!({ "model_voxel_mm": 0.2, "shell_voxel_mm": 0.2, "tolerance_mm": 0.02 });
         let (next, out) = run(
             "aligners.production.shell.automatic",
@@ -549,14 +588,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(next.referenced_blobs(), state.referenced_blobs());
-        for k in ["0", "1"] {
-            let st = &out["lower"][k];
+        let p: Params = serde_json::from_value(params.clone()).unwrap();
+        let design = p.design(&data.settings);
+        let print = ArchPrint::new(&state, &data, Arch::Lower).unwrap().unwrap();
+        let outputs = Outputs {
+            model: true,
+            blockout: false,
+            shell: true,
+        };
+        for k in [0u32, 1] {
+            let st = &out["lower"][k.to_string()];
             assert_eq!(st["shell"]["watertight"], true, "{st}");
             assert_eq!(st["model"]["watertight"], true, "{st}");
             assert_eq!(st["model"]["components"], 1, "{st}");
-            let wall = &st["wall_mm"];
-            assert!((wall["max"].as_f64().unwrap() - 1.0).abs() < 0.1, "{wall}");
-            assert!((wall["min"].as_f64().unwrap() - 1.0).abs() < 0.1, "{wall}");
+            let solids = print.build(&data.stages, k, &p, &design, outputs).unwrap();
+            let (sh, model) = (solids.shell.unwrap(), solids.model.unwrap());
+            // the two sheets: the outer one farther from the model than the
+            // middle of the wall
+            let split = design.clearance_mm + 0.5 * design.thickness_mm;
+            let outer: Vec<bool> = shell::wall_distances(&sh, &model)
+                .unwrap()
+                .into_iter()
+                .map(|d| d >= split)
+                .collect();
+            let fitting = TriMesh::new(
+                sh.positions.clone(),
+                sh.tris
+                    .iter()
+                    .filter(|t| t.iter().all(|&i| !outer[i as usize]))
+                    .copied()
+                    .collect(),
+            );
+            // the outer side over the teeth of the stage (and the gingiva
+            // next to them)
+            let g = print.stage(&data.stages, k);
+            let mut teeth = TriMesh::default();
+            for t in &g.teeth {
+                let off = teeth.positions.len() as u32;
+                teeth.positions.extend_from_slice(&t.positions);
+                teeth.tris.extend(t.tris.iter().map(|x| x.map(|i| i + off)));
+            }
+            let reach = design.clearance_mm + design.thickness_mm + 0.5;
+            let near: Vec<glam::Vec3> = shell::wall_distances(&sh, &teeth)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .filter(|&(i, d)| outer[i] && d <= reach)
+                .map(|(i, _)| sh.positions[i])
+                .collect();
+            let wall = shell::wall_distances(&TriMesh::new(near, Vec::new()), &fitting).unwrap();
+            let (lo, hi) = wall
+                .iter()
+                .fold((f64::INFINITY, 0.0f64), |(a, b), x| (a.min(*x), b.max(*x)));
+            eprintln!(
+                "stage {k}: wall over the teeth {lo:.3} to {hi:.3} mm on {} points (thickness {})",
+                wall.len(),
+                design.thickness_mm
+            );
+            assert!(wall.len() > 1000, "stage {k}: {} points", wall.len());
+            // both sheets are cut from the field on its 0.2 mm voxels (and
+            // reduced within 0.02 mm): within three quarters of a voxel
+            for v in [lo, hi] {
+                assert!(
+                    (v - design.thickness_mm).abs() < 0.15,
+                    "stage {k}: wall {lo:.3} to {hi:.3} mm"
+                );
+            }
         }
         let (_, out) = run("aligners.production.blockout", &state, params).unwrap();
         assert_eq!(out["lower"]["1"]["blockout"]["watertight"], true);

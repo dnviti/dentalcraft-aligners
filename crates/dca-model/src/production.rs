@@ -227,6 +227,7 @@ impl AlignersState {
             "shell": {
                 "shell_thickness_mm": self.settings.shell_thickness_mm,
                 "clearance_mm": self.settings.clearance_mm,
+                "gum_clearance_mm": self.settings.gum_clearance_mm,
             },
             "stamp": self.settings.stamp,
             "bite": self.aligner_bite.occlusal,
@@ -252,10 +253,12 @@ impl AlignersState {
                 struct Shell {
                     shell_thickness_mm: f64,
                     clearance_mm: f64,
+                    gum_clearance_mm: f64,
                 }
                 let s: Shell = serde_json::from_value(values)?;
                 self.settings.shell_thickness_mm = s.shell_thickness_mm;
                 self.settings.clearance_mm = s.clearance_mm;
+                self.settings.gum_clearance_mm = s.gum_clearance_mm;
             }
             "stamp" => self.settings.stamp = serde_json::from_value(values)?,
             "bite" => self.aligner_bite.occlusal = serde_json::from_value(values)?,

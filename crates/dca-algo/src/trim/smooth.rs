@@ -4,15 +4,37 @@
 //! line without steps with gentle scallops, `gap` mm above the margin; round
 //! the distal face of the last tooth covered of each side; nothing kept
 //! behind it and over the teeth left out.
+//!
+//! Papillae (not in the plugin): the scallops are held within
+//! `±scallop / 2` of the smoothed margin, but a papilla rises 1-4 mm above
+//! it, so the border of the plugin comes down between the teeth onto the
+//! tip of every papilla (a real case: 0.4-0.9 mm above it, or up to 0.6 mm
+//! on it, against 2 mm above the margin in the middle of the teeth). With a
+//! `relief` the border is raised wherever it is less than that above the
+//! margin, and above the tip of every papilla within [`PAPILLA_TOP_MM`] of
+//! it along the arch ([`papilla_tops`]), in a rounded notch round the
+//! papilla ([`papilla_lift`]), never within [`PAPILLA_NECK_MM`] of the top
+//! of the contact of the two crowns ([`contacts`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use dc_case::Fdi;
-use glam::{DVec2, DVec3};
+use dc_geom::knn::KnnIndex;
+use glam::{DVec2, DVec3, Vec3};
 
-use super::survey::median;
+use super::line::{EQUATOR_TOP_MM, ToothLoop};
+use super::survey::{loop_z, median};
 use crate::reconstruct::TAPER_RIM_MM;
 
+/// The border at the equator ([`smooth_border_at`] with the equators): on a
+/// tooth it is never higher than this share of the crown above its zenith
+/// (along a vertical path the labial equator of a proclined incisor lies in
+/// the incisal third: the face would be left bare).
+pub const EQUATOR_CROWN_SHARE: f64 = 0.5;
+/// ... and never nearer than this (mm) to the gingival zenith of the tooth,
+/// whatever the margin gap (the user, 2026-11-28: the border was too near
+/// the gingiva; it stays clear of it, not wrapping it, not touching it).
+pub const EQUATOR_GUM_MM: f64 = 2.0;
 /// The control points along the arch every this many mm ...
 pub const SMOOTH_STEP_MM: f64 = 0.5;
 /// ... the line under the scallops: the margin smoothed along the arch
@@ -39,6 +61,58 @@ pub const SMOOTH_NEAR_MM: f64 = 3.5;
 /// ... from the crown of the last tooth covered of each side only this (no
 /// papilla under a contact past it; `trim::smooth_near`).
 pub const SMOOTH_END_NEAR_MM: f64 = 1.0;
+/// Default of [`super::Params::papilla_relief_mm`]: the edge stays this far
+/// above the gingival margin (mm) all along the arch, round every papilla.
+pub const PAPILLA_RELIEF_MM: f64 = 1.0;
+/// The tip of the papilla under a contact is the highest margin point of a
+/// side within this distance (mm) along the arch of the contact, and the
+/// border stands the relief above it as far on either side of it
+/// ([`papilla_tops`]): the edge crosses the gap between the crowns in the
+/// plane of their contact, which meets the line of the arch at a slant, and
+/// the trim surface between the two rings of its points takes the height
+/// of the nearest of them, so the edge passes over the papilla up to this
+/// far along the arch from the tip (three real arches: 0.5 to 1.5 mm, the
+/// edge 0.3 mm above the tip there against 1 mm at the tip's own place).
+pub const PAPILLA_TOP_MM: f64 = 1.5;
+/// The border raised round a papilla falls back to its own height this far
+/// (mm, along the arch) from where the lift is needed, as the bump
+/// [`notch`]: a notch with a rounded top and no step at its feet.
+pub const PAPILLA_NOTCH_HALF_MM: f64 = 2.5;
+/// The raised border stays this far (mm) under the top of the contact of
+/// the two crowns, so that their caps stay joined round it ...
+pub const PAPILLA_NECK_MM: f64 = 0.5;
+/// ... the limit rising away from it along the arch as a rounded V
+/// ([`soft_abs`] with this radius, mm; one mm per mm far from it) ...
+pub const PAPILLA_CAP_ROUND_MM: f64 = 1.0;
+/// ... and the raised border meeting that limit in a round of this width
+/// (mm, [`smooth_min`]), never a sharp corner the rim could not round.
+pub const PAPILLA_ROUND_MM: f64 = 0.5;
+/// Two neighbouring crowns whose scanned points come closer than this (mm)
+/// have a contact; farther apart, nothing holds the border down.
+pub const PAPILLA_CONTACT_MM: f64 = 2.0;
+/// The scanned points of two crowns at most this much (mm) farther apart
+/// than their closest two touch as well: the contact is a zone, not a
+/// point (where the scanner cannot see between two crowns, the boundary of
+/// their labels runs from the contact down to each papilla, every point of
+/// it as close as the contact itself).
+pub const PAPILLA_CONTACT_TOL_MM: f64 = 0.1;
+/// A papilla under a contact whose crowns touch (within
+/// [`crate::shell::embrasure::TOUCH_MM`]) lies under the interproximal
+/// block-out of the shell when the shell has it ([`smooth_border`]
+/// `blocked_out`): the border is not raised round it within this distance
+/// (mm, along the arch) of the contact, and crosses it straight from the
+/// zenith of one tooth to the next ([`zenith_line`]), the wall standing on
+/// the block-out over the papilla.
+pub const PAPILLA_BLOCKED_MM: f64 = 2.5;
+/// The zenith of a tooth on a side is its lowest margin point within this
+/// (mm, along the arch) of the middle of its crown ([`zenith_line`]).
+pub const ZENITH_MM: f64 = 2.0;
+/// Past the ends of its stretches (behind the last tooth, beside a space or
+/// a missing tooth) the zenith line rises this many mm per mm along the
+/// arch until the border of the plugin is lower ([`zenith_line`]): ended
+/// there, the border stepped up from the zenith to the plugin's in a slot
+/// with sharp corners (Provino-demo stage 1, the distal-palatal of 26).
+pub const ZENITH_RISE: f64 = 1.0;
 
 /// `y` smoothed by a gaussian of `sigma` samples, the weights renormalised
 /// at the ends (`_gauss_rows`).
@@ -55,6 +129,192 @@ pub fn gauss_rows(y: &[f64], sigma: f64) -> Vec<f64> {
             num / den
         })
         .collect()
+}
+
+/// The bump of the rounded notch `t` half-widths from its top: `(1 − t²)²`,
+/// 1 at the top, 0 with a flat tangent at its feet (`|t| ≥ 1`).
+pub fn notch(t: f64) -> f64 {
+    let u = 1.0 - t * t;
+    if u > 0.0 { u * u } else { 0.0 }
+}
+
+/// The weights of the notch ([`notch`], half-width
+/// [`PAPILLA_NOTCH_HALF_MM`]) at 0, 1, 2 ... samples `step` mm apart.
+pub fn notch_weights(step: f64) -> Vec<f64> {
+    let n = (PAPILLA_NOTCH_HALF_MM / step.max(1e-3)).ceil() as usize;
+    (0..=n)
+        .map(|k| notch(k as f64 * step / PAPILLA_NOTCH_HALF_MM))
+        .collect()
+}
+
+/// `|x|` rounded at 0 with the radius `r`: `√(x² + r²) − r`.
+pub fn soft_abs(x: f64, r: f64) -> f64 {
+    (x * x + r * r).sqrt() - r
+}
+
+/// The smaller of `a` and `b`, their corner rounded over `k` (the
+/// polynomial smooth minimum): `min(a, b)` when they are `k` or more apart,
+/// never above it and never more than `k / 4` under it.
+pub fn smooth_min(a: f64, b: f64, k: f64) -> f64 {
+    let m = if a < b { a } else { b };
+    if k <= 0.0 {
+        return m;
+    }
+    let d = k - (a - b).abs();
+    let h = if d > 0.0 { d / k } else { 0.0 };
+    m - h * h * k * 0.25
+}
+
+/// The border `z` (heights of samples along the arch) raised where it is
+/// under `need` (the margin plus the relief), at most to `cap` (under the
+/// contact of two crowns): every sample short of its target `min(need,
+/// cap)` lifts the samples round it by that much times the notch `weights`
+/// ([`notch_weights`], 1 at its own sample), the highest lift is kept, the
+/// sample's own target reached, then the border is held under `cap` (unless
+/// it was already above it) by a [`smooth_min`] over [`PAPILLA_ROUND_MM`]:
+/// where the notch meets the limit the line turns round, never in a corner.
+///
+/// Never lowers the border; reaches `min(need, cap)` at every sample, less
+/// at most a quarter of the round; never passes `max(z, cap)`; a border at
+/// or above `need` everywhere is left as it is (the Kani laws below). `need`
+/// may be `−∞` (no margin there) and `cap` `+∞` (no contact near).
+pub fn papilla_lift(z: &[f64], need: &[f64], cap: &[f64], weights: &[f64]) -> Vec<f64> {
+    let n = z.len();
+    if weights.is_empty() || need.len() != n || cap.len() != n {
+        return z.to_vec();
+    }
+    // the height every sample must reach (never under the border)
+    let target: Vec<f64> = (0..n)
+        .map(|i| {
+            let t = if need[i] < cap[i] { need[i] } else { cap[i] };
+            if t > z[i] { t } else { z[i] }
+        })
+        .collect();
+    let lift: Vec<f64> = (0..n).map(|i| target[i] - z[i]).collect();
+    let k = weights.len();
+    (0..n)
+        .map(|i| {
+            let mut l = 0.0;
+            let lo = i.saturating_sub(k - 1);
+            let hi = (i + k).min(n);
+            for (j, &lj) in lift.iter().enumerate().take(hi).skip(lo) {
+                let v = lj * weights[i.abs_diff(j)];
+                if v > l {
+                    l = v;
+                }
+            }
+            let raised = z[i] + l;
+            let raised = if target[i] > raised {
+                target[i]
+            } else {
+                raised
+            };
+            let ceiling = if cap[i] > z[i] { cap[i] } else { z[i] };
+            let held = smooth_min(raised, ceiling, PAPILLA_ROUND_MM);
+            if held > z[i] { held } else { z[i] }
+        })
+        .collect()
+}
+
+/// The contacts of the neighbouring crowns of `marg` (arch order), for
+/// every two consecutive teeth whose scanned points come closer than
+/// [`PAPILLA_CONTACT_MM`]: the top of the zone where they touch, the
+/// highest middle of two points at most [`PAPILLA_CONTACT_TOL_MM`] farther
+/// apart than the closest two. Under it the crowns touch, or the scan
+/// bridges the gap between them down to the papillae: the closest two alone
+/// may lie anywhere on that bridge, as low as a papilla (a real case: 3 mm
+/// under the contact, 2.4 mm under the tip of the papilla it held down).
+/// Each with the distance of the closest two.
+fn contacts(marg: &[(Fdi, Vec<DVec3>)], crowns: &BTreeMap<Fdi, Vec<DVec3>>) -> Vec<(f64, DVec3)> {
+    marg.windows(2)
+        .filter_map(|w| {
+            let (a, b) = (crowns.get(&w[0].0)?, crowns.get(&w[1].0)?);
+            let pb: Vec<Vec3> = b.iter().map(|p| p.as_vec3()).collect();
+            let index = KnnIndex::build(&pb).ok()?;
+            let pairs: Vec<(f64, DVec3)> = a
+                .iter()
+                .filter_map(|p| {
+                    let q = b[index.nearest(p.as_vec3())?.index as usize];
+                    Some((p.distance(q), (*p + q) * 0.5))
+                })
+                .collect();
+            let closest = pairs.iter().map(|(d, _)| *d).fold(f64::INFINITY, f64::min);
+            if closest > PAPILLA_CONTACT_MM {
+                return None;
+            }
+            pairs
+                .into_iter()
+                .filter(|(d, _)| *d <= closest + PAPILLA_CONTACT_TOL_MM)
+                .map(|(_, c)| c)
+                .max_by(|x, y| x.z.total_cmp(&y.z))
+                .map(|c| (closest, c))
+        })
+        .collect()
+}
+
+/// `tip` (the highest margin point of every sample `g` of a side, `−∞`
+/// without one) with the tip of the papilla under every contact of `touch`
+/// (its place along the arch first: the highest of `tip` within
+/// [`PAPILLA_TOP_MM`] of it) held as far on either side of that tip: every
+/// sample there at least as high.
+fn papilla_tops(g: &[f64], touch: &[(f64, f64)], tip: &[f64]) -> Vec<f64> {
+    let mut out = tip.to_vec();
+    let n = g.len().min(tip.len());
+    for &(s, _) in touch {
+        let Some(kt) = (0..n)
+            .filter(|&k| (g[k] - s).abs() <= PAPILLA_TOP_MM && tip[k].is_finite())
+            .max_by(|&a, &b| tip[a].total_cmp(&tip[b]))
+        else {
+            continue;
+        };
+        for k in (0..n).filter(|&k| (g[k] - g[kt]).abs() <= PAPILLA_TOP_MM) {
+            out[k] = out[k].max(tip[kt]);
+        }
+    }
+    out
+}
+
+/// The SMOOTH border of one side under the block-out: `gap` over the zenith
+/// of every tooth (`zen`: arc length and height, arch order) and straight
+/// from one zenith to the next where a contact with the block-out under it
+/// (`blocked`, arc lengths) lies between them; past the ends of those
+/// stretches it rises [`ZENITH_RISE`] mm per mm, so that the border taken as
+/// the smaller of it and the plugin's ([`smooth_min`]) never steps where a
+/// stretch ends; smoothed as the scallops. All `+∞` over the samples `g`
+/// (step `step`) without any such stretch.
+pub fn zenith_line(
+    zen: &[(f64, f64)],
+    g: &[f64],
+    blocked: &[f64],
+    gap: f64,
+    step: f64,
+) -> Vec<f64> {
+    let mut out = vec![f64::INFINITY; g.len()];
+    let mut ends: Vec<(f64, f64)> = Vec::new();
+    for w in zen.windows(2) {
+        let ((s0, z0), (s1, z1)) = (w[0], w[1]);
+        if s1 <= s0 || !blocked.iter().any(|&b| b > s0 && b < s1) {
+            continue;
+        }
+        ends.push((s0, gap + z0));
+        ends.push((s1, gap + z1));
+        for (k, &s) in g.iter().enumerate() {
+            if (s0..=s1).contains(&s) {
+                out[k] = gap + z0 + (s - s0) / (s1 - s0) * (z1 - z0);
+            }
+        }
+    }
+    if ends.is_empty() {
+        return out;
+    }
+    for (v, &s) in out.iter_mut().zip(g) {
+        if !v.is_finite() {
+            *v = ends.iter().fold(f64::INFINITY, |m, &(se, ze)| {
+                m.min(ze + ZENITH_RISE * (s - se).abs())
+            });
+        }
+    }
+    gauss_rows(&out, SMOOTH_WAVE_SIGMA_MM / step)
 }
 
 /// Height and depth of the border at one end of a side.
@@ -219,18 +479,29 @@ fn gum_ends(
 /// `crowns`: the crown points of every tooth of the case; `covered`: the
 /// teeth the aligner covers; `outer`: clearance + wall; `gap`: the border
 /// above the margin (towards the crown; negative on the gingiva);
-/// `scallop`: the height of the scallops. The distal half of the last tooth
-/// of each side counts only its margin at the gum ([`gum_ends`]). Returns
-/// the border points and the high points (nothing kept under them), or
-/// `None` with fewer than two teeth with a margin.
-#[allow(clippy::too_many_lines)]
-pub fn smooth_border(
+/// `scallop`: the height of the scallops; `relief`: the border raised to at
+/// least this above the margin all along the arch, in a rounded notch round
+/// every papilla and never within [`PAPILLA_NECK_MM`] of a contact
+/// ([`papilla_lift`]; `0`: the plugin's border); `blocked_out`: the shell
+/// stands on the interproximal block-out under every contact whose crowns
+/// touch, so the border is not raised round the papillae under those
+/// contacts ([`PAPILLA_BLOCKED_MM`]) and runs straight across them from
+/// the zenith of one tooth to the next, `gap` over them ([`zenith_line`],
+/// never above the border of the plugin). The distal half of the
+/// last tooth of each side counts only its margin at the gum
+/// ([`gum_ends`]). Returns the border points and the high points (nothing
+/// kept under them), or `None` with fewer than two teeth with a margin.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub fn smooth_border_at(
     marg: &[(Fdi, Vec<DVec3>)],
     crowns: &BTreeMap<Fdi, Vec<DVec3>>,
     covered: &BTreeSet<Fdi>,
     outer: f64,
     gap: f64,
     scallop: f64,
+    relief: f64,
+    blocked_out: bool,
+    equator: Option<(&BTreeMap<Fdi, ToothLoop>, f64)>,
 ) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
     if marg.len() < 2 {
         return None;
@@ -256,6 +527,25 @@ pub fn smooth_border(
             *n = -*n; // +N: labial (out of the arch)
         }
     }
+    // the contacts of the neighbours (arc length, height): the border raised
+    // round a papilla stays under them
+    let found = if relief > 0.0 {
+        contacts(marg, crowns)
+    } else {
+        Vec::new()
+    };
+    let touch: Vec<(f64, f64)> = found
+        .iter()
+        .map(|(_, c)| (u[nearest(&l, c.truncate())], c.z))
+        .collect();
+    // the contacts with the block-out under them (arc length)
+    let blocked: Vec<f64> = found
+        .iter()
+        .zip(&touch)
+        .filter(|((d, _), _)| blocked_out && *d <= crate::shell::embrasure::TOUCH_MM)
+        .map(|(_, &(s, _))| s)
+        .collect();
+    let weights = notch_weights(SMOOTH_STEP_MM);
     let marg = &gum_ends(marg, &l, &u, &cen);
     let m: Vec<DVec3> = marg.iter().flat_map(|(_, p)| p.iter().copied()).collect();
     let near_m: Vec<usize> = m.iter().map(|p| nearest(&l, p.truncate())).collect();
@@ -341,6 +631,138 @@ pub fn smooth_border(
             .collect();
         let wave = gauss_rows(&dev, SMOOTH_WAVE_SIGMA_MM / step);
         let zb: Vec<f64> = base.iter().zip(&wave).map(|(a, w)| a + w + gap).collect();
+        // under the block-out the border stands `gap` over the zenith of
+        // every tooth and runs straight from one zenith to the next across
+        // every blocked papilla ([`zenith_line`]), never above the line of
+        // the plugin: the smoothing of the margin left 0.1 to 1.2 mm more of
+        // the crown out, and its scallops dipped round every papilla
+        let zb: Vec<f64> = if blocked.is_empty() {
+            zb
+        } else {
+            let mut zen = Vec::new();
+            let mut at = 0;
+            for (i, (_, p)) in marg.iter().enumerate() {
+                let sc = u[nearest(&l, cen[i])];
+                let low = (at..at + p.len())
+                    .filter(|&k| dm[k] * sign > 0.0 && (sm[k] - sc).abs() <= ZENITH_MM)
+                    .min_by(|&a, &b| m[a].z.total_cmp(&m[b].z));
+                if let Some(k) = low {
+                    zen.push((sm[k], m[k].z));
+                }
+                at += p.len();
+            }
+            let zl = zenith_line(&zen, &g, &blocked, gap, step);
+            zb.iter()
+                .zip(&zl)
+                .map(|(a, b)| smooth_min(*a, *b, PAPILLA_ROUND_MM))
+                .collect()
+        };
+        // the border at the equator (the user's rule, 2026-11-24: straight,
+        // at the height of the equator, a little raised over the papillae):
+        // on every tooth the height of contour of the face of this side,
+        // moved by the offset, never less than `gap` over the zenith nor
+        // above [`EQUATOR_CROWN_SHARE`] of the crown; straight from one
+        // tooth to the next; under the contacts as the papilla notch is
+        let zb: Vec<f64> = match equator {
+            None => zb,
+            Some((loops, offset)) => {
+                let mut pts: Vec<(f64, f64)> = Vec::new();
+                let mut at = 0;
+                for (i, (f, p)) in marg.iter().enumerate() {
+                    let sc = u[nearest(&l, cen[i])];
+                    let zen = (at..at + p.len())
+                        .filter(|&k| dm[k] * sign > 0.0 && (sm[k] - sc).abs() <= ZENITH_MM)
+                        .map(|k| m[k].z)
+                        .fold(f64::INFINITY, f64::min);
+                    at += p.len();
+                    let Some(lp) = loops.get(f) else { continue };
+                    if !zen.is_finite() {
+                        continue;
+                    }
+                    let (_, n) = along(&l, &nn, &u, sc);
+                    let d = sign * n;
+                    let dirs: Vec<DVec2> = [-0.35f64, 0.0, 0.35]
+                        .iter()
+                        .map(|a| {
+                            let (sa, ca) = a.sin_cos();
+                            lp.centre + 5.0 * DVec2::new(ca * d.x - sa * d.y, sa * d.x + ca * d.y)
+                        })
+                        .collect();
+                    let mut zs = loop_z(&lp.points, lp.centre, &dirs);
+                    let eq = median(&mut zs) - offset;
+                    let high =
+                        (zen + EQUATOR_CROWN_SHARE * (lp.top - zen)).min(lp.top - EQUATOR_TOP_MM);
+                    pts.push((sc, eq.min(high).max(zen + gap.max(EQUATOR_GUM_MM))));
+                }
+                pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if pts.len() < 2 {
+                    zb
+                } else {
+                    let (xs, hs): (Vec<f64>, Vec<f64>) = pts.iter().copied().unzip();
+                    // over every papilla the line passes at least `relief` above its
+                    // tip (the highest margin point of this side within
+                    // [`PAPILLA_TOP_MM`] of the contact): a knot
+                    // there, so the border rises to it from the middle of the two
+                    // teeth and never lies on the gingiva (the user, 2026-11-28: "not
+                    // wrapping it, not touching it")
+                    for &(sc, _) in &touch {
+                        let tip = (0..m.len())
+                            .filter(|&k| dm[k] * sign > 0.0 && (sm[k] - sc).abs() <= PAPILLA_TOP_MM)
+                            .map(|k| m[k].z)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        if tip.is_finite() {
+                            pts.push((sc, interp(sc, &xs, &hs).max(tip + relief)));
+                        }
+                    }
+                    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let (xs, hs): (Vec<f64>, Vec<f64>) = pts.into_iter().unzip();
+                    // no cap under the contacts here: the wall stands on the block-out of
+                    // the whole embrasure, and a cap drew the border down in a V towards
+                    // the papilla wherever two crowded incisors touch low
+                    let line: Vec<f64> = g.iter().map(|&s| interp(s, &xs, &hs)).collect();
+                    let line = gauss_rows(&line, SMOOTH_WAVE_SIGMA_MM / step);
+                    zb.iter()
+                        .zip(&line)
+                        .map(|(a, b)| -smooth_min(-*a, -*b, PAPILLA_ROUND_MM))
+                        .collect()
+                }
+            }
+        };
+        // round every papilla: the border at least `relief` above the highest
+        // margin point of every bin (the tip of a papilla, held round it),
+        // under the contacts
+        let zb = if relief > 0.0 {
+            let mut tip = vec![f64::NEG_INFINITY; g.len()];
+            for (&bi, ix) in &bins {
+                if let Some(v) = bi.checked_sub(lo_i).and_then(|k| tip.get_mut(k)) {
+                    *v = ix.iter().map(|&i| m[i].z).fold(f64::NEG_INFINITY, f64::max);
+                }
+            }
+            // over a papilla under the block-out the wall stands on the
+            // block-out: nothing to clear there
+            let need: Vec<f64> = papilla_tops(&g, &touch, &tip)
+                .into_iter()
+                .zip(&g)
+                .map(|(t, &s)| {
+                    if blocked.iter().any(|&b| (s - b).abs() <= PAPILLA_BLOCKED_MM) {
+                        f64::NEG_INFINITY
+                    } else {
+                        t + relief
+                    }
+                })
+                .collect();
+            let cap: Vec<f64> = g
+                .iter()
+                .map(|&s| {
+                    touch.iter().fold(f64::INFINITY, |c, &(sc, zc)| {
+                        c.min(zc - PAPILLA_NECK_MM + soft_abs(s - sc, PAPILLA_CAP_ROUND_MM))
+                    })
+                })
+                .collect();
+            papilla_lift(&zb, &need, &cap, &weights)
+        } else {
+            zb
+        };
         let db = gauss_rows(&d, SMOOTH_DEPTH_SIGMA_MM / step);
         let nb = zb.len();
         side_ends.insert(sign as i8, ((zb[0], db[0]), (zb[nb - 1], db[nb - 1])));
@@ -464,4 +886,221 @@ pub fn smooth_border(
         }
     }
     Some((out, high))
+}
+
+/// [`smooth_border_at`] without the equators: the border of the plugin,
+/// with the relief and the block-out as given.
+#[allow(clippy::too_many_arguments)]
+pub fn smooth_border(
+    marg: &[(Fdi, Vec<DVec3>)],
+    crowns: &BTreeMap<Fdi, Vec<DVec3>>,
+    covered: &BTreeSet<Fdi>,
+    outer: f64,
+    gap: f64,
+    scallop: f64,
+    relief: f64,
+    blocked_out: bool,
+) -> Option<(Vec<DVec3>, Vec<DVec3>)> {
+    smooth_border_at(
+        marg,
+        crowns,
+        covered,
+        outer,
+        gap,
+        scallop,
+        relief,
+        blocked_out,
+        None,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use dc_case::Fdi;
+    use glam::DVec3;
+
+    use super::{
+        PAPILLA_CONTACT_TOL_MM, PAPILLA_ROUND_MM, ZENITH_RISE, contacts, papilla_tops, smooth_min,
+        zenith_line,
+    };
+
+    /// Between two zeniths with a blocked contact between them the border
+    /// runs straight at the gap over them (smoothed); past the ends of the
+    /// stretch (behind the last tooth, a space, a missing tooth) it rises
+    /// gently, and the border, the smaller of it and the plugin's, never
+    /// steps up where the stretch ends (it did: a slot with sharp corners
+    /// behind the zenith of the last molar, Provino-demo stage 1, 26).
+    #[test]
+    fn the_zenith_line_is_straight_across_a_blocked_papilla() {
+        let g: Vec<f64> = (0..=60).map(|k| f64::from(k) * 0.5).collect();
+        let zen = [(2.0, -4.0), (10.0, -5.0), (20.0, -4.0)];
+        let line = zenith_line(&zen, &g, &[6.0], 1.5, 0.5);
+        for (s, z) in g.iter().zip(&line) {
+            assert!(z.is_finite(), "{s}: {z}");
+            if (3.0..=9.0).contains(s) {
+                let straight = 1.5 - 4.0 - (s - 2.0) / 8.0;
+                assert!((z - straight).abs() < 0.15, "{s}: {z} {straight}");
+            }
+        }
+        // rising away from the stretch
+        assert!(line[60] > line[30] + 5.0 && line[0] > line[8], "{line:?}");
+        // the plugin's border 1 mm over the zeniths: the border goes from
+        // the line back up to it without a step
+        let border: Vec<f64> = line
+            .iter()
+            .map(|z| smooth_min(-1.0, *z, PAPILLA_ROUND_MM))
+            .collect();
+        for w in border.windows(2) {
+            assert!(
+                (w[1] - w[0]).abs() <= ZENITH_RISE * 0.5 + 1e-9,
+                "a step of {} mm in {border:?}",
+                w[1] - w[0]
+            );
+        }
+        assert!(
+            (border[60] + 1.0).abs() < 1e-9 && border[16] < -3.0,
+            "{border:?}"
+        );
+        // no blocked contact: nothing
+        assert!(
+            zenith_line(&zen, &g, &[], 1.5, 0.5)
+                .iter()
+                .all(|z| z.is_infinite())
+        );
+    }
+
+    #[test]
+    fn the_contact_is_the_top_of_the_zone_where_two_crowns_touch() {
+        // two crowns bridged from their contact (z 0) down to the papilla
+        // (z -3): the closest two points lie at the bottom of the bridge
+        let (a, b) = (Fdi::new(31).unwrap(), Fdi::new(32).unwrap());
+        let bridge = |x: f64, k: usize| DVec3::new(x, 0.0, -3.0 + 0.1 * k as f64);
+        let crowns: BTreeMap<Fdi, Vec<DVec3>> = [
+            (a, (0..=30).map(|k| bridge(-0.02, k)).collect::<Vec<_>>()),
+            (
+                b,
+                (0..=30)
+                    .map(|k| bridge(if k == 0 { 0.0 } else { 0.03 }, k))
+                    .collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let marg = vec![(a, vec![DVec3::ZERO]), (b, vec![DVec3::ZERO])];
+        let c = contacts(&marg, &crowns);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].1.z.abs() < 1e-9, "the contact at {}", c[0].1);
+        // apart by more than the tolerance than the closest two, the bridge
+        // is no contact
+        let mut far = crowns.clone();
+        for p in far.get_mut(&b).unwrap().iter_mut().skip(1) {
+            p.x = 0.05 + PAPILLA_CONTACT_TOL_MM;
+        }
+        let c = contacts(&marg, &far);
+        assert!(c[0].1.z < -2.9, "the contact at {}", c[0].1);
+    }
+
+    #[test]
+    fn the_tip_of_a_papilla_is_held_round_it_along_the_arch() {
+        // samples every 0.5 mm, a papilla at s 5 under the contact at s 5.7
+        // and a higher bump past the reach of that contact
+        let g: Vec<f64> = (0..=20).map(|k| 0.5 * f64::from(k)).collect();
+        let mut tip = vec![0.0; g.len()];
+        tip[10] = 2.0;
+        tip[18] = 3.0;
+        tip[0] = f64::NEG_INFINITY;
+        let out = papilla_tops(&g, &[(5.7, 1.0)], &tip);
+        for (k, (&o, &t)) in out.iter().zip(&tip).enumerate() {
+            let want = if (7..=13).contains(&k) { 2.0 } else { t };
+            assert!(o == want, "sample {k} (s {}): {o}, want {want}", g[k]);
+        }
+        // no contact: the margin as it is
+        assert_eq!(papilla_tops(&g, &[], &tip), tip);
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{PAPILLA_NOTCH_HALF_MM, PAPILLA_ROUND_MM, SMOOTH_STEP_MM, notch, papilla_lift};
+
+    /// Three heights in tenths of a millimetre within ±4 mm (not exact in
+    /// binary: the rounding of the arithmetic is part of what is proved).
+    fn heights() -> [f64; 3] {
+        let a: [i8; 3] = kani::any();
+        a.map(|v| {
+            kani::assume((-40..=40).contains(&v));
+            f64::from(v) / 10.0
+        })
+    }
+
+    /// The margin plus the relief: a height, or none (`−∞`, no margin there).
+    fn needs() -> [f64; 3] {
+        let (h, none): ([f64; 3], [bool; 3]) = (heights(), kani::any());
+        [0, 1, 2].map(|i| if none[i] { f64::NEG_INFINITY } else { h[i] })
+    }
+
+    /// The limit under a contact: a height, or none (`+∞`, no contact near).
+    fn caps() -> [f64; 3] {
+        let (h, none): ([f64; 3], [bool; 3]) = (heights(), kani::any());
+        [0, 1, 2].map(|i| if none[i] { f64::INFINITY } else { h[i] })
+    }
+
+    /// The weights of the notch at 0, 1 and 2 samples, as the border uses them.
+    fn weights() -> [f64; 3] {
+        [0.0, 1.0, 2.0].map(|k| notch(k * SMOOTH_STEP_MM / PAPILLA_NOTCH_HALF_MM))
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_never_lowers_the_border() {
+        // The border raised round the papillae is nowhere lower than the
+        // border it starts from.
+        let (z, need, cap) = (heights(), needs(), caps());
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] >= z[i]);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_reaches_the_relief_or_the_cap() {
+        // At every sample the raised border is at least the margin plus the
+        // relief, or the limit under the contact where that is lower, less at
+        // most a quarter of the round where the notch meets that limit.
+        let (z, need, cap) = (heights(), needs(), caps());
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] >= need[i].min(cap[i]) - 0.25 * PAPILLA_ROUND_MM);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_never_passes_the_cap() {
+        // The raised border never goes above the limit under a contact,
+        // unless the border was already above it (it is never lowered).
+        let (z, need, cap) = (heights(), needs(), caps());
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] <= z[i].max(cap[i]));
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn papilla_lift_leaves_a_clear_border_alone() {
+        // A border already at least the relief above the margin everywhere
+        // is left exactly as it is.
+        let (z, need, cap) = (heights(), needs(), caps());
+        for i in 0..3 {
+            kani::assume(need[i] <= z[i]);
+        }
+        let out = papilla_lift(&z, &need, &cap, &weights());
+        for i in 0..3 {
+            assert!(out[i] == z[i]);
+        }
+    }
 }

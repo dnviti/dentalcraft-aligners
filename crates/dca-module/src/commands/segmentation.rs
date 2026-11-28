@@ -218,6 +218,22 @@ fn run_automatic(
     if arches.is_empty() {
         return Err(crate::commands::messages::none_seeded());
     }
+    // an arch with a scan and no seeds is named in the output, not dropped
+    // without a word (only when no arch was asked for)
+    let skipped: Vec<Arch> = match params.arch {
+        Some(_) => Vec::new(),
+        None => [Arch::Upper, Arch::Lower]
+            .into_iter()
+            .filter(|&a| state.case.scan(a.role()).is_some() && !has_seeds(a))
+            .collect(),
+    };
+    // deciduous teeth are not supported: refused by name, never dropped into
+    // a neighbour or the gum
+    for s in &data.seeds {
+        if arches.contains(&Arch::of(s.fdi)) {
+            crate::manual::common::permanent(s.fdi)?;
+        }
+    }
 
     // the gate of every later stage: nothing is computed on a scan whose arch
     // is still a guess
@@ -304,6 +320,11 @@ fn run_automatic(
 
         // what the old labels gave goes (3D teeth, measures, plan, doubts)
         invalidated.extend(data.clear_label_dependents(role));
+        // what the numbering left in doubt on these teeth is the first doubt
+        // of the arch (its check puts its own after it)
+        if let Some(d) = data.numbering_doubts.get(&role).filter(|d| !d.is_empty()) {
+            data.segmentation_doubts.insert(role, d.clone());
+        }
         // the labels blob: the scan of the case with one FDI per vertex, the
         // base of a scan closed with one gingiva
         let mut labelled = (**closed).clone();
@@ -351,6 +372,18 @@ fn run_automatic(
     let stale: Vec<_> = before.difference(&after).copied().collect();
     crate::manual::common::finish_blobs(&mut next, &stale);
     report.insert("teeth".to_owned(), json!(teeth));
+    for arch in skipped {
+        report.insert(
+            arch_name(arch).to_owned(),
+            json!({
+                "segmented": false,
+                "reason": crate::commands::messages::tr(
+                    "aligners-err-arch-no-seeds",
+                    &[("arch", &crate::commands::messages::arch_word(arch))],
+                ),
+            }),
+        );
+    }
     report.insert("seconds".to_owned(), json!(t_all.elapsed().as_secs_f64()));
     report.insert(
         "invalidated".to_owned(),
@@ -580,6 +613,53 @@ mod tests {
         assert!(matches!(
             run(&lower, json!({ "arch": "sideways" })),
             Err(CommandError::Invalid(_))
+        ));
+    }
+
+    /// Without an arch asked for, an arch with a scan and no seeds is named
+    /// in the output (not segmented, why), the other one is segmented.
+    #[test]
+    fn an_arch_without_seeds_is_named_as_skipped() {
+        let mut both = crate::commands::find("aligners.demo")
+            .unwrap()
+            .execute(
+                &demo_state("lower"),
+                &json!({ "arch": "upper", "severity": "mild" }),
+                &JobCtx::detached(),
+            )
+            .unwrap()
+            .0;
+        let mut data = both
+            .module_data::<AlignersState>(MODULE_ID)
+            .unwrap()
+            .clone();
+        data.seeds.retain(|s| Arch::of(s.fdi) == Arch::Lower);
+        both.set_module(MODULE_ID, ModuleState::new(data));
+        let (_, out) = run(&both, Value::Null).unwrap();
+        assert_eq!(out["upper"]["segmented"], false, "{out}");
+        assert!(
+            out["upper"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("tooth marks")),
+            "{out}"
+        );
+        assert!(out["lower"]["teeth"].as_u64().unwrap() > 0, "{out}");
+    }
+
+    /// A deciduous seed is refused by name before anything is computed.
+    #[test]
+    fn a_deciduous_seed_is_refused() {
+        let mut lower = demo_state("lower");
+        let mut data = lower
+            .module_data::<AlignersState>(MODULE_ID)
+            .unwrap()
+            .clone();
+        let s = data.seeds.iter_mut().find(|s| s.fdi.get() == 35).unwrap();
+        s.fdi = Fdi::new(75).unwrap();
+        lower.set_module(MODULE_ID, ModuleState::new(data));
+        assert!(matches!(
+            run(&lower, json!({ "arch": "lower" })),
+            Err(CommandError::Invalid(m)) if m.contains("75") && m.contains("deciduous")
         ));
     }
 

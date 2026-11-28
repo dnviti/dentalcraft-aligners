@@ -35,7 +35,14 @@ fn largest(v: DVec3) -> f64 {
 /// The unit quaternion of the rotation `q` that takes the shortest way to
 /// it: `w >= 0`, and at exactly 180 degrees (`w = 0`) the largest component
 /// of the axis positive.
+///
+/// The zero quaternion, which is no rotation (normalising it gives NaN), is
+/// read as the identity. A quaternion with a NaN or infinite component stays
+/// non-finite, so the staging refuses it instead of planning it.
 pub fn canonical(q: DQuat) -> DQuat {
+    if q.length_squared() == 0.0 {
+        return DQuat::IDENTITY;
+    }
     let q = q.normalize();
     let flip = if q.w == 0.0 {
         largest(q.xyz()) < 0.0
@@ -214,6 +221,30 @@ mod tests {
         assert!(
             (degrees(&Pose::from_rotation(DQuat::from_rotation_x(FRAC_PI_2))) - 90.0).abs() < 1e-12
         );
+    }
+
+    #[test]
+    fn a_zero_quaternion_is_no_rotation_and_a_nan_one_stays_nan() {
+        // normalising the zero quaternion gives NaN, which the staging would plan
+        let zero = DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+        assert_eq!(canonical(zero), DQuat::IDENTITY);
+        assert_eq!(canonical(-zero), DQuat::IDENTITY);
+        assert_eq!(to_rotvec(zero), DVec3::ZERO);
+        assert_eq!(
+            canonical_pose(&Pose {
+                t: DVec3::X,
+                q: zero
+            })
+            .q,
+            DQuat::IDENTITY
+        );
+        // a NaN is not hidden as the identity: the staging refuses it
+        let nan = DQuat::from_xyzw(f64::NAN, 0.0, 0.0, 1.0);
+        assert!(!canonical(nan).is_finite());
+        assert!(!to_rotvec(nan).is_finite());
+        // a tiny but non-zero quaternion is a rotation like any other
+        let small = DQuat::from_xyzw(0.0, 0.0, 1e-150, 1e-150);
+        assert!((angle(canonical(small)) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
     }
 }
 

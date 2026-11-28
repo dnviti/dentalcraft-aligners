@@ -217,7 +217,8 @@ fn run_automatic(
         )
         .map_err(|e| match e {
             reconstruct::ReconstructError::Cancelled => CommandError::Cancelled,
-            e => CommandError::Failed(format!("{} arch: {e}", arch_name(arch))),
+            e => not_solid(&e, arch)
+                .unwrap_or_else(|| CommandError::Failed(format!("{} arch: {e}", arch_name(arch)))),
         })?;
         ctx.check_cancelled()?;
         data.crowns
@@ -239,6 +240,23 @@ fn run_automatic(
     }
     next.set_module(MODULE_ID, ModuleState::new(data));
     Ok((next, Value::Object(out)))
+}
+
+/// The error naming a tooth that could not be closed into one solid, in the
+/// user's language (`None` for the other errors).
+fn not_solid(e: &reconstruct::ReconstructError, arch: Arch) -> Option<CommandError> {
+    let (key, f) = match e {
+        reconstruct::ReconstructError::NotClosed(f) => ("aligners-err-tooth-not-closed", f),
+        reconstruct::ReconstructError::Tunnel(f) => ("aligners-err-tooth-tunnel", f),
+        _ => return None,
+    };
+    Some(CommandError::Failed(messages::tr(
+        key,
+        &[
+            ("fdi", &f.to_string()),
+            ("arch", &messages::arch_word(arch)),
+        ],
+    )))
 }
 
 fn run_rebuild_tooth(
@@ -278,7 +296,7 @@ fn run_rebuild_tooth(
         axes: &one,
     };
     let tooth = reconstruct::closed_tooth(&input, fdi, axis, &params.params())
-        .map_err(|e| CommandError::Failed(e.to_string()))?;
+        .map_err(|e| not_solid(&e, arch).unwrap_or_else(|| CommandError::Failed(e.to_string())))?;
     ctx.check_cancelled()?;
     let blob = next.blobs.insert(crown_mesh(&tooth, &scan.to_case));
     data.record_crown(fdi, blob, tooth.info.crown_vertices);
@@ -459,12 +477,35 @@ mod tests {
             let m = next.mesh(blob).unwrap();
             let rep = ValidationReport::of(m);
             assert!(rep.is_watertight() && rep.is_manifold(), "{f}: {rep:?}");
+            assert_one_solid(m, &f.to_string());
             let t = &out["lower"]["teeth"][f.to_string()];
             assert_eq!(t["vertices"].as_u64().unwrap() as usize, m.vertex_count());
         }
         // the crowns are kept on save
         let used = next.referenced_blobs();
         assert!(data.crowns.values().all(|b| used.contains(b)));
+    }
+
+    /// The stored tooth is one solid without a tunnel, as a slicer reads it.
+    fn assert_one_solid(m: &TriMesh, what: &str) {
+        let s = dc_mesh::solid_topology(m);
+        assert!(s.is_closed(), "{what}: {s:?}");
+        assert_eq!((s.pieces, s.genus), (1, Some(0)), "{what}: {s:?}");
+    }
+
+    #[test]
+    fn a_tooth_that_is_not_one_solid_is_named() {
+        use reconstruct::ReconstructError as E;
+        for (e, word) in [(E::NotClosed(36), "a hole"), (E::Tunnel(36), "a tunnel")] {
+            let Some(CommandError::Failed(m)) = not_solid(&e, Arch::Lower) else {
+                panic!("{e:?} is not named");
+            };
+            assert!(
+                m.starts_with("tooth 36 of the lower arch") && m.contains(word),
+                "{m}"
+            );
+        }
+        assert!(not_solid(&E::NoCrown(36), Arch::Lower).is_none());
     }
 
     /// Symmetric largest distance between the vertices of two meshes.
@@ -490,6 +531,7 @@ mod tests {
         let m = next.mesh(&data.crowns[&f]).unwrap();
         let rep = ValidationReport::of(m);
         assert!(rep.is_watertight() && rep.is_manifold(), "{rep:?}");
+        assert_one_solid(m, "21");
         let t = &out["tooth"];
         assert!(t["fill_vertices"].as_u64().unwrap() > 100, "{t}");
         assert_eq!(t["crossing_faces"], 0);

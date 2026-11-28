@@ -19,7 +19,11 @@
 //!   model, `max(S − outer, inner − S)` on the same field, so the shell is
 //!   the shape of a sheet of uniform thickness laid on the model. Without
 //!   the trim solid (B5) it is a closed hollow solid: an outer surface and
-//!   the inner (fitting) surface around the whole model.
+//!   the inner (fitting) surface around the whole model. Over the gingiva
+//!   it stands `gum_clearance` farther out, its wall as thick
+//!   ([`gum_relieved`]: the closed field with the region within that of the
+//!   gingiva added; not in the plugin, whose shell lies on the gingiva and
+//!   presses on the papillae between the teeth).
 //! * **Blockout model**: the closed model with every undercut relative to
 //!   the insertion axis filled, i.e. its sweep along the axis away from the
 //!   occlusal side `{p : p + t·a ∈ M for some t ≥ 0}`, built exactly as the
@@ -100,6 +104,15 @@ pub const REDUCE_TOL_MM: f64 = 0.01;
 pub const MODEL_VOXEL_MM: f64 = 0.1;
 /// Voxel of the shells (`shell_voxel`, Standard quality).
 pub const SHELL_VOXEL_MM: f64 = 0.1;
+/// Finest voxel of the fields (mm): the plugin's `shell_voxel` minimum; a
+/// finer one makes a band of billions of voxels.
+pub const VOXEL_MIN_MM: f64 = 0.04;
+/// Coarsest voxel of the fields (mm): the plugin's `export_voxel` maximum.
+pub const VOXEL_MAX_MM: f64 = 0.5;
+/// The wall is at least this many voxels thick: a thinner one comes out of
+/// the field with holes through it (the plugin keeps the preview voxel
+/// within 0.45 of the wall, `PREVIEW_WALL_SHARE`).
+pub const WALL_MIN_VOXELS: f64 = 2.0;
 /// Height of the flat base below the lowest gingiva (`base_height`).
 pub const BASE_HEIGHT_MM: f64 = 3.0;
 /// Voxels of the band beyond the levels read (`SDF_BAND_EXTRA`).
@@ -138,12 +151,36 @@ pub const GUM_TUCK_MM: f64 = 0.1;
 /// (`GUM_TUCK_SCALES`).
 pub const GUM_TUCK_SCALES: [f64; 7] = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
 
+/// Largest space between the shell and the gingiva it covers
+/// ([`Design::gum_clearance_mm`], mm).
+pub const GUM_CLEARANCE_MAX_MM: f64 = 1.0;
+
 /// Errors of the shell stage.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ShellError {
     /// The inputs or parameters are not usable.
     #[error("{0}")]
     Invalid(String),
+    /// A voxel outside [`VOXEL_MIN_MM`]..=[`VOXEL_MAX_MM`].
+    #[error("{what} must be between {VOXEL_MIN_MM} and {VOXEL_MAX_MM} mm, got {value}")]
+    VoxelOutOfRange {
+        /// The parameter.
+        what: &'static str,
+        /// Its value (mm).
+        value: f64,
+    },
+    /// A wall thinner than [`WALL_MIN_VOXELS`] voxels: the field would leave
+    /// holes through it.
+    #[error(
+        "the wall ({thickness_mm} mm) must be at least {WALL_MIN_VOXELS} times the shell voxel \
+         ({voxel_mm} mm): use a finer voxel or a thicker wall"
+    )]
+    WallThinnerThanVoxel {
+        /// Wall thickness (mm).
+        thickness_mm: f64,
+        /// Voxel of the shell field (mm).
+        voxel_mm: f64,
+    },
     /// A distance-field or mesh operation failed.
     #[error("geometry: {0}")]
     Geometry(String),
@@ -151,6 +188,29 @@ pub enum ShellError {
 
 fn geom(e: impl std::fmt::Display) -> ShellError {
     ShellError::Geometry(e.to_string())
+}
+
+/// `Err` for a voxel outside [`VOXEL_MIN_MM`]..=[`VOXEL_MAX_MM`] (or not a
+/// number).
+fn check_voxel(what: &'static str, value: f64) -> Result<(), ShellError> {
+    if (VOXEL_MIN_MM..=VOXEL_MAX_MM).contains(&value) {
+        Ok(())
+    } else {
+        Err(ShellError::VoxelOutOfRange { what, value })
+    }
+}
+
+/// `Err` for a wall thinner than [`WALL_MIN_VOXELS`] shell voxels.
+fn check_wall(thickness_mm: f64, voxel_mm: f64) -> Result<(), ShellError> {
+    // the f32 voxel of a field read back as f64 is a hair larger
+    if thickness_mm + 1e-6 >= WALL_MIN_VOXELS * voxel_mm {
+        Ok(())
+    } else {
+        Err(ShellError::WallThinnerThanVoxel {
+            thickness_mm,
+            voxel_mm,
+        })
+    }
 }
 
 /// Parameters of the print geometry. Thickness and clearance default to the
@@ -168,6 +228,9 @@ pub struct Params {
     /// Internal clearance between model and shell (mm); default the case
     /// setting.
     pub clearance_mm: Option<f64>,
+    /// Space between the shell and the gingiva it covers (mm, 0 to
+    /// [`GUM_CLEARANCE_MAX_MM`]; [`gum_relieved`]); default the case setting.
+    pub gum_clearance_mm: Option<f64>,
     /// Detail of the model and of the blockout (mm).
     pub model_voxel_mm: f64,
     /// Detail of the shell (mm).
@@ -190,6 +253,7 @@ impl Default for Params {
             stages: Vec::new(),
             thickness_mm: None,
             clearance_mm: None,
+            gum_clearance_mm: None,
             model_voxel_mm: MODEL_VOXEL_MM,
             shell_voxel_mm: SHELL_VOXEL_MM,
             blockout_mm: BLOCKOUT_MM,
@@ -200,21 +264,26 @@ impl Default for Params {
     }
 }
 
-/// Thickness and clearance of the shell actually used.
+/// Thickness and clearances of the shell actually used.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Design {
     /// Wall thickness (mm).
     pub thickness_mm: f64,
     /// Internal clearance (mm).
     pub clearance_mm: f64,
+    /// Space between the shell and the gingiva it covers, added to the
+    /// clearance there (mm; [`gum_relieved`]).
+    pub gum_clearance_mm: f64,
 }
 
 impl Params {
-    /// The wall thickness and clearance: the parameters, else the settings.
+    /// The wall thickness and the clearances: the parameters, else the
+    /// settings.
     pub fn design(&self, settings: &Settings) -> Design {
         Design {
             thickness_mm: self.thickness_mm.unwrap_or(settings.shell_thickness_mm),
             clearance_mm: self.clearance_mm.unwrap_or(settings.clearance_mm),
+            gum_clearance_mm: self.gum_clearance_mm.unwrap_or(settings.gum_clearance_mm),
         }
     }
 
@@ -233,15 +302,29 @@ impl Params {
             }
         }
         for (what, v) in [
+            ("model_voxel_mm", self.model_voxel_mm),
+            ("shell_voxel_mm", self.shell_voxel_mm),
+        ] {
+            check_voxel(what, v)?;
+        }
+        check_wall(design.thickness_mm, self.shell_voxel_mm)?;
+        for (what, v) in [
             ("blockout_mm", self.blockout_mm),
             ("tolerance_mm", self.tolerance_mm),
             ("clearance_mm", design.clearance_mm),
+            ("gum_clearance_mm", design.gum_clearance_mm),
         ] {
             if !(v.is_finite() && v >= 0.0) {
                 return Err(ShellError::Invalid(format!(
                     "{what} must be zero or positive, got {v}"
                 )));
             }
+        }
+        if design.gum_clearance_mm > GUM_CLEARANCE_MAX_MM {
+            return Err(ShellError::Invalid(format!(
+                "gum_clearance_mm must be at most {GUM_CLEARANCE_MAX_MM}, got {}",
+                design.gum_clearance_mm
+            )));
         }
         let a = DVec3::from(self.insertion_axis);
         if !(a.is_finite() && a.length() > 1e-9) {
@@ -330,6 +413,8 @@ pub struct Report {
     pub thickness_mm: f64,
     /// Clearance used (mm).
     pub clearance_mm: f64,
+    /// Space over the gingiva used (mm).
+    pub gum_clearance_mm: f64,
 }
 
 /// The solids of a stage (case coordinates).
@@ -425,18 +510,28 @@ fn placed<'a>(
 /// The contact bridges of the teeth the aligner covers (`teeth`, as they
 /// are: `contact_bridges` works on the closed teeth) and the embrasure
 /// fills between them (`filled`: the teeth of the model, their stumps drawn
-/// in), arch coordinates (`stage_parts`), `vg` the gingiva there.
+/// in), arch coordinates (`stage_parts`), `vg` the gingiva there; their
+/// labial and lingual faces `inset` inside the tangents to the two crowns
+/// (`0` for the printed model; [`model_parts_inset`]).
 fn contact_solids(
     input: &Input<'_>,
     teeth: &[Vec<DVec3>],
     filled: &[Vec<DVec3>],
     vg: &[DVec3],
+    inset: f64,
+    whole: bool,
 ) -> Vec<embrasure::Solid> {
-    let mut out = bridge::contact_bridges(
-        &placed(input, teeth, input.covered),
-        &bridge::BridgeParams::default(),
-    );
-    out.extend(embrasure::fills(&placed(input, filled, input.covered), vg));
+    let params = bridge::BridgeParams {
+        inset,
+        ..bridge::BridgeParams::default()
+    };
+    let mut out = bridge::contact_bridges(&placed(input, teeth, input.covered), &params);
+    let filled = placed(input, filled, input.covered);
+    out.extend(if whole {
+        embrasure::fills_whole(&filled, vg, inset)
+    } else {
+        embrasure::fills(&filled, vg, inset)
+    });
     out
 }
 
@@ -570,7 +665,7 @@ pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
     for (k, (pts, mesh)) in teeth.iter().zip(input.teeth).enumerate() {
         append(pts, &mesh.tris, input.fdis.get(k).map_or(0, |f| f.get()));
     }
-    for (v, t) in contact_solids(input, &teeth, &teeth, &vg) {
+    for (v, t) in contact_solids(input, &teeth, &teeth, &vg, 0.0, false) {
         append(&v, &t, 0);
     }
     (TriMesh::new(positions, tris), fdi)
@@ -582,6 +677,34 @@ pub fn reach_teeth(input: &Input<'_>) -> (TriMesh, Vec<u8>) {
 /// ([`Input::stumps`]), and the contact bridges and embrasure fills of the
 /// covered teeth. Their union is the model (overlapping closed parts).
 pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, ShellError> {
+    model_parts_at(input, base_height, 0.0, false)
+}
+
+/// [`model_parts`] with the labial and lingual faces of the contact bridges
+/// and of the embrasure fills `inset` inside the tangents to the two crowns
+/// (`stage_parts(smooth=True, recess=inset)`): the model the shell of an
+/// aligner with the smooth border is the offset of. Over the embrasure under
+/// every contact its wall goes from one crown to the other at most about
+/// `inset` inside their tangents, never down into the embrasure onto the
+/// papilla.
+pub fn model_parts_inset(
+    input: &Input<'_>,
+    base_height: f64,
+    inset: f64,
+) -> Result<TriMesh, ShellError> {
+    model_parts_at(input, base_height, inset, true)
+}
+
+/// [`model_parts`] and [`model_parts_inset`]: `whole`, the whole embrasure of
+/// every two neighbouring teeth is filled, those a little apart too
+/// ([`embrasure::fills_whole`]): the shell of an aligner goes straight from
+/// one crown to the next and never into the space between them.
+fn model_parts_at(
+    input: &Input<'_>,
+    base_height: f64,
+    inset: f64,
+    whole: bool,
+) -> Result<TriMesh, ShellError> {
     if input.gingiva.tris.is_empty() {
         return Err(ShellError::Invalid("the gingiva is empty".into()));
     }
@@ -637,7 +760,7 @@ pub fn model_parts(input: &Input<'_>, base_height: f64) -> Result<TriMesh, Shell
     for (pts, mesh) in tucked.iter().zip(input.teeth) {
         append(&mut pts.iter().map(|p| p.as_vec3()), &mesh.tris);
     }
-    for (v, t) in contact_solids(input, &teeth, &tucked, &vg) {
+    for (v, t) in contact_solids(input, &teeth, &tucked, &vg, inset, whole) {
         append(&mut v.iter().map(|p| p.as_vec3()), &t);
     }
     Ok(TriMesh::new(positions, tris))
@@ -676,6 +799,7 @@ pub fn closed_grid_for(
     blockout: f64,
     reach: f64,
 ) -> Result<SdfGrid, ShellError> {
+    check_voxel("voxel_mm", voxel)?;
     let params = SdfParams {
         voxel_size: voxel as f32,
         band: band_for(voxel, blockout.max(reach)),
@@ -693,6 +817,7 @@ pub fn shell_grid(closed: &SdfGrid, design: &Design) -> Result<SdfGrid, ShellErr
     let inner = design.clearance_mm as f32;
     let outer = (design.clearance_mm + design.thickness_mm) as f32;
     let vs = closed.voxel_size;
+    check_wall(design.thickness_mm, f64::from(vs))?;
     let margin = 1.5 * vs;
     if outer + margin <= closed.band() && margin - inner <= closed.band() {
         return closed.shell(inner, outer).map_err(geom);
@@ -718,6 +843,88 @@ pub fn shell_grid(closed: &SdfGrid, design: &Design) -> Result<SdfGrid, ShellErr
     fitting.shift(inner).map_err(geom)?;
     out.subtract(&fitting).map_err(geom)?;
     Ok(out)
+}
+
+/// The gingiva of `input` the shell keeps [`Design::gum_clearance_mm`]
+/// away from ([`gum_relieved`]), in arch coordinates: its faces not under
+/// the crowns ([`Input::cover`]: those lie inside the teeth).
+pub fn gum_surface(input: &Input<'_>) -> TriMesh {
+    let a = input.to_arch;
+    let mut slot = vec![u32::MAX; input.gingiva.positions.len()];
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut tris = Vec::new();
+    for (f, t) in input.gingiva.tris.iter().enumerate() {
+        if input.cover.get(f).copied().unwrap_or(false) {
+            continue;
+        }
+        tris.push(t.map(|v| {
+            let s = &mut slot[v as usize];
+            if *s == u32::MAX {
+                *s = positions.len() as u32;
+                let p = input.gingiva.positions[v as usize].as_dvec3();
+                positions.push(a.transform_point3(p).as_vec3());
+            }
+            *s
+        }));
+    }
+    TriMesh::new(positions, tris)
+}
+
+/// The closed field `closed` of the model with the region within `gap` of
+/// the gingiva `gum` (an open surface, in the coordinates of the field)
+/// added to it, on the same voxels and band: the shell read from it
+/// ([`shell_grid`]) stands `gap` farther from the gingiva, the papillae
+/// between the teeth too, its wall as thick; on the teeth it fits as
+/// before, but within `gap` of the gingival margin, round which it turns
+/// off the tooth with that radius. The printed model keeps the field
+/// without it. `None` for no gap or no gingiva.
+///
+/// # Errors
+/// [`ShellError::Geometry`] when a field operation fails.
+pub fn gum_relieved(
+    closed: &SdfGrid,
+    gum: &TriMesh,
+    gap: f64,
+) -> Result<Option<SdfGrid>, ShellError> {
+    if gap <= 0.0 || gum.tris.is_empty() {
+        return Ok(None);
+    }
+    let mut relief = SdfGrid::from_mesh(
+        gum,
+        &SdfParams {
+            voxel_size: closed.voxel_size,
+            band: closed.band(),
+        },
+    )
+    .map_err(geom)?;
+    relief.offset(gap as f32).map_err(geom)?;
+    let mut out = closed.clone();
+    out.union(&relief).map_err(geom)?;
+    Ok(Some(out))
+}
+
+/// The closed field a shell is the offset of, `closed` with the region
+/// within [`Design::gum_clearance_mm`] of the gingiva `gum` added
+/// ([`gum_relieved`]; `closed` itself without a gap), and the untrimmed shell
+/// field read from it ([`shell_grid`]). Whatever measures from the fitting
+/// surface of the shell takes the first one (the occlusal shaping,
+/// [`crate::aligner_bite::occlusal::shape_cutter`]): its level at the
+/// clearance is that surface, over the gingiva too. From `closed`, the
+/// allowed top of the shaping lay the gap too low over the gingiva: it
+/// shaved the wall there into a thin lip that the rounded rim broke into
+/// hooks a printer cannot support (behind the last molars of a real case).
+///
+/// # Errors
+/// [`ShellError::Geometry`] when a field operation fails;
+/// [`ShellError::Invalid`] for a wall thinner than two voxels.
+pub fn relieved_shell(
+    closed: SdfGrid,
+    gum: &TriMesh,
+    design: &Design,
+) -> Result<(SdfGrid, SdfGrid), ShellError> {
+    let closed = gum_relieved(&closed, gum, design.gum_clearance_mm)?.unwrap_or(closed);
+    let shell = shell_grid(&closed, design)?;
+    Ok((closed, shell))
 }
 
 /// A rotation taking `axis` to `+Z`.
@@ -1288,6 +1495,7 @@ pub fn run(
     let mut report = Report {
         thickness_mm: design.thickness_mm,
         clearance_mm: design.clearance_mm,
+        gum_clearance_mm: design.gum_clearance_mm,
         ..Report::default()
     };
     let t = Instant::now();
@@ -1361,9 +1569,13 @@ pub fn run(
                 &own
             }
         };
-        // the untrimmed shell: the outer surface and the fitting surface
+        // the untrimmed shell: the outer surface and the fitting surface,
+        // over the gingiva the space asked for
+        let relieved = gum_relieved(closed, &gum_surface(input), design.gum_clearance_mm)?;
         let solid = finish(
-            shell_grid(closed, design)?.to_mesh().map_err(geom)?,
+            shell_grid(relieved.as_ref().unwrap_or(closed), design)?
+                .to_mesh()
+                .map_err(geom)?,
             2,
             tol,
             &from_arch,
@@ -1724,6 +1936,7 @@ mod tests {
         let design = Design {
             thickness_mm: 0.8,
             clearance_mm: 0.1,
+            gum_clearance_mm: 0.0,
         };
         let a = shell_grid(&wide, &design).unwrap().to_mesh().unwrap();
         let b = shell_grid(&g, &design).unwrap().to_mesh().unwrap();
@@ -1757,6 +1970,7 @@ mod tests {
         let design = Design {
             thickness_mm: 0.8,
             clearance_mm: 0.1,
+            gum_clearance_mm: 0.0,
         };
         let shell = shell_grid(&g, &design).unwrap().to_mesh().unwrap();
         let rep = shell.validate();
@@ -1804,6 +2018,77 @@ mod tests {
         assert!(at_clearance * 10 > inner * 8, "{at_clearance} of {inner}");
     }
 
+    /// The field handed on with the shell (the occlusal shaping measures from
+    /// its level at the clearance) is the one the shell is the offset of, the
+    /// gum relief in it: on the demo arch every vertex of the fitting surface,
+    /// over the gingiva too, lies on its level at the clearance. Handed on
+    /// without the relief, the field put the fitting surface over the gingiva
+    /// the gum clearance too low, and the shaping shaved the wall there (behind
+    /// the last molars of a real case, into a lip the rim broke into hooks).
+    #[test]
+    fn the_shell_is_handed_on_with_the_field_it_is_the_offset_of() {
+        let d = crate::demo::run(&crate::demo::Params {
+            arch: crate::anatomy::Arch::Upper,
+            ..crate::demo::Params::default()
+        });
+        let labels = d.mesh.vertex_labels.as_ref().unwrap();
+        let gum = TriMesh::new(
+            d.mesh.positions.clone(),
+            d.mesh
+                .tris
+                .iter()
+                .filter(|t| t.iter().all(|&v| labels[v as usize] == 0))
+                .copied()
+                .collect(),
+        );
+        let voxel = 0.25;
+        let design = Design {
+            thickness_mm: 0.6,
+            clearance_mm: 0.1,
+            gum_clearance_mm: 0.3,
+        };
+        let (cl, gap) = (design.clearance_mm as f32, design.gum_clearance_mm as f32);
+        let reach = design.clearance_mm + design.thickness_mm;
+        let closed = closed_grid_for(&d.mesh, voxel, BLOCKOUT_MM, reach).unwrap();
+        let (fitting, shell) = relieved_shell(closed.clone(), &gum, &design).unwrap();
+        let mesh = shell.to_mesh().unwrap();
+        let normals = mesh.compute_vertex_normals();
+        let (mut on_teeth, mut on_gum, mut off) = (0, 0, Vec::new());
+        for (p, n) in mesh.positions.iter().zip(&normals) {
+            // the fitting side faces the model, at most the clearance and the
+            // gum relief off it (the outer side: at least the wall more)
+            let bare = closed.sample(*p);
+            let facing = n.dot(closed.gradient(*p).normalize_or_zero()) < -0.5;
+            if !facing || bare > cl + gap + 0.25 * design.thickness_mm as f32 {
+                continue;
+            }
+            if bare > cl + 0.5 * gap {
+                on_gum += 1;
+            } else {
+                on_teeth += 1;
+            }
+            let v = fitting.sample(*p);
+            if (v - cl).abs() > 0.25 * voxel as f32 {
+                off.push((*p, bare, v));
+            }
+        }
+        eprintln!("fitting vertices: {on_teeth} on the teeth, {on_gum} over the gingiva");
+        assert!(on_teeth > 1000 && on_gum > 1000, "{on_teeth} {on_gum}");
+        assert!(
+            off.is_empty(),
+            "{} fitting vertices off the level {cl} of the field handed on, e.g. {:?}",
+            off.len(),
+            &off[..off.len().min(3)]
+        );
+        // without a gap the field is the closed one
+        let flat = Design {
+            gum_clearance_mm: 0.0,
+            ..design
+        };
+        let (same, _) = relieved_shell(closed.clone(), &gum, &flat).unwrap();
+        assert_eq!(same.to_mesh().unwrap(), closed.to_mesh().unwrap());
+    }
+
     #[test]
     fn slabs_reduce_within_the_tolerance_and_stay_closed() {
         let g = closed_grid(&mushroom(), 0.1, 0.3).unwrap();
@@ -1840,5 +2125,69 @@ mod tests {
         assert!(Params::default().check(&design).is_ok());
         let p: Params = serde_json::from_str(r#"{"thickness_mm": 0.75}"#).unwrap();
         assert_eq!(p.design(&Settings::default()).thickness_mm, 0.75);
+    }
+
+    #[test]
+    fn the_voxel_is_bounded_and_the_wall_spans_two_voxels() {
+        let design = Params::default().design(&Settings::default());
+        // a voxel that would make billions of voxels, or a coarse one
+        for (model, shell, what) in [
+            (0.001, 0.1, "model_voxel_mm"),
+            (0.1, 0.001, "shell_voxel_mm"),
+            (0.1, 0.6, "shell_voxel_mm"),
+            (f64::NAN, 0.1, "model_voxel_mm"),
+        ] {
+            let p = Params {
+                model_voxel_mm: model,
+                shell_voxel_mm: shell,
+                ..Params::default()
+            };
+            match p.check(&design) {
+                Err(ShellError::VoxelOutOfRange { what: w, .. }) => assert_eq!(w, what),
+                Err(ShellError::Invalid(_)) if model.is_nan() => {}
+                other => panic!("{model} {shell}: {other:?}"),
+            }
+        }
+        // the bounds themselves are allowed
+        for v in [VOXEL_MIN_MM, VOXEL_MAX_MM] {
+            let p = Params {
+                model_voxel_mm: v,
+                shell_voxel_mm: v,
+                ..Params::default()
+            };
+            assert!(p.check(&design).is_ok(), "{v}");
+        }
+        // a wall thinner than two shell voxels would come out perforated
+        let p = Params {
+            shell_voxel_mm: 0.3,
+            ..Params::default()
+        };
+        let thin = Design {
+            thickness_mm: 0.5,
+            clearance_mm: 0.0,
+            gum_clearance_mm: 0.0,
+        };
+        assert_eq!(
+            p.check(&thin),
+            Err(ShellError::WallThinnerThanVoxel {
+                thickness_mm: 0.5,
+                voxel_mm: 0.3
+            })
+        );
+        let just = Design {
+            thickness_mm: 0.6,
+            ..thin
+        };
+        assert!(p.check(&just).is_ok());
+        // the field functions refuse them too
+        assert!(matches!(
+            closed_grid_for(&mushroom(), 0.001, 0.0, 0.0),
+            Err(ShellError::VoxelOutOfRange { .. })
+        ));
+        let g = closed_grid(&mushroom(), 0.3, 0.0).unwrap();
+        assert!(matches!(
+            shell_grid(&g, &thin),
+            Err(ShellError::WallThinnerThanVoxel { .. })
+        ));
     }
 }

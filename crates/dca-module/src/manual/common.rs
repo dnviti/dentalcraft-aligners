@@ -34,9 +34,27 @@ pub(crate) fn data_of(state: &CaseState) -> Result<AlignersState, CommandError> 
     }
 }
 
-/// A tooth number from a command parameter.
+/// A tooth number from a command parameter: a permanent tooth. Deciduous
+/// teeth are not supported: refused, never dropped ([`permanent`]).
 pub(crate) fn fdi_of(n: u8) -> Result<Fdi, CommandError> {
-    Fdi::new(n).map_err(|_| invalid(format!("{n} is not a valid FDI tooth number")))
+    let f = Fdi::new(n).map_err(|_| {
+        messages::invalid("aligners-err-seed-bad-tooth", &[("fdi", &n.to_string())])
+    })?;
+    permanent(f)
+}
+
+/// `f` when it is a permanent tooth; a deciduous tooth (51–85) is refused
+/// with a named error: the arch tables hold only permanent teeth, its
+/// crown would go to a neighbour or to the gum without a word.
+pub(crate) fn permanent(f: Fdi) -> Result<Fdi, CommandError> {
+    if dca_algo::anatomy::is_permanent(f) {
+        Ok(f)
+    } else {
+        Err(messages::invalid(
+            "aligners-err-deciduous",
+            &[("fdi", &f.get().to_string())],
+        ))
+    }
 }
 
 /// A tooth number from a command parameter, `0` for the gingiva.

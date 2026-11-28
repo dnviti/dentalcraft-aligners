@@ -26,13 +26,14 @@ pub const HOLE_MM: f64 = 3.0;
 /// A hole longer than this share of the outline: a ring of surface, not a crown.
 pub const HOLE_ERROR: f64 = 0.4;
 
-/// Result of [`check_region`].
+/// Result of [`check_region`]. The issues are typed; the module words them
+/// in the user's language.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct RegionReport {
     /// Reasons why no tooth can be built from the region.
-    pub errors: Vec<String>,
+    pub errors: Vec<RegionIssue>,
     /// Things to check; the tooth can be built.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<RegionIssue>,
     /// Vertices with the label.
     pub vertices: usize,
     /// Area of the faces fully inside the region (mm²).
@@ -45,21 +46,64 @@ pub struct RegionReport {
     pub parts: usize,
 }
 
-impl RegionReport {
-    /// One line for the user: errors first, then warnings.
-    pub fn message(&self, fdi: Fdi) -> String {
-        if !self.errors.is_empty() {
-            return format!("Tooth {fdi}: {}", self.errors.join("; "));
-        }
-        let mut txt = format!(
-            "Tooth {fdi}: {} vertices, {:.0} mm2, {:.1} mm wide",
-            self.vertices, self.area_mm2, self.width_mm
-        );
-        if !self.warnings.is_empty() {
-            txt.push_str(&format!(". Warning: {}", self.warnings.join("; ")));
-        }
-        txt
-    }
+/// What [`check_region`] found wrong with a region (an error or a warning
+/// of [`RegionReport`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RegionIssue {
+    /// No vertex carries the label of the tooth.
+    NoRegion,
+    /// Too small for a crown.
+    TooSmall {
+        /// Area of the region (mm²).
+        area_mm2: f64,
+        /// Width of the region (mm).
+        width_mm: f64,
+        /// Typical mesio-distal width of the tooth (mm).
+        typical_mm: f64,
+    },
+    /// Too low: gingiva, not a crown.
+    TooLow {
+        /// Height of the region (mm).
+        height_mm: f64,
+    },
+    /// Very wide: it may hold two teeth or some gingiva.
+    TooWide {
+        /// Width of the region (mm).
+        width_mm: f64,
+        /// Typical mesio-distal width of the tooth (mm).
+        typical_mm: f64,
+    },
+    /// Split in pieces; only the largest becomes the tooth.
+    Split {
+        /// Connected pieces.
+        parts: usize,
+        /// Share of the vertices in the largest piece (%).
+        share_pct: f64,
+    },
+    /// Touches the open border of the scan along most of its outline: not
+    /// surrounded by gingiva.
+    OnBorder {
+        /// Share of the outline on the border (%).
+        share_pct: f64,
+    },
+    /// Touches the open border of the scan: the missing part is rebuilt.
+    TouchesBorder {
+        /// Vertices of the region on the border.
+        vertices: usize,
+    },
+    /// A hole as big as the crown: a ring of surface, not a crown.
+    BigHole {
+        /// Outline of the biggest hole (mm).
+        outline_mm: f64,
+    },
+    /// Holes (gingiva inside the crown), closed without anatomical shape.
+    Holes {
+        /// Number of holes.
+        count: usize,
+        /// Outline of the biggest hole (mm).
+        outline_mm: f64,
+    },
 }
 
 fn round(x: f64, digits: i32) -> f64 {
@@ -102,9 +146,7 @@ pub fn check_region(
         ..RegionReport::default()
     };
     if out.vertices == 0 {
-        out.errors.push(format!(
-            "tooth {fdi} has no region on the scan: paint it or give it a selection"
-        ));
+        out.errors.push(RegionIssue::NoRegion);
         return out;
     }
     let full: Vec<[u32; 3]> = scan
@@ -154,11 +196,10 @@ pub fn check_region(
         .map_or(0, |(i, _)| i as u32);
     let share = sizes[main_id as usize] as f64 / out.vertices.max(1) as f64;
     if share < 0.9 {
-        out.warnings.push(format!(
-            "the region is split in {} parts: only the largest ({:.0}%) becomes the tooth (clean it or paint it again)",
-            sizes.len(),
-            share * 100.0
-        ));
+        out.warnings.push(RegionIssue::Split {
+            parts: sizes.len(),
+            share_pct: share * 100.0,
+        });
     }
     let in_main = |i: u32| sel[i as usize] && comp[i as usize] == main_id;
 
@@ -203,19 +244,19 @@ pub fn check_region(
     out.width_mm = round(width, 2);
     out.height_mm = round(height, 2);
     if out.area_mm2 < MIN_AREA * md * md || width < MIN_WIDTH * md {
-        out.errors.push(format!(
-            "region too small for a crown ({:.0} mm2, {:.1} mm wide; tooth {fdi} is about {md:.1} mm wide): enlarge it or paint it again",
-            out.area_mm2, width
-        ));
+        out.errors.push(RegionIssue::TooSmall {
+            area_mm2: out.area_mm2,
+            width_mm: width,
+            typical_mm: md,
+        });
     } else if height < MIN_HEIGHT_MM {
-        out.errors.push(format!(
-            "region too low ({height:.1} mm): it looks like gingiva, not a crown"
-        ));
+        out.errors.push(RegionIssue::TooLow { height_mm: height });
     }
     if width > MAX_WIDTH * md {
-        out.warnings.push(format!(
-            "region very wide ({width:.1} mm, typical tooth {md:.1} mm): it may include two teeth or some gingiva"
-        ));
+        out.warnings.push(RegionIssue::TooWide {
+            width_mm: width,
+            typical_mm: md,
+        });
     }
 
     // the open border of the scan: its share of the outline of the region (by length)
@@ -240,14 +281,13 @@ pub fn check_region(
             .sum();
         let bshare = shared / total.max(1e-12);
         if bshare > BORDER_ERROR {
-            out.errors.push(format!(
-                "the region touches the border of the scan along {:.0}% of its outline: the crown is not surrounded by gingiva (incomplete scan or wrong region)",
-                bshare * 100.0
-            ));
+            out.errors.push(RegionIssue::OnBorder {
+                share_pct: bshare * 100.0,
+            });
         } else {
-            out.warnings.push(format!(
-                "the region touches the border of the scan ({border_vertices} vertices): the missing part will be rebuilt"
-            ));
+            out.warnings.push(RegionIssue::TouchesBorder {
+                vertices: border_vertices,
+            });
         }
     }
 
@@ -303,14 +343,14 @@ pub fn check_region(
         let holes: Vec<f64> = lens[1..].iter().copied().filter(|&x| x > HOLE_MM).collect();
         let biggest = holes.iter().copied().fold(0.0, f64::max);
         if !holes.is_empty() && biggest > HOLE_ERROR * lens[0] {
-            out.errors.push(format!(
-                "the region has a hole as big as the crown (outline {biggest:.1} mm): it is not a crown; fill it with the brush or clean the labels"
-            ));
+            out.errors.push(RegionIssue::BigHole {
+                outline_mm: biggest,
+            });
         } else if !holes.is_empty() {
-            out.warnings.push(format!(
-                "the region has {} holes (gingiva inside the crown, outline up to {biggest:.1} mm), closed without anatomical shape: better fill them with the brush or clean the labels",
-                holes.len()
-            ));
+            out.warnings.push(RegionIssue::Holes {
+                count: holes.len(),
+                outline_mm: biggest,
+            });
         }
     }
     out
@@ -341,7 +381,6 @@ mod tests {
         assert!((rep.width_mm - 11.0).abs() < 0.6, "{}", rep.width_mm);
         assert!((rep.height_mm - 7.5).abs() < 0.1);
         assert!(rep.area_mm2 > 90.0);
-        assert!(rep.message(fdi()).starts_with("Tooth 36: "));
     }
 
     #[test]
@@ -349,18 +388,23 @@ mod tests {
         let (v, t, r) = bump(5.5, 7.5);
         // nothing labelled
         let none = vec![0u16; v.len()];
-        assert!(check(&none, &v, &t).errors[0].contains("no region"));
+        assert_eq!(check(&none, &v, &t).errors, vec![RegionIssue::NoRegion]);
         // a speck
         let speck: Vec<u16> = r.iter().map(|&d| if d < 1.2 { 36 } else { 0 }).collect();
-        assert!(check(&speck, &v, &t).errors[0].contains("too small"));
+        assert!(matches!(
+            check(&speck, &v, &t).errors[0],
+            RegionIssue::TooSmall { .. }
+        ));
         // a flat disc of gingiva
         let flat: Vec<u16> = r
             .iter()
             .map(|&d| if d > 8.0 && d < 14.0 { 36 } else { 0 })
             .collect();
         let rep = check(&flat, &v, &t);
-        assert!(rep.errors[0].contains("too low"), "{rep:?}");
-        assert!(rep.message(fdi()).contains("gingiva"));
+        assert!(
+            matches!(rep.errors[0], RegionIssue::TooLow { height_mm } if height_mm < MIN_HEIGHT_MM),
+            "{rep:?}"
+        );
         // the corner of the scan: the outline lies on its open border
         let corner: Vec<u16> = v
             .iter()
@@ -374,7 +418,9 @@ mod tests {
             .collect();
         let rep = check(&corner, &v, &t);
         assert!(
-            rep.errors.iter().any(|e| e.contains("border")),
+            rep.errors
+                .iter()
+                .any(|e| matches!(e, RegionIssue::OnBorder { .. })),
             "border: {rep:?}"
         );
         // a ring: a hole as big as the crown
@@ -383,7 +429,12 @@ mod tests {
             .map(|&d| if d > 4.5 && d < 5.5 { 36 } else { 0 })
             .collect();
         let rep = check(&ring, &v, &t);
-        assert!(rep.errors.iter().any(|e| e.contains("hole")), "{rep:?}");
+        assert!(
+            rep.errors
+                .iter()
+                .any(|e| matches!(e, RegionIssue::BigHole { .. })),
+            "{rep:?}"
+        );
     }
 
     #[test]
@@ -399,7 +450,12 @@ mod tests {
         let rep = check(&split, &v, &t);
         assert!(rep.errors.is_empty(), "{rep:?}");
         assert_eq!(rep.parts, 2);
-        assert!(rep.warnings.iter().any(|w| w.contains("split")), "{rep:?}");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| matches!(w, RegionIssue::Split { parts: 2, .. })),
+            "{rep:?}"
+        );
         // a small hole in the crown is reported, not refused
         let holed: Vec<u16> = r
             .iter()
@@ -413,6 +469,11 @@ mod tests {
             .collect();
         let rep = check(&holed, &v, &t);
         assert!(rep.errors.is_empty(), "{rep:?}");
-        assert!(rep.warnings.iter().any(|w| w.contains("hole")), "{rep:?}");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| matches!(w, RegionIssue::Holes { count: 1, .. })),
+            "{rep:?}"
+        );
     }
 }

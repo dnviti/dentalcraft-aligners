@@ -104,9 +104,14 @@ struct Worst {
 }
 
 /// The case settings for the plugin's scene settings `scene` (the names of
-/// `props.py`; an enum value in capitals).
+/// `props.py`; an enum value in capitals), over the plugin's own defaults
+/// where the port's differ (2026-11-24: the port aligns every tooth and
+/// holds no molar by default, the plugin the incisors and canines with the
+/// molars held).
 fn settings_of(scene: &Value) -> SetupSettings {
     let mut out = Map::new();
+    out.insert("align_scope".to_owned(), Value::from("anterior"));
+    out.insert("fix_molars".to_owned(), Value::from(true));
     for (k, v) in scene.as_object().into_iter().flatten() {
         let key = match k.as_str() {
             "cons_align_scope" => "align_scope",
@@ -253,7 +258,16 @@ fn compare(case: &str, file: &str, worst: &mut Worst) {
         fixed: &[],
         poses: &BTreeMap::new(),
     };
-    let out = setup::run(&input, &params).unwrap();
+    // the plugin's derotation, line scale and spaces (the port's own are stated in
+    // `derotating_only_the_excess_changes_the_demo_setups_as_stated` and
+    // `the_scale_of_the_arch_line_changes_the_demo_setups_as_stated`)
+    let cfg = Config {
+        plugin_derotation: true,
+        plugin_line_scale: true,
+        plugin_spaces: true,
+        ..params.config(arch)
+    };
+    let out = setup::run_with(&input, &cfg).unwrap();
     let r = &out.result;
 
     // the same teeth move, to the same poses
@@ -325,7 +339,7 @@ fn compare(case: &str, file: &str, worst: &mut Worst) {
     }
 
     // determinism
-    assert_eq!(setup::run(&input, &params).unwrap(), out, "{case}: rerun");
+    assert_eq!(setup::run_with(&input, &cfg).unwrap(), out, "{case}: rerun");
 }
 
 #[test]
@@ -350,6 +364,181 @@ fn setup_matches_the_oracle_on_the_demo_cases() {
         compare(case, "setup_params.json", &mut worst);
         println!("{case} with parameters: {worst:?}");
     }
+}
+
+/// What derotating only the excess over the tolerance (the port's default,
+/// [`Config::plugin_derotation`] off, departure of 2026-11-23) changes on
+/// the demo setups against the plugin's (`setup.json`, default settings):
+/// a tooth the plugin derotates keeps up to the tolerance of its zone, so
+/// its final turn differs from the plugin's by about that tolerance (1
+/// degree for the incisors and canines; up to 2 degrees where the tooth
+/// also ends elsewhere on the line or its axis is tipped), and its centre
+/// of resistance ends up to 0.15 mm away. The arch line, the moved teeth
+/// and the IPR plan are the same.
+const EXCESS_ONLY: [Departure; 6] = [
+    ("demo_lower_mild", 1.64, 0.10, 0.20, &[], 0.0),
+    ("demo_lower_moderate", 1.04, 0.02, 0.35, &[], 0.0),
+    ("demo_lower_severe", 1.12, 0.12, 0.50, &[], 0.0),
+    ("demo_upper_mild", 1.18, 0.13, 0.10, &[], 0.0),
+    ("demo_upper_moderate", 1.98, 0.15, 0.15, &[], 0.0),
+    ("demo_upper_severe", 1.20, 0.08, 0.50, &[], 0.0),
+];
+
+/// What the port's scale of the robust arch line (taken once, from the
+/// canines and premolars, [`Config::plugin_line_scale`] off, departure of
+/// 2026-11-23) changes on the demo setups against the plugin's
+/// (`setup.json`, default settings, the plugin's derotation): the line
+/// moves by up to 1.12 mm (`demo_lower_mild`, elsewhere at most 0.22 mm),
+/// a moved tooth by at most 1.63 degrees and 0.16 mm, the moved teeth are
+/// the same and the IPR of `demo_upper_severe` is one step less (0.45 mm
+/// instead of 0.50 at its seven contacts).
+const LINE_SCALE: [Departure; 6] = [
+    ("demo_lower_mild", 1.63, 0.15, 0.20, &[], 1.12),
+    ("demo_lower_moderate", 0.44, 0.04, 0.35, &[], 0.03),
+    ("demo_lower_severe", 0.06, 0.01, 0.50, &[], 0.01),
+    ("demo_upper_mild", 0.01, 0.00, 0.10, &[], 0.00),
+    ("demo_upper_moderate", 0.01, 0.00, 0.15, &[], 0.00),
+    ("demo_upper_severe", 0.79, 0.16, 0.45, &[], 0.22),
+];
+
+/// A departure from the plugin's setup of a demo case: (case, largest
+/// rotation difference of a moved tooth in degrees, largest distance
+/// between the final centres of resistance in mm, the IPR at every contact
+/// the plugin strips in mm, teeth the plugin moves and the port does not,
+/// largest distance between the arch lines in mm).
+type Departure = (&'static str, f64, f64, f64, &'static [u8], f64);
+
+#[test]
+fn derotating_only_the_excess_changes_the_demo_setups_as_stated() {
+    stated(&EXCESS_ONLY, (false, true));
+}
+
+#[test]
+fn the_scale_of_the_arch_line_changes_the_demo_setups_as_stated() {
+    stated(&LINE_SCALE, (true, false));
+}
+
+/// Checks `rows` against the setups with the port's `(plugin_derotation,
+/// plugin_line_scale)` and the plugin's, on every demo case.
+fn stated(rows: &[Departure], port_cfg: (bool, bool)) {
+    let dir = fixtures();
+    let mut cases: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.ok()?;
+            e.path()
+                .join("setup/setup.json")
+                .exists()
+                .then(|| e.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    cases.sort();
+    let mut unstated = Vec::new();
+    for case in &cases {
+        let (port, plugin) = (run_case(case, port_cfg), run_case(case, (true, true)));
+        let rest_frames = &json(&dir.join(case).join("setup/setup.json"))["rest_frames"];
+        let (mut deg, mut mm) = (0.0f64, 0.0f64);
+        for (f, d) in &plugin.result.targets {
+            let a = port
+                .result
+                .targets
+                .get(f)
+                .copied()
+                .unwrap_or(DMat4::IDENTITY);
+            let rest = mat4(&rest_frames[f.to_string()]);
+            deg = deg.max(rotation_deg(&a, d));
+            mm = mm.max(((a * rest).w_axis - (*d * rest).w_axis).truncate().length());
+        }
+        let gone: Vec<u8> = plugin
+            .result
+            .targets
+            .keys()
+            .filter(|f| !port.result.targets.contains_key(f))
+            .map(|f| f.get())
+            .collect();
+        let ipr: Vec<f64> = plugin
+            .result
+            .ipr
+            .keys()
+            .map(|c| port.result.ipr.get(c).copied().unwrap_or(0.0))
+            .collect();
+        let line = port
+            .line
+            .iter()
+            .zip(&plugin.line)
+            .map(|(p, q)| p.distance(*q))
+            .fold(0.0, f64::max);
+        eprintln!(
+            "{case}: rotation {deg:.2} deg, translation {mm:.2} mm, IPR {ipr:?} (plugin {:?}), not moved {gone:?}, line {line:.3} mm",
+            plugin.result.ipr.values().collect::<Vec<_>>()
+        );
+        let want = rows.iter().find(|r| r.0 == case);
+        let Some(&(_, w_deg, w_mm, w_ipr, w_gone, w_line)) = want else {
+            unstated.push(case.clone());
+            continue;
+        };
+        assert!((line - w_line).abs() < 0.01, "{case}: line {line}");
+        assert!((deg - w_deg).abs() < 0.05, "{case}: rotation {deg}");
+        assert!((mm - w_mm).abs() < 0.05, "{case}: translation {mm}");
+        assert!(
+            ipr.iter().all(|&v| (v - w_ipr).abs() < 1e-9),
+            "{case}: {ipr:?}"
+        );
+        assert_eq!(gone, w_gone, "{case}: teeth not moved");
+    }
+    assert!(unstated.is_empty(), "not stated: {unstated:?}");
+}
+
+/// The setup of `case` (`setup.json`, the oracle's inputs) with the
+/// plugin's derotation and line scale or the port's.
+fn run_case(case: &str, (plugin_derotation, plugin_line_scale): (bool, bool)) -> setup::Output {
+    let dir = fixtures().join(case);
+    let teeth_json = json(&dir.join("teeth/teeth.json"));
+    let oracle = json(&dir.join("setup").join("setup.json"));
+    let arch = if teeth_json["arch"] == "UPPER" {
+        Arch::Upper
+    } else {
+        Arch::Lower
+    };
+    let params = Params::from_settings(&settings_of(&oracle["inputs"]["settings"]));
+    let m_inv = mat4(&json(&dir.join("worldframe/worldframe.json"))["arch_frame"]["M_inv"]);
+    let mesh = dc_mesh::dcm::decode(&std::fs::read(dir.join("scan.dcm")).unwrap()).unwrap();
+    let vertices: Vec<DVec3> = mesh
+        .positions
+        .iter()
+        .map(|p| m_inv.transform_point3(p.as_dvec3()))
+        .collect();
+    let labels = labels(&json(&dir.join("segmentation/segmentation.json"))["vertex_labels"]);
+    let sequence: Vec<Fdi> = teeth_json["sequence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| Fdi::new(v.as_u64().unwrap() as u8).unwrap())
+        .collect();
+    let teeth: BTreeMap<Fdi, ToothInput> = teeth_json["teeth"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, t)| (fdi(k), tooth(fdi(k), t)))
+        .collect();
+    let input = Input {
+        arch,
+        vertices: &vertices,
+        labels: &labels,
+        sequence: &sequence,
+        teeth: &teeth,
+        line: None,
+        fixed: &[],
+        poses: &BTreeMap::new(),
+    };
+    // each departure on its own: the plugin's spaces in both
+    let cfg = Config {
+        plugin_derotation,
+        plugin_line_scale,
+        plugin_spaces: true,
+        ..params.config(arch)
+    };
+    setup::run_with(&input, &cfg).unwrap()
 }
 
 #[test]

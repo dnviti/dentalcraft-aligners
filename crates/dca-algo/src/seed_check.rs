@@ -16,6 +16,17 @@
 //! a crown of two teeth), [`apply_corrections`] moves the seeds, and after a
 //! correction [`renumber_spans`] numbers the teeth again from their widths.
 //!
+//! Beyond the plugin, adjacent separate teeth are never merged: a weak
+//! boundary alone is no reason to merge. On a printed model the contacts
+//! between the teeth are fused and shallow: the plugin read them as weak
+//! and merged real neighbours (11+12, 14+15, 15+16 on the test piece), each
+//! merge renumbering the whole arch. Only a weak boundary with positive
+//! evidence of one crown ([`one_crown`]: no groove at all, and the two parts
+//! together as wide as one tooth of that kind, each narrower than one) is
+//! planned ([`vetted`]); the others keep both teeth and stay a doubt for
+//! the user. A correction renumbers only the quadrants it touched
+//! ([`renumber_touched`]).
+//!
 //! Vertices are in scan (case) coordinates; the arch frame of the
 //! [`ArchData`] moves them to arch coordinates. Labels are FDI numbers, `0`
 //! for the gingiva. Messages are enums here; the module words them.
@@ -41,6 +52,25 @@ pub const SLIVER_MM: f64 = 3.5;
 pub const CROWN_BAND_MM: f64 = 3.0;
 /// Two parts of one crown measure at most this many widest molars.
 pub const ONE_CROWN: f64 = 1.45;
+/// A weak boundary runs over one crown, not in an interproximal groove,
+/// only when its median fold is below this ([`one_crown`]): the boundaries
+/// of crowns split in two by their labels measured 0.04-1.06 on the
+/// printed test piece and on a patient scan (14 crowns), the fused contacts
+/// of the test piece 1.45-1.96, real contacts 4.6 and more.
+pub const OVER_CROWN_FOLD: f64 = 1.25;
+/// Two parts of one crown measure together at most this many typical
+/// widths of the kept tooth, scaled to the arch ([`one_crown`]): crowns
+/// split in two measured 0.95-1.38 (1.53 where a part ran onto the next
+/// tooth), real neighbours 1.62-2.24 on the test piece (with the typical
+/// widths of [`arch_widths`], any two neighbours measure 1.78 or more).
+pub const ONE_TOOTH: f64 = 1.5;
+/// Each part of one crown is narrower than this many typical widths of the
+/// kept tooth, scaled to the arch ([`one_crown`]): a part as wide as a whole
+/// tooth is a tooth.
+pub const PART_OF_TOOTH: f64 = 0.9;
+/// The scale of an arch ([`arch_scale`]) stays in the range of the scales
+/// of the automatic seeds.
+const SCALE_RANGE: (f64, f64) = (0.82, 1.18);
 /// A crown wider than this many widest molars is two teeth.
 pub const SPLIT_CROWN: f64 = 1.6;
 /// Midline halfway between the canines (mm).
@@ -374,7 +404,8 @@ fn index_of(f: u16) -> u8 {
 /// two parts of one crown are merged, keeping the number of the part nearer
 /// the midline); only when none is left, a tooth with weak boundaries on
 /// both sides loses its seed and a crown wider than [`SPLIT_CROWN`] molars
-/// is split.
+/// is split. This is the plugin's plan; the app plans on the report
+/// [`vetted`] first, so that only parts of one crown are merged.
 pub fn plan_corrections(rep: &Report) -> Vec<Action> {
     let spans = &rep.spans;
     let span = |f: u16| spans.get(&f).copied().unwrap_or((0.0, 0.0));
@@ -398,13 +429,9 @@ pub fn plan_corrections(rep: &Report) -> Vec<Action> {
         if used.contains(&a) || used.contains(&b) || hi - lo > ONE_CROWN * rep.molar {
             continue;
         }
-        let (wa, wb) = (sa.1 - sa.0, sb.1 - sb.0);
-        let (ia, ib) = (index_of(a), index_of(b));
-        acts.push(if ia < ib || (ia == ib && wa >= wb) {
-            Action::Merge { keep: a, drop: b }
-        } else {
-            Action::Merge { keep: b, drop: a }
-        });
+        let keep = kept(a, b, sa.1 - sa.0, sb.1 - sb.0);
+        let drop = if keep == a { b } else { a };
+        acts.push(Action::Merge { keep, drop });
         used.insert(a);
         used.insert(b);
     }
@@ -434,6 +461,102 @@ pub fn plan_corrections(rep: &Report) -> Vec<Action> {
             }),
     );
     acts
+}
+
+/// The number two merged parts keep ([`plan_corrections`]): that of the
+/// part nearer the midline, of two parts at the same position the wider
+/// one's (`wa`, `wb`: their widths along the arch).
+fn kept(a: u16, b: u16, wa: f64, wb: f64) -> u16 {
+    let (ia, ib) = (index_of(a), index_of(b));
+    if ia < ib || (ia == ib && wa >= wb) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Typical width (mm) along the arch of the tooth `f` ([`arch_widths`]);
+/// `None` for a number that is no permanent tooth.
+fn typical_width(f: u16, arch: Arch) -> Option<f64> {
+    let i = usize::from(index_of(f));
+    (1..=8).contains(&i).then(|| arch_widths(arch)[i - 1])
+}
+
+/// Scale of the teeth of a report: the median ratio of their widths along
+/// the arch to their typical widths ([`arch_widths`]), within the range of
+/// the scales of the automatic seeds; 1 without teeth.
+pub fn arch_scale(rep: &Report, arch: Arch) -> f64 {
+    let r: Vec<f64> = rep
+        .spans
+        .iter()
+        .filter_map(|(f, (lo, hi))| typical_width(*f, arch).map(|w| (hi - lo) / w))
+        .collect();
+    if r.is_empty() {
+        return 1.0;
+    }
+    median(&r).clamp(SCALE_RANGE.0, SCALE_RANGE.1)
+}
+
+/// The two teeth on the sides of the weak boundary `w` are two parts of one
+/// crown: the positive evidence a merge needs, beyond the plugin (which
+/// merges any two teeth with a weak boundary that measure together at most
+/// [`ONE_CROWN`] widest molars, and so real neighbours with the fused
+/// contacts of a printed model). The boundary has no groove at all
+/// ([`OVER_CROWN_FOLD`]); with the typical width `e` of the tooth whose
+/// number the merge keeps, scaled to the arch ([`arch_scale`]), the two
+/// parts measure together at most [`ONE_TOOTH`] `e` (and the plugin's
+/// limit), and each of them less than [`PART_OF_TOOTH`] `e`.
+pub fn one_crown(rep: &Report, w: &Weak, arch: Arch) -> bool {
+    let (Some(&sa), Some(&sb)) = (rep.spans.get(&w.a), rep.spans.get(&w.b)) else {
+        return false;
+    };
+    let (wa, wb) = (sa.1 - sa.0, sb.1 - sb.0);
+    let Some(e) = typical_width(kept(w.a, w.b, wa, wb), arch) else {
+        return false;
+    };
+    let e = e * arch_scale(rep, arch);
+    let both = sa.1.max(sb.1) - sa.0.min(sb.0);
+    w.fold < OVER_CROWN_FOLD
+        && both <= (ONE_TOOTH * e).min(ONE_CROWN * rep.molar)
+        && wa.max(wb) < PART_OF_TOOTH * e
+}
+
+/// The report with only the weak boundaries over one crown ([`one_crown`]):
+/// what the app plans its corrections on ([`plan_corrections`]). Every
+/// boundary left is merged by the plan, so a tooth is never dropped for
+/// its weak boundaries either. Two teeth with any other weak boundary stay
+/// two teeth; the boundary stays in [`Report::weak`] of the check, a doubt
+/// for the user.
+pub fn vetted(rep: &Report, arch: Arch) -> Report {
+    let mut out = rep.clone();
+    out.weak.retain(|w| one_crown(rep, w, arch));
+    out
+}
+
+/// The numbers of [`renumber_spans`] (`new`: old number -> new number)
+/// kept only where a correction changed the seeds: `touched` holds, for
+/// each quadrant (1-4) whose seeds changed, the position (1-8) of the most
+/// mesial seed that changed. A merge, a drop or a split shifts the numbers
+/// of the teeth distal to it in its quadrant, never those of the teeth
+/// mesial to it or of another quadrant: they keep their numbers (the plugin
+/// renumbers the whole arch from the widths, and one wrong merge moved the
+/// numbers of the other side too). `None` when the renumbering would give a
+/// tooth a number of a quadrant left alone, or two teeth the same number.
+pub fn renumber_touched(
+    new: &BTreeMap<u16, u16>,
+    touched: &BTreeMap<u16, u8>,
+) -> Option<BTreeMap<u16, u16>> {
+    let free = |f: u16| touched.get(&(f / 10)).is_some_and(|&m| index_of(f) >= m);
+    let mut out = BTreeMap::new();
+    for (&f, &g) in new {
+        let g = if free(f) { g } else { f };
+        if g != f && !touched.contains_key(&(g / 10)) {
+            return None;
+        }
+        out.insert(f, g);
+    }
+    let numbers: BTreeSet<u16> = out.values().copied().collect();
+    (numbers.len() == out.len()).then_some(out)
 }
 
 /// Seed of a crown (arch coordinates): the highest point near the centre of
@@ -846,5 +969,106 @@ mod tests {
         let (new, _) = renumber_spans(&spans, Arch::Lower, false, &[]);
         let got: Vec<u16> = new.values().copied().collect();
         assert_eq!(got, vec![36, 35, 34, 33, 32, 31, 41, 42, 43, 44, 45, 46]);
+    }
+
+    /// The crown spans of the printed test piece (upper arch) after the
+    /// segmentation of the automatic chain, as the check measured them.
+    fn test_piece() -> Vec<(u16, f64, f64)> {
+        vec![
+            (11, -13.98, -4.38),
+            (12, -19.78, -13.18),
+            (13, -28.18, -20.03),
+            (14, -34.93, -28.58),
+            (15, -40.48, -35.04),
+            (16, -48.83, -40.53),
+            (22, 3.92, 11.72),
+            (23, 12.22, 21.27),
+            (24, 21.02, 28.37),
+            (25, 28.1, 43.77),
+            (26, 34.62, 45.42),
+        ]
+    }
+
+    fn merges(acts: &[Action]) -> Vec<(u16, u16)> {
+        acts.iter()
+            .filter_map(|a| match *a {
+                Action::Merge { keep, drop } => Some((keep, drop)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_fused_contacts_of_the_test_piece_keep_their_teeth() {
+        // the four contacts the plugin read as weak (folds 1.45-1.96)
+        let weak = [
+            (11, 12, 1.78),
+            (12, 13, 1.83),
+            (14, 15, 1.96),
+            (15, 16, 1.45),
+        ];
+        let r = rep(&test_piece(), &weak, Arch::Upper);
+        assert_eq!(merges(&plan_corrections(&r)), vec![(15, 16), (11, 12)]);
+        let v = vetted(&r, Arch::Upper);
+        assert!(v.weak.is_empty(), "{:?}", v.weak);
+        assert!(plan_corrections(&v).is_empty());
+        // with no groove at all, they are still two teeth each: too wide
+        let flat = weak.map(|(a, b, _)| (a, b, 0.3));
+        let r = rep(&test_piece(), &flat, Arch::Upper);
+        assert!(vetted(&r, Arch::Upper).weak.is_empty());
+    }
+
+    #[test]
+    fn a_crown_split_in_two_on_the_test_piece_is_merged() {
+        // the seed of 16 moved distally and a second seed (17) on its crown
+        let mut spans = test_piece();
+        spans[5] = (16, -48.93, -40.53);
+        spans.push((17, -55.08, -47.37));
+        let weak = [
+            (11, 12, 1.78),
+            (12, 13, 1.83),
+            (14, 15, 1.89),
+            (15, 16, 1.41),
+            (16, 17, 0.45),
+        ];
+        let r = rep(&spans, &weak, Arch::Upper);
+        let v = vetted(&r, Arch::Upper);
+        assert_eq!(v.weak.len(), 1);
+        assert_eq!(merges(&plan_corrections(&v)), vec![(16, 17)]);
+        // a part as wide as a whole tooth is a tooth: not merged
+        spans[5] = (16, -51.0, -40.53);
+        spans[11] = (17, -55.08, -50.0);
+        let r = rep(&spans, &weak, Arch::Upper);
+        assert!(vetted(&r, Arch::Upper).weak.is_empty());
+    }
+
+    #[test]
+    fn only_the_teeth_distal_to_a_correction_are_renumbered() {
+        // 16 merged into 15: the tooth after it (17) becomes 16; the
+        // renumbering from the widths also moved 13, mesial to the merge,
+        // and the teeth of the other side
+        let all: BTreeMap<u16, u16> = [
+            (11, 11),
+            (12, 12),
+            (13, 14),
+            (14, 14),
+            (15, 15),
+            (17, 16),
+            (21, 21),
+            (25, 26),
+            (26, 27),
+        ]
+        .into_iter()
+        .collect();
+        let touched: BTreeMap<u16, u8> = [(1, 5)].into_iter().collect();
+        let got = renumber_touched(&all, &touched).unwrap();
+        let moved: Vec<(u16, u16)> = got.into_iter().filter(|(f, g)| f != g).collect();
+        assert_eq!(moved, vec![(17, 16)]);
+        // a tooth after the merge taking the number of one before it: refused
+        let clash: BTreeMap<u16, u16> = [(14, 14), (15, 14)].into_iter().collect();
+        assert_eq!(renumber_touched(&clash, &touched), None);
+        // a number of a quadrant no correction touched: refused
+        let into_other: BTreeMap<u16, u16> = [(15, 25), (21, 21)].into_iter().collect();
+        assert_eq!(renumber_touched(&into_other, &touched), None);
     }
 }

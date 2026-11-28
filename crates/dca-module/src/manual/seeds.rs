@@ -11,12 +11,13 @@
 //! the user clicked on the scan. Deleting a seed does not mark the tooth
 //! missing (that is `aligners.preparation.numbering.mark-missing`).
 
-use dc_case::CaseState;
+use dc_case::{CaseState, Fdi};
 use dc_command::{CommandError, JobCtx};
 use dc_module_api::CommandOutput;
 use dca_algo::anatomy::Arch;
 use dca_algo::manual::Scan;
 use dca_model::Seed;
+use glam::DVec3;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -162,6 +163,10 @@ pub(crate) fn run_seed(
         .filter(|s| Arch::of(s.fdi) == arch)
         .collect();
     let invalidated = data.edit_arch_seeds(arch.role(), &edited);
+    // a mark closer than about half a tooth to another: the separation's
+    // later disk takes the faces of the earlier one, whose tooth then merges
+    // into its neighbour (warned, not refused: the user may be moving it)
+    let warnings = position.map_or_else(Vec::new, |at| close_marks(&edited, f, at));
     let mut next = state.clone();
     finish(&mut next, data, &[]);
     Ok((
@@ -174,6 +179,34 @@ pub(crate) fn run_seed(
             "seeds_in_arch": arch_seeds,
             "segmentation_outdated": invalidated.contains(&"labels"),
             "invalidated": invalidated,
+            "warnings": warnings,
         }),
     ))
+}
+
+/// Marks closer than this times the mean typical mesio-distal width of the
+/// two teeth are warned about ([`close_marks`]).
+const CLOSE_MARKS: f64 = 0.5;
+
+/// The warnings for the marks of `seeds` (one arch) closer to the mark of
+/// `f` at `at` than [`CLOSE_MARKS`] times the typical width of the teeth.
+fn close_marks(seeds: &[Seed], f: Fdi, at: DVec3) -> Vec<String> {
+    let md = |x: Fdi| dca_algo::anatomy::typical_diameters(x).0;
+    seeds
+        .iter()
+        .filter(|s| s.fdi != f)
+        .filter_map(|s| {
+            let d = s.position.distance(at);
+            (d < CLOSE_MARKS * 0.5 * (md(f) + md(s.fdi))).then(|| {
+                messages::tr(
+                    "aligners-warn-seeds-close",
+                    &[
+                        ("a", &f.to_string()),
+                        ("b", &s.fdi.to_string()),
+                        ("mm", &format!("{d:.1}")),
+                    ],
+                )
+            })
+        })
+        .collect()
 }

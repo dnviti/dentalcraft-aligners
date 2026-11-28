@@ -69,8 +69,19 @@ impl Default for CheckOptions {
     }
 }
 
-/// Build volume of the default printer (Formlabs Form 3: 145 x 145 x 185 mm).
-pub const DEFAULT_PLATE_MM: [f64; 3] = [145.0, 145.0, 185.0];
+/// Build plate of the default printer, the one the print popup prepares
+/// (Elegoo Saturn 4 Ultra 16K, `dc-print` `PrinterProfile::saturn_4_ultra_16k`:
+/// 211.68 x 118.37 x 220 mm), less the margin its nesting keeps from every
+/// edge (`dc-print` `LayoutParams::default`, 4 mm) in X and Y: the room a
+/// part has on the plate. dca-algo does not depend on dc-print (core): keep
+/// these figures in step with the profile.
+pub const PLATE_MARGIN_MM: f64 = 4.0;
+/// See [`PLATE_MARGIN_MM`].
+pub const DEFAULT_PLATE_MM: [f64; 3] = [
+    211.68 - 2.0 * PLATE_MARGIN_MM,
+    118.37 - 2.0 * PLATE_MARGIN_MM,
+    220.0,
+];
 
 /// Something that makes a file unfit to print.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -112,6 +123,9 @@ pub enum Problem {
     Genus {
         /// Handles of the surface.
         count: i64,
+        /// Where they are: the centre of the shortest loop found through
+        /// each (coordinates of the file, mm); empty when none is found.
+        at: Vec<[f64; 3]>,
     },
     /// Zero or negative volume (inverted normals).
     NonPositiveVolume,
@@ -148,16 +162,44 @@ impl Problem {
             Problem::Degenerate { count } => n("chk-degenerate", &[count.to_string()]),
             Problem::Pieces { count } => n("chk-pieces", &[count.to_string()]),
             Problem::SelfIntersections { count } => n("chk-selfint", &[count.to_string()]),
-            Problem::Genus { count } => n("chk-genus", &[count.to_string()]),
+            Problem::Genus { count, at } if at.is_empty() => {
+                text::fmt_n(lang, "chk-genus", *count as u64, &[count.to_string()])
+            }
+            Problem::Genus { count, at } => {
+                // the decimal mark of the language; the Italian coordinates
+                // are told apart by semicolons
+                let places: Vec<String> = at
+                    .iter()
+                    .map(|p| {
+                        let c = p.map(|x| super::html::num(lang, x, 1));
+                        let sep = if lang == Lang::It { "; " } else { ", " };
+                        format!("({})", c.join(sep))
+                    })
+                    .collect();
+                text::fmt_n(
+                    lang,
+                    "chk-genus-at",
+                    *count as u64,
+                    &[count.to_string(), places.join(", ")],
+                )
+            }
             Problem::NonPositiveVolume => n("chk-volume", &[]),
             Problem::TooThin { min_mm, limit_mm } => n(
                 "chk-thin",
-                &[format!("{min_mm:.2}"), format!("{limit_mm:.2}")],
+                &[
+                    super::html::num(lang, *min_mm, 2),
+                    super::html::num(lang, *limit_mm, 2),
+                ],
             ),
             Problem::DoesNotFit { size_mm, plate_mm } => n(
                 "chk-fit",
                 &[
-                    format!("{:.1} x {:.1} x {:.1}", size_mm[0], size_mm[1], size_mm[2]),
+                    format!(
+                        "{} x {} x {}",
+                        super::html::num(lang, size_mm[0], 1),
+                        super::html::num(lang, size_mm[1], 1),
+                        super::html::num(lang, size_mm[2], 1)
+                    ),
                     format!(
                         "{:.0} x {:.0} x {:.0}",
                         plate_mm[0], plate_mm[1], plate_mm[2]
@@ -443,7 +485,10 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
     if let (Some(max), Some(g)) = (options.max_genus, out.genus)
         && g > i64::from(max)
     {
-        p.push(Problem::Genus { count: g });
+        p.push(Problem::Genus {
+            count: g,
+            at: hole_places(&pos, &tris, g.max(0) as usize),
+        });
     }
     if out.volume_mm3 <= 0.0 {
         p.push(Problem::NonPositiveVolume);
@@ -464,6 +509,31 @@ pub fn check(mesh: &TriMesh, options: &CheckOptions) -> PrintCheck {
     }
     out.ok = out.problems.is_empty();
     out
+}
+
+/// The centre of the shortest loop found through every handle of the
+/// closed surface `pos`, `tris` (at most `count`, a millimetre apart at
+/// least): where its holes through the wall are
+/// ([`crate::trim::holes::handle_loops`], [`crate::trim::holes::short_loops`]).
+fn hole_places(pos: &[Vec3], tris: &[[u32; 3]], count: usize) -> Vec<[f64; 3]> {
+    use crate::trim::holes;
+    let p: Vec<DVec3> = pos.iter().map(|v| v.as_dvec3()).collect();
+    let mut short: Vec<(f64, Vec<u32>)> = holes::handle_loops(&p, tris)
+        .iter()
+        .flat_map(|l| holes::short_loops(&p, tris, l, holes::CROP_MM, holes::ROOTS, 1))
+        .collect();
+    short.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<DVec3> = Vec::new();
+    for (_, l) in short {
+        if out.len() == count {
+            break;
+        }
+        let c = l.iter().map(|&v| p[v as usize]).sum::<DVec3>() / l.len().max(1) as f64;
+        if out.iter().all(|q| (*q - c).length() > 1.0) {
+            out.push(c);
+        }
+    }
+    out.into_iter().map(|c| c.to_array()).collect()
 }
 
 /// Checks the STL file at `path`.
@@ -1073,6 +1143,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_default_plate_is_the_saturn_inside_its_margin() {
+        let p = DEFAULT_PLATE_MM;
+        assert!(
+            (p[0] - 203.68).abs() < 1e-9 && (p[1] - 110.37).abs() < 1e-9,
+            "{p:?}"
+        );
+        assert_eq!(p[2], 220.0);
+        // 115 mm fits a 145 mm Form 3 plate but not the 118.37 mm Saturn side
+        // less its margins, in either turn
+        let c = check(&cube(Vec3::ZERO, 115.0), &opts());
+        assert_eq!(c.fits_plate, Some(false));
+        let c = check(&cube(Vec3::ZERO, 105.0), &opts());
+        assert_eq!(c.fits_plate, Some(true));
+    }
+
+    #[test]
     fn the_build_plate_limits_the_size() {
         let c = check(
             &cube(Vec3::ZERO, 100.0),
@@ -1153,5 +1239,85 @@ pub(crate) mod tests {
             ),
             1
         );
+    }
+
+    /// A closed torus around the `z` axis through `centre` (radii `big`,
+    /// `small`), outward faces.
+    fn torus(centre: Vec3, big: f32, small: f32) -> TriMesh {
+        let (nu, nv) = (48usize, 24usize);
+        let mut positions = Vec::with_capacity(nu * nv);
+        for i in 0..nu {
+            let u = std::f32::consts::TAU * i as f32 / nu as f32;
+            for j in 0..nv {
+                let v = std::f32::consts::TAU * j as f32 / nv as f32;
+                let r = big + small * v.cos();
+                positions.push(centre + Vec3::new(r * u.cos(), r * u.sin(), small * v.sin()));
+            }
+        }
+        let at = |i: usize, j: usize| ((i % nu) * nv + j % nv) as u32;
+        let mut tris = Vec::new();
+        for i in 0..nu {
+            for j in 0..nv {
+                tris.push([at(i, j), at(i + 1, j), at(i + 1, j + 1)]);
+                tris.push([at(i, j), at(i + 1, j + 1), at(i, j + 1)]);
+            }
+        }
+        TriMesh::new(positions, tris)
+    }
+
+    #[test]
+    fn a_hole_through_the_wall_is_flagged_where_it_is() {
+        let centre = Vec3::new(20.0, -5.0, 3.0);
+        let c = check(&torus(centre, 3.0, 1.0), &opts());
+        assert!(c.volume_mm3 > 0.0, "{c:?}");
+        assert_eq!(c.genus, Some(1));
+        let at = c
+            .problems
+            .iter()
+            .find_map(|p| match p {
+                Problem::Genus { count: 1, at } => Some(at.clone()),
+                _ => None,
+            })
+            .expect("the hole is a problem");
+        // one place, on the torus: the loop round its tube or round its hole
+        assert_eq!(at.len(), 1, "{at:?}");
+        let q = DVec3::from(at[0]) - centre.as_dvec3();
+        let r = q.truncate().length();
+        assert!(q.z.abs() < 0.5 && (r < 0.5 || (r - 3.0).abs() < 0.5), "{q}");
+        let en = c.problem_texts(Lang::En).join("; ");
+        let it = c.problem_texts(Lang::It).join("; ");
+        let place = |lang, sep| {
+            let c = at[0].map(|x| crate::export::html::num(lang, x, 1));
+            format!("({})", c.join(sep))
+        };
+        // the singular, the decimal mark and the separator of each language
+        assert!(
+            en.contains(&format!(
+                "1 hole through the wall, near {}",
+                place(Lang::En, ", ")
+            )),
+            "{en}"
+        );
+        assert!(
+            it.contains(&format!(
+                "1 foro passante nella parete, vicino a {}",
+                place(Lang::It, "; ")
+            )),
+            "{it}"
+        );
+        assert!(!it.contains("hole") && !it.contains("coordinates"), "{it}");
+        // without the loops (none found) the count alone, in the plural
+        let bare = Problem::Genus {
+            count: 2,
+            at: Vec::new(),
+        };
+        assert_eq!(bare.text(Lang::En), "2 holes through the wall");
+        assert_eq!(bare.text(Lang::It), "2 fori passanti nella parete");
+        let one = Problem::Genus {
+            count: 1,
+            at: Vec::new(),
+        };
+        assert_eq!(one.text(Lang::En), "1 hole through the wall");
+        assert_eq!(one.text(Lang::It), "1 foro passante nella parete");
     }
 }

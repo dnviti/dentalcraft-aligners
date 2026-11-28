@@ -33,6 +33,7 @@ fn the_demo_teeth_are_found_and_numbered() {
                         arch,
                         vertices: &v,
                         triangles: &d.mesh.tris,
+                        occlusal_flipped: false,
                     },
                     &Params::default(),
                 )

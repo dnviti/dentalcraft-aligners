@@ -37,10 +37,42 @@ pub struct Note {
     pub stage: Option<u32>,
     /// Model (`false`) or aligner (`true`).
     pub aligner: bool,
+    /// A passive aligner (after the last active stage of its arch): its
+    /// file is the `_passivo` one.
+    pub passive: bool,
     /// Key of the text (`export::text`).
     pub key: &'static str,
-    /// Details (numbers, the reason given by the step), as they are.
-    pub detail: String,
+    /// What the text of `key` says: numbers and names, worded in the
+    /// language of the report ([`super::text::note`]).
+    pub args: Vec<NoteArg>,
+}
+
+/// An argument of a [`Note`]: it is worded when the note is shown, in the
+/// language asked, so the same note reads in English and in Italian.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NoteArg {
+    /// Text as it is (the reason given by the step).
+    Text(String),
+    /// A count; the first one of a note picks the singular or the plural
+    /// of its text.
+    Count(u32),
+    /// A length in micrometres, shown in millimetres with the decimal mark
+    /// of the language.
+    Micrometres(u32),
+    /// A word of the text table, by key.
+    Word(&'static str),
+}
+
+impl NoteArg {
+    /// A length in millimetres (to the micrometre).
+    pub fn mm(x: f64) -> Self {
+        NoteArg::Micrometres((x.max(0.0) * 1000.0).round() as u32)
+    }
+
+    /// A note's text as it is.
+    pub fn text(s: impl Into<String>) -> Vec<Self> {
+        vec![NoteArg::Text(s.into())]
+    }
 }
 
 /// Source of the printable meshes of every stage, in the coordinates of the
@@ -52,9 +84,22 @@ pub trait MeshProvider: Sync {
 
     /// The shell of aligner `stage` (`1..=n_active`) of an arch, as a closed
     /// solid, stamp included. `None`: no shell (the direct printing files
-    /// are skipped). The passive aligners repeat the shell of the last
-    /// active stage.
+    /// are skipped).
     fn aligner(&self, arch: Arch, stage: u32) -> Result<Option<TriMesh>, ExportError>;
+
+    /// The passive aligner `number` (`> last`) of an arch: the shell of the
+    /// last active stage `last` stamped with its own number, the passive
+    /// mark and its own date (the plugin's `case_export.passive_files`:
+    /// "never a copy of the last one's"). `None`: the file of aligner `last`
+    /// is copied as it is (no stamp on the files).
+    fn passive(
+        &self,
+        _arch: Arch,
+        _last: u32,
+        _number: u32,
+    ) -> Result<Option<TriMesh>, ExportError> {
+        Ok(None)
+    }
 
     /// The notes gathered so far, sorted (arch, stage, kind): the export reads
     /// them once every mesh is made.

@@ -46,12 +46,15 @@
 //!   face counts equal, axes within [`TOL_DEG`], widths and points within
 //!   [`TOL_MM`], the rest frame within [`TOL_FRAME`] (the bounds of
 //!   `teeth_oracle.rs`);
-//! * every closed tooth: all vertices finite, watertight and manifold, no
-//!   closed tooth missing; a tooth within [`HAUSDORFF_MM`] (symmetric
-//!   surface Hausdorff distance to the plugin's solid) has every number of
-//!   the plugin's info dict equal; a tooth above it is a rounding
-//!   divergence, printed with its info differences and counted per scan,
-//!   and fails only above [`HAUSDORFF_DIVERGED_MM`];
+//! * every closed tooth: all vertices finite, watertight and manifold, one
+//!   piece without a tunnel through it, no closed tooth missing; a tooth
+//!   within [`HAUSDORFF_MM`] (symmetric surface Hausdorff distance to the
+//!   plugin's solid) has every number of the plugin's info dict equal; a
+//!   tooth above it is a rounding divergence, printed with its info
+//!   differences and counted per scan, and fails only above
+//!   [`HAUSDORFF_DIVERGED_MM`]; a tooth whose plugin solid has a tunnel
+//!   through it is a departure (its handle cut here), printed, with no more
+//!   crossing faces than the plugin's;
 //! * the gingiva: every vertex finite, the vertex and face counts, the tooth
 //!   and flags of every vertex equal, every rest and deformed position within
 //!   [`TOL_POS_MM`], every weight within [`TOL_W`] (column sums printed);
@@ -512,6 +515,10 @@ fn check_closed(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, reconstruct::ClosedTo
         r.check(rep.is_watertight() && rep.is_manifold(), || {
             format!("closed tooth {f}: not a closed solid: {rep:?}")
         });
+        let solid = dc_mesh::solid_topology(&m);
+        r.check(solid.pieces == 1 && solid.genus == Some(0), || {
+            format!("closed tooth {f}: not one solid without a tunnel: {solid:?}")
+        });
         let oracle = dc_mesh::dcm::decode(&read_raw(
             &s.dir.join(format!("{}_closed_{f}.dcm", s.letter)),
         ))
@@ -522,6 +529,9 @@ fn check_closed(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, reconstruct::ClosedTo
         } else {
             f64::NAN
         };
+        let departed = dc_mesh::solid_topology(&oracle)
+            .genus
+            .is_some_and(|g| g > 0);
         let rust = serde_json::to_value(tooth.info).unwrap();
         let info_diffs: Vec<String> = want["info"]
             .as_object()
@@ -530,7 +540,26 @@ fn check_closed(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, reconstruct::ClosedTo
             .filter(|(k, v)| &rust[k.as_str()] != *v)
             .map(|(k, v)| format!("{k} {} (plugin {v})", rust[k.as_str()]))
             .collect();
-        if hd > HAUSDORFF_MM {
+        if departed {
+            // a plugin's solid with a tunnel through it (a handle of the
+            // scanned crown, which the plugin keeps): ours has the handle cut
+            // away (`reconstruct/handles.rs`), so neither its numbers nor its
+            // surface are the plugin's (`reconstruct_oracle.rs`); a handle
+            // cut, and no more crossing faces
+            eprintln!(
+                "scan {} tooth {f}: DEPARTED, the plugin's solid has a tunnel through it; Hausdorff \
+                 {hd:.2e} mm; info differences: {}",
+                s.letter,
+                info_diffs.join(", ")
+            );
+            let theirs = want["info"]["crossing_faces"].as_u64().unwrap() as usize;
+            r.check(tooth.info.handles_cut > 0 && tooth.info.crossing_faces <= theirs, || {
+                format!(
+                    "closed tooth {f}: the plugin's tunnel is not cut or more faces cross: {:?}",
+                    tooth.info
+                )
+            });
+        } else if hd > HAUSDORFF_MM {
             eprintln!(
                 "scan {} tooth {f}: DIVERGED by rounding, Hausdorff {hd:.2e} mm; info differences: {}",
                 s.letter,
@@ -545,7 +574,7 @@ fn check_closed(s: &Scan, r: &mut Report) -> BTreeMap<Fdi, reconstruct::ClosedTo
                 format!("closed tooth {f}: info differs: {}", info_diffs.join(", "))
             });
         }
-        if !hd.is_nan() {
+        if !hd.is_nan() && !departed {
             hd_all.push(hd);
             r.check(hd <= HAUSDORFF_DIVERGED_MM, || {
                 format!("closed tooth {f}: Hausdorff {hd:.2e} mm to the plugin's (limit {HAUSDORFF_DIVERGED_MM} mm)")

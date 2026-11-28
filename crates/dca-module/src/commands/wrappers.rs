@@ -10,7 +10,9 @@
 //!   first) and the gingiva, of every tooth or of the teeth that changed,
 //!   then the diagnosis (see `teeth_build`);
 //! * `aligners.occlusion.align`: the registration on the bite scans when the
-//!   case has one, otherwise the virtual bite; then the contact map;
+//!   case has one, otherwise the virtual bite; then the contact map. A case
+//!   with one arch has no bite: the command says that it does not apply and
+//!   changes nothing ([`super::occlusion::one_arch`]);
 //! * `aligners.planning.aligners`: the aligners and their calendar;
 //! * `aligners.output.export-all`: the full package from the shell stage,
 //!   refusing to fall back on the scans (see [`run_export_all`]); the case
@@ -109,7 +111,7 @@ fn run_steps(
 }
 
 /// The language of the app, for what the files say.
-fn app_lang() -> Lang {
+pub(crate) fn app_lang() -> Lang {
     match dc_i18n::current() {
         UiLang::En => Lang::En,
         UiLang::It => Lang::It,
@@ -173,6 +175,9 @@ fn run_bite(
     _params: BiteParams,
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
+    if let Some(out) = super::occlusion::one_arch(state) {
+        return Ok(out);
+    }
     let (method, steps) = bite_steps(state);
     let (next, records) = run_steps(state, &steps, ctx)?;
     Ok((next, json!({ "method": method, "steps": records })))

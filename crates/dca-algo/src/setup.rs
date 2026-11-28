@@ -15,20 +15,41 @@
 //! 2. the evaluation: a tooth to align moves only when it is off the line,
 //!    rotated or stepped beyond the tolerances of its zone;
 //! 3. the space along the line: every aligned tooth takes its full
-//!    mesio-distal width; the space missing between the fixed teeth is made
-//!    by the therapy in the order of `priority`; what is left is spread over
-//!    the contacts of the stretch; with `close_spaces` the gaps close
-//!    (retracting the incisors up to `retract_max`);
+//!    mesio-distal width; the space missing between the fixed teeth (and,
+//!    by default, between the last tooth of each side, which never goes
+//!    distally) is made by the therapy in the order of `priority`, after
+//!    the spaces of the arch are used (no IPR on a contact open at rest);
+//!    what is left is spread over the contacts of the stretch; with
+//!    `close_spaces` the gaps close, the posterior teeth going mesially as
+//!    far as needed (between two fixed teeth retracting the incisors up to
+//!    `retract_max`); with the midline kept each side of the arch closes its
+//!    own spaces and makes its own room against the midline, which stays (it
+//!    moves only when a side cannot make its room even with the therapy);
 //! 4. the positions along the arch: the nearest to the current ones,
 //!    without overlaps (weighted isotonic regression per stretch between the
 //!    fixed teeth);
-//! 5. each tooth: derotated about its own long axis until its mesio-distal
-//!    axis is tangent to the line, moved with the cusps onto the line, and
-//!    levelled (only the step beyond `level_tol`); tip and torque unchanged;
+//! 5. each tooth: derotated about its own long axis by the part of its
+//!    rotation against the line beyond the tolerance of its zone (none when
+//!    that part is under [`MIN_DEROTATION_DEG`]), moved with the cusps onto
+//!    the line, and levelled (only the step beyond `level_tol`; by default
+//!    the last tooth of each side keeps its height); tip and torque
+//!    unchanged;
 //! 6. with the crowns, the real 3D overlap between neighbours adds space
-//!    where needed (at most 4 rounds); when the space is not enough even
-//!    with the therapy the teeth are derotated only as far as it allows
-//!    (posterior teeth give up first, then the canines, the incisors last).
+//!    where needed and a contact still open takes space away (at most 4
+//!    rounds); when the space is not enough even with the therapy the teeth
+//!    are derotated only as far as it allows (posterior teeth give up first,
+//!    then the canines, the incisors last).
+//!
+//! Departures from the plugin, each with a [`Config`] flag the parity tests
+//! turn on: the derotation of the excess only (`plugin_derotation`), the
+//! scale of the arch line (`plugin_line_scale`) and the spaces
+//! (`plugin_spaces`, 2026-11-24: the ends of the arch bounded, each side
+//! making its own room against the midline, the last tooth of each side at
+//! its height, no IPR on an open contact, the open contacts closed on the
+//! crowns). The
+//! parameters
+//! align every tooth and hold no molar by default ([`Params`]); the
+//! plugin's default aligns the incisors and canines with the molars held.
 //!
 //! Coordinates: arch coordinates (origin between the last molars on the
 //! occlusal plane, +Y anterior, +Z occlusal). Targets are deltas `D`: the
@@ -74,6 +95,23 @@ const REST_OVERLAP_MAX: f64 = 0.5;
 /// Beyond this (mm) the difference between the model and the crowns is not a
 /// calibration error: the contact of the model stays.
 const GAP_CAL_MAX: f64 = 2.0;
+/// Weight of a central incisor against the other teeth (1) when the
+/// midline is held: at the centre of the arch ([`Midline::Center`]), or
+/// where it is ([`Midline::Keep`], [`Config::plugin_spaces`] off).
+const MIDLINE_WEIGHT: f64 = 25.0;
+/// Smallest derotation the setup makes (degrees). A tooth rotated against
+/// the line beyond the tolerance of its zone (`rot_tol_deg`,
+/// `post_rot_tol_deg`) is turned back only by the excess, so the turn grows
+/// from nothing at the tolerance instead of jumping to the whole rotation; an
+/// excess under this is not turned at all. 0.5 degrees is the smallest turn
+/// the plugin's setup makes itself (a tooth left in place that follows the
+/// curve is not turned below it; its staging gives any turn an aligner), a
+/// quarter of the 2 degrees an aligner turns a tooth, and it moves the
+/// contacts of an incisor (about 4 mm from its axis) by 0.035 mm, under the
+/// 0.05 mm steps of the IPR and of the levelling. It is above the noise of
+/// the measured rotation (about 0.3 degrees when a few vertices of a contact
+/// change label).
+pub const MIN_DEROTATION_DEG: f64 = 0.5;
 
 // ---- options ------------------------------------------------------------------------------------------
 
@@ -177,7 +215,8 @@ pub struct Config {
     /// Distance from the line below which an anterior tooth is not moved
     /// onto it (mm).
     pub normal_tol: f64,
-    /// Rotation below which an anterior tooth is not derotated (degrees).
+    /// Rotation an anterior tooth keeps (degrees): beyond it only the excess
+    /// is derotated, and not under [`MIN_DEROTATION_DEG`] of excess.
     pub rot_tol_deg: f64,
     /// Largest derotation (degrees).
     pub max_derotation: f64,
@@ -189,7 +228,8 @@ pub struct Config {
     pub vertical_max: f64,
     /// Premolars and molars: distance from the line below which they stay (mm).
     pub post_normal_tol: f64,
-    /// Premolars and molars: rotation below which they stay (degrees).
+    /// Premolars and molars: rotation they keep (degrees); beyond it only the
+    /// excess is derotated, and not under [`MIN_DEROTATION_DEG`] of excess.
     pub post_rot_tol_deg: f64,
     /// Vertical step tolerated (only the excess is corrected, mm).
     pub level_tol: f64,
@@ -228,6 +268,39 @@ pub struct Config {
     pub ipr_surface_cap: f64,
     /// Largest fraction of the enamel removed.
     pub enamel_fraction: f64,
+    /// Derotate as the plugin: a tooth rotated beyond the tolerance of its
+    /// zone turns fully onto the line. Off by default (2026-11-23): only the
+    /// excess over the tolerance turns, none under [`MIN_DEROTATION_DEG`] of
+    /// excess, so the turn grows from nothing at the tolerance. The parity
+    /// tests with the plugin turn it on.
+    pub plugin_derotation: bool,
+    /// The plugin's scale of the robust arch line: 6 x the median residual of
+    /// every tooth, taken again at every round ([`cusp_line`]). Off by default
+    /// (2026-11-23): the scale is taken once, from the canines and premolars.
+    /// The parity tests with the plugin turn it on.
+    pub plugin_line_scale: bool,
+    /// The plugin's handling of the spaces and of the ends of the arch: the
+    /// last tooth of each side free to go distally ([`solve_chain`] without
+    /// bounded ends) and levelled like the others, the central incisors
+    /// weighed `incisor_weight` with the midline kept, IPR on any contact of
+    /// a crowded stretch, and the final contacts checked on the crowns for
+    /// overlaps only. Off by default (2026-11-24): the last tooth of each
+    /// side never goes distally but goes mesially as far as the spaces
+    /// need, and the last tooth keeps its height (the levelling
+    /// extrapolates the line of the cusps there: up to 1 mm on a real case,
+    /// which pushed the last molar into its neighbour); with the midline
+    /// kept the central incisors are held where they are and each side makes
+    /// its own room against the midline (`Solver::chain`: one chain from
+    /// one end of the arch to the other moved the midline by 0.6-1 mm into
+    /// the space of one side); no IPR on a contact open at rest (the space is used
+    /// first), and a contact the crowns find still open in the final
+    /// position is closed. The parity tests with the plugin turn it on.
+    pub plugin_spaces: bool,
+    /// The largest distal movement of the last tooth of each side (mm),
+    /// without the plugin's spaces: 0 by default (2026-11-24, the space comes
+    /// from the spaces of the arch and from IPR); up to that much of the
+    /// crowding of each side is taken there before any IPR.
+    pub distal_max: f64,
 }
 
 impl Default for Config {
@@ -261,6 +334,46 @@ impl Default for Config {
             ipr_zone: IprZone::Anterior,
             ipr_surface_cap: 0.25,
             enamel_fraction: 0.5,
+            plugin_derotation: false,
+            plugin_line_scale: false,
+            plugin_spaces: false,
+            distal_max: 0.0,
+        }
+    }
+}
+
+impl Config {
+    /// The rotation tolerance of the zone of `f` (radians): `rot_tol_deg`
+    /// for incisors and canines, `post_rot_tol_deg` for premolars and molars.
+    fn rot_tol(&self, f: Fdi) -> f64 {
+        if anatomy::index(f) >= 4 {
+            self.post_rot_tol_deg
+        } else {
+            self.rot_tol_deg
+        }
+        .to_radians()
+    }
+
+    /// Whether a tooth of `f` rotated `rot` (radians, at rest against the
+    /// line) is to be derotated.
+    fn rotated(&self, f: Fdi, rot: f64) -> bool {
+        if self.plugin_derotation {
+            rot > self.rot_tol(f)
+        } else {
+            derotation(rot, self.rot_tol(f)) != 0.0
+        }
+    }
+
+    /// The turn (radians, signed) of a tooth of `f` rotated `psi` (radians,
+    /// signed) against the line: the excess over the tolerance of its zone
+    /// ([`derotation`]), or, as the plugin, all of it from `rot_tol_deg` on.
+    fn turn(&self, f: Fdi, psi: f64) -> f64 {
+        if !self.plugin_derotation {
+            derotation(psi, self.rot_tol(f))
+        } else if psi.abs() < self.rot_tol_deg.to_radians() {
+            0.0
+        } else {
+            psi
         }
     }
 }
@@ -681,18 +794,22 @@ fn bisect(mut ok: impl FnMut(f64) -> bool, mut lo: f64, mut hi: f64, steps: usiz
     hi
 }
 
-/// Angle about the axis `ax` of the tooth that makes the direction `e3`
-/// parallel in plan to `m` (secant method from the plan angle `psi`, within
-/// 1.2 times the limit); `psi` when it does not converge.
-fn plan_turn(ax: DVec3, e3: DVec3, m: DVec2, psi: f64, lim: f64) -> f64 {
+/// Angle about the axis `ax` of the tooth that leaves the direction `e3` at
+/// the plan angle `keep` from `m` (parallel for 0; secant method from the
+/// plan angle `psi` until the plan angle is within `tol` rad, within 1.2
+/// times the limit); `psi` when it does not converge. The plugin stops
+/// within 1e-5 rad; the port runs to the root, which left the turn of a
+/// tooth kept at its tolerance moving by up to that with the round-off of
+/// its stored frame.
+fn plan_turn(ax: DVec3, e3: DVec3, m: DVec2, psi: f64, keep: f64, lim: f64, tol: f64) -> f64 {
     let left = |a: f64| {
         let v = (rot_axis_angle(ax, a) * e3).truncate();
-        cross2(v, m).atan2(v.dot(m))
+        cross2(v, m).atan2(v.dot(m)) - keep
     };
     let (mut a0, mut r0) = (0.0, left(0.0));
     let (mut a1, mut r1) = (psi, left(psi));
     for _ in 0..8 {
-        if r1.abs() < 1e-5 || (r1 - r0).abs() < 1e-12 {
+        if r1.abs() < tol || (r1 - r0).abs() < 1e-7 * tol {
             break;
         }
         let a2 = a1 - r1 * (a1 - a0) / (r1 - r0);
@@ -703,6 +820,20 @@ fn plan_turn(ax: DVec3, e3: DVec3, m: DVec2, psi: f64, lim: f64) -> f64 {
         a1
     } else {
         psi
+    }
+}
+
+/// The derotation (radians) of a tooth rotated `psi` (radians, signed)
+/// against the line, with the tolerance `tol` (radians) of its zone: the
+/// excess over the tolerance, with the sign of `psi`, and none when the
+/// excess is under [`MIN_DEROTATION_DEG`]. It never exceeds the excess and
+/// grows with `|psi|`.
+fn derotation(psi: f64, tol: f64) -> f64 {
+    let excess = psi.abs() - tol;
+    if excess >= MIN_DEROTATION_DEG.to_radians() {
+        excess.copysign(psi)
+    } else {
+        0.0
     }
 }
 
@@ -818,7 +949,7 @@ pub fn base_line(
     };
     let anchors: Vec<Fdi> = poses.keys().copied().collect();
     oriented(
-        &cusp_line(&cusps, &seq, sigma, &anchors),
+        &cusp_line(&cusps, &seq, sigma, &anchors, false),
         mean(&cusps[first]),
     )
 }
@@ -852,18 +983,21 @@ fn evaluate(
                 } else {
                     cfg.normal_tol
                 },
-                rot > if post {
-                    cfg.post_rot_tol_deg
-                } else {
-                    cfg.rot_tol_deg
-                },
+                cfg.rotated(f, rot.to_radians()),
             )
         })
         .collect()
 }
 
-/// Extra space needed per contact (mm) where the crowns in the final
-/// position overlap more than at rest beyond IPR + `tol`.
+/// Correction of the space of each contact (mm) from the crowns in the final
+/// position: positive (extra space needed) where they overlap more than at
+/// rest beyond IPR + `tol`; with `close` (per contact: to be closed, a tooth
+/// of the pair free along the arch), negative (space to take away) where
+/// they are still apart beyond `tol` from their contact at rest (the
+/// overlap at rest, or touching when they were apart) less the IPR. The
+/// widths of the model come from the crown extents along the line, so a
+/// contact it closes, of a tooth derotated or slid along the curve, can be
+/// left open on the crowns by some tenths of a millimetre.
 fn overlaps_3d(
     seq: &[Fdi],
     adj: &[bool],
@@ -871,6 +1005,7 @@ fn overlaps_3d(
     targets: &BTreeMap<Fdi, DMat4>,
     ipr: &[f64],
     tol: f64,
+    close: Option<&[bool]>,
 ) -> Vec<f64> {
     let mut err = vec![0.0; seq.len().saturating_sub(1)];
     for (i, w) in seq.windows(2).enumerate() {
@@ -892,6 +1027,8 @@ fn overlaps_3d(
         let floor = if rest.is_finite() { rest.min(0.0) } else { 0.0 };
         if sep.is_finite() && sep < floor - (ipr[i] + tol) {
             err[i] = floor - sep - ipr[i] - 0.5 * tol;
+        } else if close.is_some_and(|c| c[i]) && sep.is_finite() && sep > floor - ipr[i] + tol {
+            err[i] = floor - ipr[i] - sep + 0.5 * tol;
         }
     }
     err
@@ -950,6 +1087,15 @@ struct Solver<'a> {
     gap_cal: Vec<f64>,
     rest_pair: Vec<bool>,
     n_base: Vec<f64>,
+    /// How much of its derotation every tooth gets (`1`: all of it) in every
+    /// solution that is not given its own ([`Solver::solve`] `k`): the
+    /// derotation of the premolars and molars is given up, as far as needed,
+    /// before any therapy makes room for it ([`setup`]).
+    k_base: Vec<f64>,
+    /// The contact between the two sides of the arch (`j`: between `j` and
+    /// `j + 1`) where the midline is held, both teeth free along the arch:
+    /// each side makes its own room against it ([`Solver::chain`]).
+    mid: Option<usize>,
 }
 
 impl Solver<'_> {
@@ -1010,16 +1156,23 @@ impl Solver<'_> {
                 0.5
             };
             if self.aligned[i] && self.need_rot[i] && !asis {
-                // derotated: more only by what the rotation removed adds
+                // derotated by the excess over its tolerance: more only by what that turn adds
                 let e = md3(g, &self.c[i]).truncate();
                 let phi = plan_angle(e, tg).min(self.cfg.max_derotation.to_radians());
+                let turn = if self.cfg.plugin_derotation {
+                    phi
+                } else {
+                    derotation(phi, self.cfg.rot_tol(self.seq[i]))
+                };
                 let kf = k.map_or(1.0, |k| k[i]);
                 match pq {
                     Some(pq) => {
-                        let we = crown::extent(pq, e / e.length().max(1e-12)).max(1.0);
-                        w += kf * (we - w);
+                        if phi > 1e-12 {
+                            let we = crown::extent(pq, e / e.length().max(1e-12)).max(1.0);
+                            w += kf * turn / phi * (we - w);
+                        }
                     }
-                    None => w = w * ((1.0 - kf) * phi).cos() / phi.cos().max(0.2),
+                    None => w = w * (phi - kf * turn).cos() / phi.cos().max(0.2),
                 }
             }
             wm[i] = frac * w;
@@ -1035,8 +1188,91 @@ impl Solver<'_> {
         }
     }
 
+    /// [`solve_chain`] of the positions `y` (`u0 - off`) with the midline
+    /// held at [`Solver::mid`]: the two sides are two chains, each with the
+    /// midline as its fixed end, so each side closes its own spaces and makes
+    /// its own room on its side of the midline; the two teeth of the midline
+    /// share its contact (half each way), and the midline stays. Without it
+    /// one chain runs from the last tooth of one side to the last of the
+    /// other: with crowding on one side and a space on the other (or a chain
+    /// held at both ends by the last teeth), the front teeth slid into the
+    /// space and the midline moved with them. The stretches of the two sides
+    /// are `[.., j + 1]` and `[j, ..]`: each holds the contact of the midline.
+    fn chain(&self, y: &[f64], w: &[f64]) -> Chain {
+        let cfg = self.cfg;
+        let ends = (!cfg.plugin_spaces).then_some(cfg.distal_max.max(0.0));
+        let Some(j) = self.mid else {
+            return solve_chain(y, w, &self.fx, cfg.close_spaces, ends);
+        };
+        let um = 0.5 * (y[j] + y[j + 1]);
+        // one side: its teeth with the midline as a fixed tooth after (`at_end`) or before them
+        let side = |idx: std::ops::Range<usize>, at_end: bool| -> Chain {
+            let (mut ys, mut ws, mut fs) = (
+                y[idx.clone()].to_vec(),
+                w[idx.clone()].to_vec(),
+                self.fx[idx].to_vec(),
+            );
+            let at = if at_end { ys.len() } else { 0 };
+            ys.insert(at, um);
+            ws.insert(at, 1.0);
+            fs.insert(at, true);
+            let mut ch = solve_chain(&ys, &ws, &fs, cfg.close_spaces, ends);
+            // the free teeth between a tooth held along the arch and the midline close against
+            // the midline, as a stretch at the end of the arch closes against its fixed tooth
+            let near: Vec<usize> = if at_end {
+                (0..at).rev().take_while(|&i| !fs[i]).collect()
+            } else {
+                (1..fs.len()).take_while(|&i| !fs[i]).collect()
+            };
+            let open = near.len() + 1 == fs.len();
+            let crowded = ch.segs.iter().any(|s| {
+                if at_end {
+                    s.right == at as i64
+                } else {
+                    s.left == 0
+                }
+            });
+            if cfg.close_spaces && !open && !crowded {
+                for i in near {
+                    ch.u[i] = um;
+                }
+            }
+            ch
+        };
+        let right = side(0..j + 1, true);
+        let left = side(j + 1..self.n, false);
+        let mut u = right.u[..=j].to_vec();
+        u.extend_from_slice(&left.u[1..]);
+        let mut segs = right.segs;
+        segs.extend(left.segs.iter().map(|s| Crowded {
+            left: s.left + j as i64,
+            right: s.right + j as i64,
+            deficit: s.deficit,
+        }));
+        Chain {
+            u,
+            deficit: right.deficit + left.deficit,
+            segs,
+            spacing: right.spacing + left.spacing,
+        }
+    }
+
+    /// The contacts of the crowded stretch `sg` where its room is made: the
+    /// contact of the midline only when both sides are crowded against it
+    /// (half of its space goes to each side; with room on one side its
+    /// enamel would go to a side that has space).
+    fn contacts(&self, sg: &Crowded, segs: &[Crowded]) -> Vec<usize> {
+        let lo = sg.left.max(0) as usize;
+        let hi = sg.right.min(self.n as i64 - 1) as usize;
+        let both = self.mid.is_some_and(|j| {
+            segs.iter().any(|s| s.right == j as i64 + 1) && segs.iter().any(|s| s.left == j as i64)
+        });
+        (lo..hi).filter(|&i| both || self.mid != Some(i)).collect()
+    }
+
     fn solve(&self, l: &[DVec3], ipr: &[f64], extra: &[f64], k: Option<&[f64]>) -> Solved {
         let (n, cfg) = (self.n, self.cfg);
+        let k = k.or(Some(&self.k_base));
         let m = self.measure(l, k, false);
         let gap: Vec<f64> = (0..n - 1)
             .map(|i| (m.s0[i + 1] - m.wm[i + 1]) - (m.s0[i] + m.wp[i]) + self.gap_cal[i])
@@ -1070,8 +1306,8 @@ impl Solver<'_> {
             if let (Some(sm), Some(j)) = (sm, cen) {
                 u0[j] = sm - m.wp[j];
                 u0[j + 1] = sm + m.wm[j + 1];
-                w[j] = 25.0 * cfg.incisor_weight;
-                w[j + 1] = 25.0 * cfg.incisor_weight;
+                w[j] = MIDLINE_WEIGHT * cfg.incisor_weight;
+                w[j + 1] = MIDLINE_WEIGHT * cfg.incisor_weight;
             }
         }
         let cumsum = |r: &[f64]| -> Vec<f64> {
@@ -1086,16 +1322,18 @@ impl Solver<'_> {
         let sub =
             |a: &[f64], b: &[f64]| -> Vec<f64> { a.iter().zip(b).map(|(x, y)| x - y).collect() };
         let mut off = cumsum(&req);
-        let ch = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces);
+        let ch = self.chain(&sub(&u0, &off), &w);
         let (deficit, segs) = (ch.deficit, ch.segs.clone());
         let (mut u, mut spacing) = (ch.u, ch.spacing);
         if deficit > 1e-9 {
             // crowding left: spread over the contacts of the stretch (never onto the fixed teeth)
             let mut req2 = req.clone();
             for sg in &segs {
-                let lo = sg.left.max(0) as usize;
-                let hi = sg.right.min(n as i64 - 1) as usize;
-                let sel: Vec<usize> = (lo..hi).filter(|&i| !self.keep[i]).collect();
+                let sel: Vec<usize> = self
+                    .contacts(sg, &segs)
+                    .into_iter()
+                    .filter(|&i| !self.keep[i])
+                    .collect();
                 let tot: f64 = sel.iter().map(|&i| req2[i]).sum();
                 if tot > 1e-9 {
                     for &i in &sel {
@@ -1104,7 +1342,7 @@ impl Solver<'_> {
                 }
             }
             off = cumsum(&req2);
-            let ch2 = solve_chain(&sub(&u0, &off), &w, &self.fx, cfg.close_spaces);
+            let ch2 = self.chain(&sub(&u0, &off), &w);
             u = ch2.u;
             spacing = ch2.spacing;
         }
@@ -1140,10 +1378,8 @@ impl Solver<'_> {
             }
             let mut grew = false;
             for sg in &r.segs {
-                let lo = sg.left.max(0) as usize;
-                let hi = sg.right.min(n as i64 - 1) as usize;
                 let mut room = vec![0.0; n - 1];
-                for i in lo..hi {
+                for i in self.contacts(sg, &r.segs) {
                     room[i] = (caps[i] - ipr[i]).max(0.0);
                 }
                 let total: f64 = room.iter().sum();
@@ -1237,7 +1473,10 @@ impl Solver<'_> {
             };
             let z0 = self.pc[i].z;
             let mut z = z0;
-            if !self.fx[i] && !skip[i] {
+            // the last tooth of each side keeps its height: the line of the cusps of its
+            // neighbours is extrapolated there
+            let end = !cfg.plugin_spaces && (i == 0 || i + 1 == self.n);
+            if !self.fx[i] && !skip[i] && !end {
                 match cfg.leveling {
                     Leveling::Smooth => {
                         z = self.level_z(l, sl, i, s_t, &skip).unwrap_or(p.z);
@@ -1265,6 +1504,8 @@ impl Solver<'_> {
             let e = e3.truncate() / e3.truncate().length().max(1e-12);
             let m = if tg.dot(e) >= 0.0 { tg } else { -tg };
             let mut psi = cross2(e, m).atan2(e.dot(m));
+            // the plan angle the tooth keeps against the line: its tolerance when derotated
+            let mut keep = 0.0;
             if !self.need_rot[i] {
                 // in place: not derotated, but it follows the curve when it slides along
                 // the arch or the line turns (expansion)
@@ -1273,8 +1514,11 @@ impl Solver<'_> {
                 if psi.to_degrees().abs() < 0.5 {
                     psi = 0.0;
                 }
-            } else if psi.to_degrees().abs() < cfg.rot_tol_deg {
-                psi = 0.0;
+            } else {
+                // only the excess over the tolerance of its zone, none under the smallest turn
+                let turn = cfg.turn(f, psi);
+                keep = psi - turn;
+                psi = turn;
             }
             psi = clip(psi, -lim, lim);
             let still = ds.abs() < cfg.pos_tol && (n_t - r.n0[i]).abs() < cfg.pos_tol && !snap;
@@ -1288,7 +1532,8 @@ impl Solver<'_> {
             }
             let ax = unit(self.teeth[i].e_ax);
             if psi != 0.0 {
-                psi = plan_turn(ax, e3, m, psi, lim);
+                let tol = if cfg.plugin_derotation { 1e-5 } else { 1e-12 };
+                psi = plan_turn(ax, e3, m, psi, keep, lim, tol);
                 let kf = r.k[i];
                 if kf < 1.0 {
                     let left = (1.0 - kf) * psi.abs();
@@ -1346,7 +1591,13 @@ pub fn conservative_setup(
     let interior = interior(&cusps, &seq);
     let anchors_locked: Vec<Fdi> = poses.keys().copied().collect();
     let base = match line {
-        None => cusp_line(&cusps, &seq, cfg.sigma, &anchors_locked),
+        None => cusp_line(
+            &cusps,
+            &seq,
+            cfg.sigma,
+            &anchors_locked,
+            cfg.plugin_line_scale,
+        ),
         Some(l) => oriented(l, pc[0]),
     };
     let base = oriented(&base, pc[0]);
@@ -1381,7 +1632,7 @@ pub fn conservative_setup(
     // a locked tooth out of line: compared with the line of the other teeth (the one through
     // it would always find it in line)
     if !poses.is_empty() {
-        let free_line = cusp_line(&cusps, &seq, cfg.sigma, &[]);
+        let free_line = cusp_line(&cusps, &seq, cfg.sigma, &[], cfg.plugin_line_scale);
         let sb0 = arc(&free_line);
         for f in poses.keys() {
             let Some(i) = seq.iter().position(|x| x == f) else {
@@ -1431,11 +1682,20 @@ pub fn conservative_setup(
             .map(|i| seq[i])
             .collect(),
     });
-    let w_inc = if cfg.midline == Midline::Keep {
-        cfg.incisor_weight
-    } else {
-        1.0
+    // with the midline kept the central incisors weigh more; without the plugin's spaces
+    // they are held where they are, and the two sides make their own room against the
+    // midline (`mid`)
+    let w_inc = match cfg.midline {
+        Midline::Keep if cfg.plugin_spaces => cfg.incisor_weight,
+        Midline::Keep => MIDLINE_WEIGHT * cfg.incisor_weight,
+        _ => 1.0,
     };
+    // the midline: the contact between the last tooth of the right side and the first of the
+    // left one (a missing central incisor too), both free along the arch; held unless the
+    // space is balanced over the whole arch (or the plugin's spaces)
+    let mid = (0..n - 1)
+        .find(|&i| anatomy::is_right(seq[i]) && !anatomy::is_right(seq[i + 1]))
+        .filter(|&j| !cfg.plugin_spaces && cfg.midline != Midline::Balance && !fx[j] && !fx[j + 1]);
     let wts: Vec<f64> = seq
         .iter()
         .map(|&f| if anatomy::index(f) == 1 { w_inc } else { 1.0 })
@@ -1445,7 +1705,7 @@ pub fn conservative_setup(
     // no IPR towards a tooth out of the aligner or locked; a tooth that stays only because it
     // is beyond the teeth to align can be reduced
     let no_ipr: BTreeSet<Fdi> = held.difference(&beyond).copied().collect();
-    let caps: Vec<f64> = seq
+    let mut caps: Vec<f64> = seq
         .windows(2)
         .zip(&adj)
         .map(|(w, &ad)| {
@@ -1539,6 +1799,8 @@ pub fn conservative_setup(
         gap_cal: vec![0.0; n - 1],
         rest_pair: vec![false; n - 1],
         n_base: Vec::new(),
+        k_base: vec![1.0; n],
+        mid,
     };
 
     // calibration of the contacts on the real crowns: at rest the gap between two neighbours
@@ -1558,6 +1820,16 @@ pub fn conservative_setup(
             }
         }
     }
+    // no IPR on a contact open at rest: its space is used before any enamel is removed
+    if !cfg.plugin_spaces {
+        let mr = sv.measure(&sv.base, None, true);
+        for (i, cap) in caps.iter_mut().enumerate() {
+            let gap = (mr.s0[i + 1] - mr.wm[i + 1]) - (mr.s0[i] + mr.wp[i]) + sv.gap_cal[i];
+            if gap > cfg.contact_tol {
+                *cap = 0.0;
+            }
+        }
+    }
     // the distance of each tooth from the line at rest: a tooth in place keeps it when the
     // line moves (expansion, advancement)
     sv.n_base = sv.measure(&sv.base, None, true).n0;
@@ -1565,7 +1837,6 @@ pub fn conservative_setup(
     sv.rest_pair = (0..n - 1)
         .map(|i| !(moving[i] || moving[i + 1]) && measured_3d[i])
         .collect();
-    let sv = sv;
 
     let drawn = line.is_some();
     // advancement and retraction only with an incisor to align, expansion with a canine or a
@@ -1573,158 +1844,212 @@ pub fn conservative_setup(
     let can_pro = !drawn && (0..n).any(|i| aligned[i] && anatomy::index(seq[i]) <= 2);
     let can_exp = !drawn && (0..n).any(|i| aligned[i] && anatomy::index(seq[i]) >= 3);
 
-    let mut extra = vec![0.0; n - 1];
+    let mut extra;
     let mut xe;
     let mut xp;
     let mut r;
     let mut l;
     let mut targets;
     let mut rest_rot: BTreeMap<Fdi, f64>;
-    let mut calib = 0;
+    let mut calib;
+    // the midline held first; a side that cannot make its own room even with the therapy (a
+    // tooth locked against the midline, no IPR left) moves it, as the last resort
     loop {
-        calib += 1;
-        // the space first, in the order of the therapy and only as much as needed
-        xe = 0.0;
-        xp = 0.0;
-        let mut ipr = vec![0.0; n - 1];
-        for &m in &cfg.priority {
-            if sv.free(&sv.line_of(xe, xp), &ipr, &extra) {
+        extra = vec![0.0; n - 1];
+        calib = 0;
+        loop {
+            calib += 1;
+            // the space first, in the order of the therapy and only as much as needed
+            xe = 0.0;
+            xp = 0.0;
+            let mut ipr = vec![0.0; n - 1];
+            // no therapy for the derotation of a premolar or a molar: a molar turned 10
+            // degrees against a last molar that never goes distally needs about a millimetre,
+            // and it was taken with IPR from the contacts of the incisors (a real case: 1.2 mm
+            // of enamel for the derotation of 26). Their derotation is given up as far as the
+            // arch needs before anything else (the plugin's order with `plugin_spaces`)
+            sv.k_base = vec![1.0; n];
+            if !cfg.plugin_spaces && !sv.free(&sv.line_of(0.0, 0.0), &ipr, &extra) {
+                let post: Vec<usize> = (0..n)
+                    .filter(|&i| aligned[i] && need_rot[i] && !fx[i] && anatomy::index(seq[i]) >= 4)
+                    .collect();
+                if !post.is_empty() {
+                    let l0 = sv.line_of(0.0, 0.0);
+                    let v = bisect(
+                        |v| {
+                            for &i in &post {
+                                sv.k_base[i] = 1.0 - v;
+                            }
+                            sv.free(&l0, &ipr, &extra)
+                        },
+                        0.0,
+                        1.0,
+                        16,
+                    );
+                    for &i in &post {
+                        sv.k_base[i] = 1.0 - v;
+                    }
+                }
+            }
+            for &m in &cfg.priority {
+                if sv.free(&sv.line_of(xe, xp), &ipr, &extra) {
+                    break;
+                }
+                match m {
+                    Therapy::Exp => {
+                        if exp_post.max(cfg.expansion_canine) > 0.0 && can_exp {
+                            xe =
+                                bisect(|v| sv.free(&sv.line_of(v, xp), &ipr, &extra), 0.0, 1.0, 24);
+                        }
+                    }
+                    Therapy::Ipr => ipr = sv.grow_ipr(&sv.line_of(xe, xp), &ipr, &extra, &caps),
+                    Therapy::Pro => {
+                        if cfg.advance_max > 0.0 && can_pro {
+                            xp = bisect(
+                                |v| sv.free(&sv.line_of(xe, v), &ipr, &extra),
+                                0.0,
+                                cfg.advance_max,
+                                24,
+                            );
+                        }
+                    }
+                }
+            }
+            r = sv.solve(&sv.line_of(xe, xp), &ipr, &extra, None);
+            if r.deficit <= 1e-6
+                && cfg.close_spaces
+                && cfg.retract_max > 0.0
+                && xp <= 0.0
+                && can_pro
+                && r.spacing > SPACE_TOL
+            {
+                // spaces left between the fixed teeth: closed retracting the incisors (at most
+                // retract_max), never as far as making crowding
+                let closed = |v: f64| {
+                    let rr = sv.solve(&sv.line_of(xe, -v), &ipr, &extra, None);
+                    rr.spacing <= SPACE_TOL || rr.deficit > 1e-6
+                };
+                let mut v = bisect(closed, 0.0, cfg.retract_max, 24);
+                while v > 0.0 && !sv.free(&sv.line_of(xe, -v), &ipr, &extra) {
+                    v = (v - 0.02).max(0.0);
+                }
+                xp = -v;
+                r = sv.solve(&sv.line_of(xe, xp), &ipr, &extra, None);
+            }
+            l = sv.line_of(xe, xp);
+            if r.deficit > 1e-6 {
+                // space not enough even with the therapy: in every crowded stretch the teeth are
+                // derotated only as far as the space allows
+                let mut k = sv.k_base.clone();
+                for sg in r.segs.clone() {
+                    let lo = (sg.left + 1).max(0) as usize;
+                    let hi = sg.right.min(n as i64) as usize;
+                    let free_i: Vec<usize> =
+                        (lo..hi).filter(|&i| aligned[i] && need_rot[i]).collect();
+                    let fits = |v: f64, idx: &[usize], k: &[f64]| {
+                        let mut kk = k.to_vec();
+                        for &i in idx {
+                            kk[i] = 1.0 - v;
+                        }
+                        let rr = sv.solve(&l, &ipr, &extra, Some(&kk));
+                        !rr.segs
+                            .iter()
+                            .any(|s| s.left == sg.left && s.right == sg.right && s.deficit > 1e-6)
+                    };
+                    // derotation is given up first on the posterior teeth, then the canines, the
+                    // incisors last
+                    let groups = [
+                        free_i
+                            .iter()
+                            .copied()
+                            .filter(|&i| anatomy::index(seq[i]) >= 4)
+                            .collect::<Vec<_>>(),
+                        free_i
+                            .iter()
+                            .copied()
+                            .filter(|&i| anatomy::index(seq[i]) == 3)
+                            .collect(),
+                        free_i
+                            .iter()
+                            .copied()
+                            .filter(|&i| anatomy::index(seq[i]) <= 2)
+                            .collect(),
+                    ];
+                    for group in groups {
+                        if group.is_empty() {
+                            continue;
+                        }
+                        let v = bisect(|v| fits(v, &group, &k), 0.0, 1.0, 16);
+                        for &i in &group {
+                            k[i] = 1.0 - v;
+                        }
+                        if v < 1.0 || fits(1.0, &group, &k) {
+                            break;
+                        }
+                    }
+                }
+                r = sv.solve(&l, &ipr, &extra, Some(&k));
+            }
+            rest_rot = BTreeMap::new();
+            targets = sv.targets(&r, &l, &mut rest_rot);
+            let Some(cr) = &crowns else { break };
+            // a tooth held along the arch (molar) derotated in place must not hit the neighbours
+            // (they cannot make room): its derotation shrinks until the crowns no longer
+            // interpenetrate beyond the IPR
+            for i in 0..n {
+                if !(fx[i] && targets.contains_key(&seq[i]) && need_rot[i]) {
+                    continue;
+                }
+                let nb: Vec<usize> = [i.wrapping_sub(1), i + 1]
+                    .into_iter()
+                    .filter(|&j| j < n && adj[i.min(j)])
+                    .collect();
+                let clear = |kk: f64, r: &mut Solved| -> bool {
+                    r.k[i] = kk;
+                    if nb.is_empty() {
+                        return true;
+                    }
+                    let tt = sv.targets(r, &l, &mut BTreeMap::new());
+                    let err = overlaps_3d(&seq, &adj, cr, &tt, &r.ipr, cfg.contact_tol, None);
+                    !nb.iter().any(|&j| err[i.min(j)] != 0.0)
+                };
+                let k0 = r.k[i];
+                if !clear(k0, &mut r) {
+                    let v = {
+                        let rr = &mut r;
+                        bisect(|v| clear(1.0 - v, rr), 0.0, 1.0, 12)
+                    };
+                    r.k[i] = 1.0 - v;
+                    rest_rot = BTreeMap::new();
+                    targets = sv.targets(&r, &l, &mut rest_rot);
+                }
+            }
+            // the contacts to close on the crowns: both teeth free along the arch (next to a tooth
+            // held along the arch a space is what its stretch leaves, `spacing`), the spaces
+            // closed (the plugin checks the overlaps only)
+            let close: Vec<bool> = (0..n - 1)
+                .map(|i| cfg.close_spaces && !cfg.plugin_spaces && !fx[i] && !fx[i + 1])
+                .collect();
+            let err = overlaps_3d(
+                &seq,
+                &adj,
+                cr,
+                &targets,
+                &r.ipr,
+                cfg.contact_tol,
+                Some(&close),
+            );
+            if err.iter().map(|e| e.abs()).fold(0.0, f64::max) <= 1e-3 || calib >= 4 {
                 break;
             }
-            match m {
-                Therapy::Exp => {
-                    if exp_post.max(cfg.expansion_canine) > 0.0 && can_exp {
-                        xe = bisect(|v| sv.free(&sv.line_of(v, xp), &ipr, &extra), 0.0, 1.0, 24);
-                    }
-                }
-                Therapy::Ipr => ipr = sv.grow_ipr(&sv.line_of(xe, xp), &ipr, &extra, &caps),
-                Therapy::Pro => {
-                    if cfg.advance_max > 0.0 && can_pro {
-                        xp = bisect(
-                            |v| sv.free(&sv.line_of(xe, v), &ipr, &extra),
-                            0.0,
-                            cfg.advance_max,
-                            24,
-                        );
-                    }
-                }
+            for (e, x) in extra.iter_mut().zip(&err) {
+                *e += x;
             }
         }
-        r = sv.solve(&sv.line_of(xe, xp), &ipr, &extra, None);
-        if r.deficit <= 1e-6
-            && cfg.close_spaces
-            && cfg.retract_max > 0.0
-            && xp <= 0.0
-            && can_pro
-            && r.spacing > SPACE_TOL
-        {
-            // spaces left between the fixed teeth: closed retracting the incisors (at most
-            // retract_max), never as far as making crowding
-            let closed = |v: f64| {
-                let rr = sv.solve(&sv.line_of(xe, -v), &ipr, &extra, None);
-                rr.spacing <= SPACE_TOL || rr.deficit > 1e-6
-            };
-            let mut v = bisect(closed, 0.0, cfg.retract_max, 24);
-            while v > 0.0 && !sv.free(&sv.line_of(xe, -v), &ipr, &extra) {
-                v = (v - 0.02).max(0.0);
-            }
-            xp = -v;
-            r = sv.solve(&sv.line_of(xe, xp), &ipr, &extra, None);
-        }
-        l = sv.line_of(xe, xp);
-        if r.deficit > 1e-6 {
-            // space not enough even with the therapy: in every crowded stretch the teeth are
-            // derotated only as far as the space allows
-            let mut k = vec![1.0; n];
-            for sg in r.segs.clone() {
-                let lo = (sg.left + 1).max(0) as usize;
-                let hi = sg.right.min(n as i64) as usize;
-                let free_i: Vec<usize> = (lo..hi).filter(|&i| aligned[i] && need_rot[i]).collect();
-                let fits = |v: f64, idx: &[usize], k: &[f64]| {
-                    let mut kk = k.to_vec();
-                    for &i in idx {
-                        kk[i] = 1.0 - v;
-                    }
-                    let rr = sv.solve(&l, &ipr, &extra, Some(&kk));
-                    !rr.segs
-                        .iter()
-                        .any(|s| s.left == sg.left && s.right == sg.right && s.deficit > 1e-6)
-                };
-                // derotation is given up first on the posterior teeth, then the canines, the
-                // incisors last
-                let groups = [
-                    free_i
-                        .iter()
-                        .copied()
-                        .filter(|&i| anatomy::index(seq[i]) >= 4)
-                        .collect::<Vec<_>>(),
-                    free_i
-                        .iter()
-                        .copied()
-                        .filter(|&i| anatomy::index(seq[i]) == 3)
-                        .collect(),
-                    free_i
-                        .iter()
-                        .copied()
-                        .filter(|&i| anatomy::index(seq[i]) <= 2)
-                        .collect(),
-                ];
-                for group in groups {
-                    if group.is_empty() {
-                        continue;
-                    }
-                    let v = bisect(|v| fits(v, &group, &k), 0.0, 1.0, 16);
-                    for &i in &group {
-                        k[i] = 1.0 - v;
-                    }
-                    if v < 1.0 || fits(1.0, &group, &k) {
-                        break;
-                    }
-                }
-            }
-            r = sv.solve(&l, &ipr, &extra, Some(&k));
-        }
-        rest_rot = BTreeMap::new();
-        targets = sv.targets(&r, &l, &mut rest_rot);
-        let Some(cr) = &crowns else { break };
-        // a tooth held along the arch (molar) derotated in place must not hit the neighbours
-        // (they cannot make room): its derotation shrinks until the crowns no longer
-        // interpenetrate beyond the IPR
-        for i in 0..n {
-            if !(fx[i] && targets.contains_key(&seq[i]) && need_rot[i]) {
-                continue;
-            }
-            let nb: Vec<usize> = [i.wrapping_sub(1), i + 1]
-                .into_iter()
-                .filter(|&j| j < n && adj[i.min(j)])
-                .collect();
-            let clear = |kk: f64, r: &mut Solved| -> bool {
-                r.k[i] = kk;
-                if nb.is_empty() {
-                    return true;
-                }
-                let tt = sv.targets(r, &l, &mut BTreeMap::new());
-                let err = overlaps_3d(&seq, &adj, cr, &tt, &r.ipr, cfg.contact_tol);
-                !nb.iter().any(|&j| err[i.min(j)] != 0.0)
-            };
-            let k0 = r.k[i];
-            if !clear(k0, &mut r) {
-                let v = {
-                    let rr = &mut r;
-                    bisect(|v| clear(1.0 - v, rr), 0.0, 1.0, 12)
-                };
-                r.k[i] = 1.0 - v;
-                rest_rot = BTreeMap::new();
-                targets = sv.targets(&r, &l, &mut rest_rot);
-            }
-        }
-        let err = overlaps_3d(&seq, &adj, cr, &targets, &r.ipr, cfg.contact_tol);
-        if err.iter().copied().fold(0.0, f64::max) <= 1e-3 || calib >= 4 {
+        if r.deficit <= 1e-6 || sv.mid.is_none() {
             break;
         }
-        for (e, x) in extra.iter_mut().zip(&err) {
-            *e += x;
-        }
+        sv.mid = None;
     }
 
     let mut ipr_mm = BTreeMap::new();
@@ -1874,7 +2199,9 @@ pub fn conservative_setup(
 pub struct Params {
     /// Arches to work on.
     pub arch: Which,
-    /// Teeth to align.
+    /// Teeth to align. Every tooth by default (2026-11-24; the plugin's
+    /// default is the incisors and canines): the final position corrects
+    /// the whole arch, the premolars and molars too.
     pub align_scope: AlignScope,
     /// Smoothing of the arch line from the cusps (mm).
     pub line_sigma_mm: f64,
@@ -1882,11 +2209,13 @@ pub struct Params {
     pub pos_tol_mm: f64,
     /// Incisors and canines: distance from the line below which they stay (mm).
     pub normal_tol_mm: f64,
-    /// Incisors and canines: rotation below which they stay (degrees).
+    /// Incisors and canines: rotation they keep (degrees); beyond it only the
+    /// excess is derotated ([`MIN_DEROTATION_DEG`]).
     pub rot_tol_deg: f64,
     /// Premolars and molars: distance from the line below which they stay (mm).
     pub post_normal_tol_mm: f64,
-    /// Premolars and molars: rotation below which they stay (degrees).
+    /// Premolars and molars: rotation they keep (degrees); beyond it only the
+    /// excess is derotated ([`MIN_DEROTATION_DEG`]).
     pub post_rot_tol_deg: f64,
     /// Largest derotation (degrees).
     pub max_derotation_deg: f64,
@@ -1898,7 +2227,9 @@ pub struct Params {
     pub level_tol_mm: f64,
     /// Level the canines too.
     pub level_canines: bool,
-    /// First and second molars held along the arch (anchorage).
+    /// First and second molars held along the arch (anchorage). Off by
+    /// default (2026-11-24; on in the plugin): the molars go mesially as far
+    /// as the spaces need, never distally.
     pub fix_molars: bool,
     /// Third molars held completely.
     pub fix_third: bool,
@@ -1932,6 +2263,11 @@ pub struct Params {
     pub ipr_surface_cap_mm: f64,
     /// Largest fraction of the enamel removed.
     pub enamel_fraction: f64,
+    /// The largest distal movement of the last tooth of each side (0-0.5 mm).
+    /// 0 by default: no tooth goes distally to make room, the space comes
+    /// from the spaces of the arch and from IPR; with more, up to that much
+    /// of the crowding of each side is taken there before any IPR.
+    pub distal_max_mm: f64,
     /// Teeth left out of the aligner (FDI numbers): they stay where they are.
     pub excluded: Vec<u8>,
     /// Arch line drawn by the clinician (points in case coordinates, mm);
@@ -1944,7 +2280,7 @@ impl Default for Params {
         let ev = |key: &str, fallback: f64| evidence::param_f64(key).unwrap_or(fallback);
         Self {
             arch: Which::All,
-            align_scope: AlignScope::Anterior,
+            align_scope: AlignScope::All,
             line_sigma_mm: ev("cons_line_sigma", 5.0),
             pos_tol_mm: ev("cons_pos_tol", 0.1),
             normal_tol_mm: ev("cons_normal_tol", 0.1),
@@ -1956,7 +2292,7 @@ impl Default for Params {
             vertical_max_mm: ev("vertical_auto_max", 1.0),
             level_tol_mm: ev("cons_level_tol", 0.5),
             level_canines: false,
-            fix_molars: true,
+            fix_molars: false,
             fix_third: true,
             fix_canines: false,
             align_fixed: true,
@@ -1973,6 +2309,7 @@ impl Default for Params {
             ipr_zone: IprZone::AnteriorPremolars,
             ipr_surface_cap_mm: ev("ipr_surface", 0.25),
             enamel_fraction: ev("ipr_enamel_fraction", 0.5),
+            distal_max_mm: 0.0,
             excluded: Vec::new(),
             line: Vec::new(),
         }
@@ -2026,6 +2363,10 @@ impl Params {
             ipr_zone: self.ipr_zone,
             ipr_surface_cap: self.ipr_surface_cap_mm,
             enamel_fraction: self.enamel_fraction,
+            plugin_derotation: false,
+            plugin_line_scale: false,
+            plugin_spaces: false,
+            distal_max: self.distal_max_mm,
         }
     }
 
@@ -2062,6 +2403,7 @@ impl Params {
             ipr_zone: s.ipr_zone.into(),
             ipr_surface_cap_mm: s.ipr_surface_cap_mm,
             enamel_fraction: s.enamel_fraction,
+            distal_max_mm: s.distal_max_mm,
             ..Self::default()
         }
     }
@@ -2186,6 +2528,12 @@ pub fn resample(p: &[DVec3], n: usize) -> Vec<DVec3> {
 /// Runs the setup of one arch: the cusps and the crowns from the labelled
 /// scan, then [`conservative_setup`] with the configuration of the arch.
 pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SetupError> {
+    run_with(input, &params.config(input.arch))
+}
+
+/// [`run`] with the configuration `cfg` (the parity tests run it with the
+/// plugin's derotation, [`Config::plugin_derotation`]).
+pub fn run_with(input: &Input<'_>, cfg: &Config) -> Result<Output, SetupError> {
     if input.labels.len() != input.vertices.len() {
         return Err(SetupError::Invalid(format!(
             "{} labels for {} vertices",
@@ -2209,12 +2557,11 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SetupError> {
         cusps.insert(*f, cusp_points(t, p));
         crowns.insert(*f, rest_crown(t, p));
     }
-    let cfg = params.config(input.arch);
     let mut result = conservative_setup(
         &teeth,
         input.sequence,
         &cusps,
-        &cfg,
+        cfg,
         input.line,
         input.fixed,
         Some(&crowns),
@@ -2235,4 +2582,62 @@ pub fn run(input: &Input<'_>, params: &Params) -> Result<Output, SetupError> {
         Vec::new()
     };
     Ok(Output { result, line })
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// A signed rotation from {0, ±0.2, ±0.9, ±1.2, ±1.5, ±1.7, ±4.9, ±5.6, ±12, ±35}
+    /// degrees, in radians: none, under and at the tolerances, just under and over the
+    /// smallest turn beyond them, and large.
+    fn any_rotation() -> f64 {
+        let deg: f64 = match kani::any::<u8>() % 10 {
+            0 => 0.0,
+            1 => 0.2,
+            2 => 0.9,
+            3 => 1.2,
+            4 => 1.5,
+            5 => 1.7,
+            6 => 4.9,
+            7 => 5.6,
+            8 => 12.0,
+            _ => 35.0,
+        };
+        let sign = if kani::any() { -1.0 } else { 1.0 };
+        (sign * deg).to_radians()
+    }
+
+    /// A tolerance from {0, 1, 5} degrees, in radians.
+    fn any_tolerance() -> f64 {
+        match kani::any::<u8>() % 3 {
+            0 => 0.0,
+            1 => 1.0f64.to_radians(),
+            _ => 5.0f64.to_radians(),
+        }
+    }
+
+    // The derotation of a tooth never turns it by more than the excess of its rotation over
+    // the tolerance, never past the line (the same sign as the rotation, or none), and not at
+    // all when the excess is under the smallest turn MIN_DEROTATION_DEG.
+    #[kani::proof]
+    fn derotation_never_exceeds_the_excess() {
+        let (psi, tol) = (any_rotation(), any_tolerance());
+        let d = derotation(psi, tol);
+        let excess = psi.abs() - tol;
+        assert!(d.abs() <= excess.max(0.0));
+        assert!(d == 0.0 || d.signum() == psi.signum());
+        if excess < MIN_DEROTATION_DEG.to_radians() {
+            assert!(d == 0.0);
+        }
+    }
+
+    // The derotation grows with the rotation: a tooth rotated more (the same way) is never
+    // turned less.
+    #[kani::proof]
+    fn derotation_grows_with_the_rotation() {
+        let (a, b, tol) = (any_rotation(), any_rotation(), any_tolerance());
+        kani::assume(a.abs() <= b.abs() && a.signum() == b.signum());
+        assert!(derotation(a, tol).abs() <= derotation(b, tol).abs());
+    }
 }

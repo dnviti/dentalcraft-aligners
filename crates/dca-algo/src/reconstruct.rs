@@ -10,7 +10,9 @@
 //! zig-zag of the triangles. Here, per tooth:
 //!
 //! 1. the crown is cut along a smooth margin line: the 0.5 iso-line of the
-//!    tooth label smoothed on the surface (marching triangles);
+//!    tooth label smoothed on the surface (marching triangles); a tunnel of
+//!    the scanned surface through the crown (a handle) is cut where it is
+//!    narrowest and the cut closed (`reconstruct/handles.rs`);
 //! 2. the crown surface within [`BRIDGE_MM`] of the neighbouring crown (the
 //!    scanner bridge), thin sheets and the strip next to the margin are
 //!    rebuilt;
@@ -23,16 +25,24 @@
 //!    contact surface where the scan joined two crowns, and despiked.
 //!
 //! Everything is in arch coordinates (occlusal = `+Z`). The result is a
-//! watertight, consistently wound solid per tooth.
+//! watertight, consistently wound solid per tooth, in one piece and without
+//! a tunnel through it ([`closed_tooth`] refuses any other).
+//!
+//! Departure from the plugin: `reconstruct.closed_tooth` keeps the handles
+//! of the scanned crown and returns a closed tooth with tunnels through it;
+//! here they are cut (`reconstruct/handles.rs`), and a closing that is not
+//! one solid without a tunnel is never kept.
 
 mod fair;
 pub mod geom;
+mod handles;
 mod outline;
 pub(crate) mod solve;
 
 use std::collections::BTreeMap;
 
 use dc_case::Fdi;
+use dc_mesh::TriMesh;
 use glam::DVec3;
 use rayon::prelude::*;
 use schemars::JsonSchema;
@@ -51,6 +61,15 @@ pub const RIM_MM: f64 = 0.5;
 pub const THIN_MM: f64 = 0.35;
 /// Distance from the neighbouring crown where thin sheets are looked for, mm.
 pub const THIN_REACH: f64 = 2.0;
+/// Two sides of a scanned crown closer than this and facing away from each
+/// other (more than 120°): the walls of a tunnel the scanner left through a
+/// cusp, a strand over a fissure. When the tunnel is cut away
+/// (`handles::cut`), its thin walls go with it, else the closed tooth
+/// keeps their stumps as fins of no thickness, which the field of a printed
+/// model samples differently at every pose (a hole through the model at
+/// some stages only), mm. Under the finest voxel of the print files
+/// (0.08 mm).
+pub const THIN_SCAN_MM: f64 = 0.05;
 /// Occlusal / incisal band kept as scanned next to the neighbour, mm.
 pub const KEEP_TOP_MM: f64 = 1.0;
 /// Top of the contact line held where the scanner saw it, mm.
@@ -120,6 +139,15 @@ pub enum ReconstructError {
     /// Every closing of the tooth gave vertices that are not finite numbers.
     #[error("tooth {0} could not be closed: every closing gives non-finite vertices")]
     NotFinite(u16),
+    /// Every closing of the tooth left a hole or an edge of more than two
+    /// faces: no closed solid.
+    #[error("tooth {0} could not be closed: every closing leaves a hole or a non-manifold edge")]
+    NotClosed(u16),
+    /// Every closing of the tooth is closed but has a tunnel through it (a
+    /// handle of the scanned crown that could not be cut, a vertex where two
+    /// parts of the surface touch) or is in more than one piece: no solid.
+    #[error("tooth {0} could not be closed: every closing leaves a tunnel through the tooth")]
+    Tunnel(u16),
     /// The caller asked to stop; nothing was produced.
     #[error("cancelled")]
     Cancelled,
@@ -229,6 +257,8 @@ pub struct ClosedInfo {
     pub contact_filled: usize,
     /// Rebuilt vertices narrowed under the margin.
     pub tapered: usize,
+    /// Tunnels through the scanned crown (handles) cut away.
+    pub handles_cut: usize,
 }
 
 /// One closed tooth, arch coordinates.
@@ -318,6 +348,9 @@ fn check(input: &Input<'_>) -> Result<(), ReconstructError> {
 /// rebuilt surface, is kept. Unlike the plugin, a solid with a non-finite
 /// vertex is never kept (its crossings cannot be counted); when no closing
 /// gives a finite solid the tooth fails with [`ReconstructError::NotFinite`].
+/// Nor is a closing kept that is not one closed solid without a tunnel
+/// through it ([`ReconstructError::NotClosed`], [`ReconstructError::Tunnel`]
+/// when no closing is).
 pub fn closed_tooth(
     input: &Input<'_>,
     fdi: Fdi,
@@ -349,15 +382,12 @@ fn closed_tooth_with(
     // the long axis first; when that solid folds, the other axes together
     // (each attempt is independent, the choice below is the sequential one)
     let first = attempt(0);
-    let rest: Vec<_> = if first.folds == Some(0) {
+    let rest: Vec<_> = if first.folds == Some(0) && first.shape == Shape::Solid {
         Vec::new()
     } else {
         (1..axes.len()).into_par_iter().map(attempt).collect()
     };
-    let (best, last) = choose(std::iter::once(first).chain(rest));
-    let Some((k, best)) = best else {
-        return Err(ReconstructError::NotFinite(f));
-    };
+    let (k, best, last) = pick(std::iter::once(first).chain(rest).collect(), f)?;
     Ok(ClosedTooth {
         info: ClosedInfo {
             crown_vertices: patch.vertices.len(),
@@ -371,6 +401,7 @@ fn closed_tooth_with(
             sharp_left: last.sharp_left,
             contact_filled: last.contact_filled,
             tapered: last.tapered,
+            handles_cut: patch.handles,
         },
         vertices: best.vertices,
         tris: best.tris,
@@ -388,6 +419,63 @@ struct Attempt {
     /// Faces crossing another face; `None` when a vertex is not finite (the
     /// solid is unusable and its crossings cannot be counted).
     folds: Option<usize>,
+    /// What the closing is as a solid.
+    shape: Shape,
+}
+
+/// What a closing of a crown is as a solid, judged the way the stored tooth
+/// is printed (`dc_mesh::solid_topology`: single-precision corners, the
+/// corners at one position one vertex).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// One closed solid without a tunnel through it: every edge shared by
+    /// exactly two faces, one piece, genus 0.
+    Solid,
+    /// A hole left (an edge of one face) or an edge of more than two faces.
+    Open,
+    /// Closed, but with a tunnel through it (a handle, or a vertex where two
+    /// parts of the surface touch) or in more than one piece.
+    Tunnel,
+}
+
+impl Shape {
+    /// The shape of the faces `tris` on `vertices`; the faces are given back.
+    fn of(vertices: &[DVec3], tris: Vec<[u32; 3]>) -> (Self, Vec<[u32; 3]>) {
+        let mesh = TriMesh::new(vertices.iter().map(|p| p.as_vec3()).collect(), tris);
+        let s = dc_mesh::solid_topology(&mesh);
+        let shape = if s.triangles == 0 || !s.is_closed() {
+            Self::Open
+        } else if s.pieces == 1 && s.genus == Some(0) {
+            Self::Solid
+        } else {
+            Self::Tunnel
+        };
+        (shape, mesh.tris)
+    }
+}
+
+/// The attempt kept for tooth `f` ([`choose`]), its axis index and the
+/// counters of the last attempt looked at. A closing that is not one solid
+/// without a tunnel ([`Shape`]) is never kept: the next axis is taken, and
+/// when no attempt is a solid the tooth fails with
+/// [`ReconstructError::Tunnel`] when one was closed,
+/// [`ReconstructError::NotClosed`] otherwise (with
+/// [`ReconstructError::NotFinite`] when none was even finite), never an
+/// open tooth or one with a tunnel through it.
+fn pick(attempts: Vec<Attempt>, f: u16) -> Result<(usize, Attempt, Stats), ReconstructError> {
+    let failed = |s: Shape| attempts.iter().any(|a| a.folds.is_some() && a.shape == s);
+    let (tunnel, open) = (failed(Shape::Tunnel), failed(Shape::Open));
+    let keep = |a: &Attempt| a.shape == Shape::Solid || a.folds.is_none();
+    let axis: Vec<usize> = (0..attempts.len())
+        .filter(|&i| keep(&attempts[i]))
+        .collect();
+    let (best, last) = choose(attempts.into_iter().filter(keep));
+    match best {
+        Some((j, a)) => Ok((axis[j], a, last)),
+        None if tunnel => Err(ReconstructError::Tunnel(f)),
+        None if open => Err(ReconstructError::NotClosed(f)),
+        None => Err(ReconstructError::NotFinite(f)),
+    }
 }
 
 impl Attempt {
@@ -396,12 +484,14 @@ impl Attempt {
             .iter()
             .all(|p| p.is_finite())
             .then(|| geom::self_intersections(&vertices, &tris));
+        let (shape, tris) = Shape::of(&vertices, tris);
         Self {
             vertices,
             tris,
             filled,
             stats,
             folds,
+            shape,
         }
     }
 }
@@ -461,6 +551,8 @@ struct Patch {
     thin: Vec<bool>,
     /// Contact surfaces with the neighbours.
     contacts: Vec<outline::ContactSurface>,
+    /// Tunnels through the scanned crown cut away ([`handles::cut`]).
+    handles: usize,
 }
 
 /// Open crown of tooth `fdi` cut along the smooth margin line.
@@ -532,6 +624,25 @@ fn crown_patch(
         .collect();
     let (vc, tc, u2) = geom::compact(&cut.vertices, &tc);
     let dn: Vec<f64> = u2.iter().map(|&i| d2[i]).collect();
+    // a tunnel of the scan through the crown: cut where it is narrowest, the
+    // centre closing a cut as near a neighbour as the nearest of its border
+    let (vc, tc, dn, handles) = match handles::cut(&vc, &tc) {
+        None => (vc, tc, dn, 0),
+        Some(h) => {
+            let near = |l: &[u32]| {
+                l.iter()
+                    .map(|&i| dn[i as usize])
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let dn = h
+                .kept
+                .iter()
+                .map(|&i| dn[i as usize])
+                .chain(h.caps.iter().map(|l| near(l)))
+                .collect::<Vec<f64>>();
+            (h.vertices, h.tris, dn, h.handles)
+        }
+    };
     let bridge: Vec<bool> = dn.iter().map(|&d| d < BRIDGE_MM).collect();
     let mut thin = vec![false; vc.len()];
     let near_nb: Vec<usize> = (0..vc.len())
@@ -552,6 +663,7 @@ fn crown_patch(
         bridge,
         thin,
         contacts,
+        handles,
     }
 }
 
@@ -1117,8 +1229,9 @@ mod tests {
     }
 
     /// A closed tetrahedron (no crossings), a solid with two crossing faces,
-    /// and the tetrahedron with one vertex not a number; the counters carry
-    /// `tag` to tell the attempts apart.
+    /// the tetrahedron with one vertex not a number, a closed torus (a
+    /// tunnel through it) and two tetrahedra apart; the counters carry `tag`
+    /// to tell the attempts apart.
     fn attempt(kind: &str, filled: usize, tag: usize) -> Attempt {
         let tetra = || {
             (
@@ -1139,6 +1252,13 @@ mod tests {
                 ],
                 vec![[0, 1, 2], [3, 4, 5]],
             ),
+            "torus" => handles::torus(10.0, |_| 1.0, 24, 8),
+            "two" => {
+                let (mut v, mut t) = tetra();
+                v.extend([DVec3::ZERO, DVec3::X, DVec3::Y, DVec3::Z].map(|p| p + 5.0));
+                t.extend([[4, 6, 5], [4, 5, 7], [5, 6, 7], [4, 7, 6]]);
+                (v, t)
+            }
             _ => {
                 let (mut v, t) = tetra();
                 v[3] = DVec3::new(f64::NAN, 0.0, f64::INFINITY);
@@ -1187,6 +1307,235 @@ mod tests {
         assert_eq!(last.despiked, 2);
         let (best, _) = choose([attempt("folded", 9, 0), attempt("folded", 3, 1)]);
         assert_eq!(best.map(|(k, b)| (k, b.filled)), Some((1, 3)));
+    }
+
+    /// The solid gate: one closed solid without a tunnel through it.
+    #[test]
+    fn only_one_closed_solid_without_a_tunnel_is_a_solid() {
+        let tetra = || {
+            (
+                vec![DVec3::ZERO, DVec3::X, DVec3::Y, DVec3::Z, DVec3::ONE],
+                vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]],
+            )
+        };
+        let shape = |v: &[DVec3], t: &[[u32; 3]]| Shape::of(v, t.to_vec()).0;
+        let (v, t) = tetra();
+        assert_eq!(shape(&v, &t), Shape::Solid);
+        // the faces are given back as they were
+        assert_eq!(Shape::of(&v, t.clone()).1, t);
+        // a hole: one face gone
+        assert_eq!(shape(&v, &t[..3]), Shape::Open);
+        // a bowtie patch: two triangles touching at one vertex, all border
+        assert_eq!(shape(&v, &[[0, 1, 2], [0, 3, 4]]), Shape::Open);
+        // a non-manifold edge: a third face on the edge 0-1
+        let mut fin = t.clone();
+        fin.push([0, 1, 4]);
+        assert_eq!(shape(&v, &fin), Shape::Open);
+        assert_eq!(shape(&v, &[]), Shape::Open);
+        // closed, but a tunnel through it, or two pieces
+        assert_eq!(attempt("torus", 0, 0).shape, Shape::Tunnel);
+        assert_eq!(attempt("two", 0, 0).shape, Shape::Tunnel);
+    }
+
+    /// An open solid is never kept, even without crossings and with the
+    /// fewest added vertices: the next closed axis is; none closed, the
+    /// tooth fails by name instead of coming out open.
+    #[test]
+    fn an_open_solid_is_never_kept() {
+        let open = |filled: usize, tag: usize| {
+            let mut a = attempt("closed", filled, tag);
+            a.tris.pop();
+            Attempt::new(a.vertices, a.tris, filled, a.stats)
+        };
+        let hole = open(1, 0);
+        assert_eq!((hole.folds, hole.shape), (Some(0), Shape::Open));
+        let (k, best, last) = pick(vec![hole, attempt("closed", 5, 1)], 36).unwrap();
+        assert_eq!((k, best.filled, best.shape), (1, 5, Shape::Solid));
+        assert_eq!(last.despiked, 1);
+        // the axis index stays the one of the attempt, past the skipped ones
+        let (k, ..) = pick(
+            vec![attempt("nan", 0, 0), open(1, 1), attempt("closed", 5, 2)],
+            36,
+        )
+        .unwrap();
+        assert_eq!(k, 2);
+        assert!(matches!(
+            pick(vec![open(1, 0), attempt("folded", 0, 1)], 36),
+            Err(ReconstructError::NotClosed(36))
+        ));
+        assert!(matches!(
+            pick(vec![attempt("nan", 0, 0)], 36),
+            Err(ReconstructError::NotFinite(36))
+        ));
+    }
+
+    /// A closing with a tunnel through it is never kept either: the next
+    /// solid axis is; none solid, the tooth fails by name.
+    #[test]
+    fn a_solid_with_a_tunnel_through_it_is_never_kept() {
+        for kind in ["torus", "two"] {
+            let (k, best, last) =
+                pick(vec![attempt(kind, 0, 0), attempt("closed", 5, 1)], 36).unwrap();
+            assert_eq!((k, best.filled, best.shape), (1, 5, Shape::Solid));
+            assert_eq!(last.despiked, 1);
+            assert!(matches!(
+                pick(vec![attempt(kind, 0, 0)], 36),
+                Err(ReconstructError::Tunnel(36))
+            ));
+        }
+        // a closing with a tunnel came nearer a solid than an open one
+        let mut open = attempt("closed", 1, 0);
+        open.tris.pop();
+        let open = Attempt::new(open.vertices, open.tris, 1, open.stats);
+        assert!(matches!(
+            pick(vec![open, attempt("torus", 0, 1)], 36),
+            Err(ReconstructError::Tunnel(36))
+        ));
+    }
+
+    /// A scan of tooth 11 with a strand of its own surface standing over its
+    /// crown, joined to it at both ends: a handle of the scanned crown (a
+    /// tunnel runs under the strand), as a scanner leaves one across a
+    /// fissure or under a thin edge. A dome 4 mm high on a 12 mm square, the
+    /// strand a square tube `width` wide arching 1.1 mm over the crown from
+    /// two feet 0.25 mm square.
+    fn crown_with_a_strand(width: f64) -> (Vec<DVec3>, Vec<[u32; 3]>, Vec<u16>) {
+        let (n, h) = (49usize, 0.25);
+        let dome = |x: f64, y: f64| 4.0 * (-(x * x + y * y) / 9.0).exp();
+        let id = |i: usize, j: usize| (j * n + i) as u32;
+        let mut v: Vec<DVec3> = (0..n * n)
+            .map(|k| {
+                let (x, y) = (-6.0 + h * (k % n) as f64, -6.0 + h * (k / n) as f64);
+                DVec3::new(x, y, dome(x, y))
+            })
+            .collect();
+        // the strand stands on the squares x in [-1.25, -1] and [1, 1.25],
+        // y in [0, 0.25], left out of the dome
+        let (ia, ib, j0) = (19, 28, 24);
+        let mut t = Vec::new();
+        for j in 0..n - 1 {
+            for i in 0..n - 1 {
+                if j == j0 && (i == ia || i == ib) {
+                    continue;
+                }
+                let (a, b, c, d) = (id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1));
+                t.extend([[a, b, c], [a, c, d]]);
+            }
+        }
+        let foot = |i: usize| [id(i, j0), id(i + 1, j0), id(i + 1, j0 + 1), id(i, j0 + 1)];
+        // square rings along a half circle from one foot to the other (the
+        // second foot run the other way round, so that the faces go outward)
+        let (w, rho, steps) = (0.5 * width, 1.125, 11u32);
+        let mid = DVec3::new(0.0, 0.125, dome(-1.125, 0.125));
+        let mut rings = vec![foot(ia)];
+        for s in 1..=steps {
+            let th = std::f64::consts::PI * f64::from(s) / f64::from(steps + 1);
+            let radial = DVec3::new(-th.cos(), 0.0, th.sin());
+            let c = mid + rho * radial;
+            rings.push(
+                [(1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(a, b)| {
+                    v.push(c + w * (a * radial + b * DVec3::Y));
+                    v.len() as u32 - 1
+                }),
+            );
+        }
+        let b = foot(ib);
+        rings.push([b[1], b[0], b[3], b[2]]);
+        for r in rings.windows(2) {
+            for i in 0..4 {
+                let j = (i + 1) % 4;
+                t.extend([[r[0][i], r[0][j], r[1][j]], [r[0][i], r[1][j], r[1][i]]]);
+            }
+        }
+        let labels = v
+            .iter()
+            .map(|p| if p.x.hypot(p.y) < 2.6 { 11 } else { 0 })
+            .collect();
+        (v, t, labels)
+    }
+
+    /// The handles of real scans (tunnels through incisal edges, cusp tips
+    /// and fissures) came out as closed teeth with tunnels through them:
+    /// here the scanned crown has one, and the closed tooth is one solid
+    /// without it.
+    #[test]
+    fn a_crown_with_a_tunnel_through_it_is_closed_into_one_solid() {
+        let (v, t, labels) = crown_with_a_strand(0.25);
+        // the scanned crown has a handle: (2 - V + E - F - holes) / 2 = 1
+        let crown: Vec<[u32; 3]> = t
+            .iter()
+            .filter(|f| f.iter().all(|&i| labels[i as usize] == 11))
+            .copied()
+            .collect();
+        let (cv, ct, _) = geom::compact(&v, &crown);
+        let chi = cv.len() as i64 - unique_edges(&ct).len() as i64 + ct.len() as i64;
+        assert_eq!(2 - chi - geom::boundary_loops(&ct).len() as i64, 2);
+        let fdi = Fdi::new(11).unwrap();
+        let axes = BTreeMap::from([(fdi, DVec3::Z)]);
+        let input = Input {
+            vertices: &v,
+            tris: &t,
+            labels: &labels,
+            axes: &axes,
+        };
+        let tooth = closed_tooth(&input, fdi, DVec3::Z, &Params::default()).expect("a solid");
+        let mesh = TriMesh::new(
+            tooth.vertices.iter().map(|p| p.as_vec3()).collect(),
+            tooth.tris.clone(),
+        );
+        let s = dc_mesh::solid_topology(&mesh);
+        assert!(s.is_closed(), "{s:?}");
+        assert_eq!(
+            (s.pieces, s.genus, s.flipped_edges),
+            (1, Some(0), 0),
+            "{s:?}"
+        );
+        assert!(s.volume_mm3 > 0.0, "{s:?}");
+        assert_eq!(tooth.info.handles_cut, 1);
+        // the whole arch at once gives the same tooth
+        let out = run(&input, &Params::default()).unwrap();
+        assert_eq!(out.teeth[&fdi], tooth);
+    }
+
+    /// A strand whose walls lie 0.01 mm apart, as the scanner left one
+    /// under the cusp of the Provino-demo 23: cut where it was narrowest,
+    /// its stumps stayed on the closed tooth as fins of no thickness, which
+    /// the field of the printed model sampled differently at every pose (a
+    /// hole through the stage models 05 to 07 at standard quality). Its thin
+    /// walls are taken away and their holes closed.
+    #[test]
+    fn a_crown_with_a_thin_strand_is_closed_without_fins() {
+        let (v, t, labels) = crown_with_a_strand(0.01);
+        let fdi = Fdi::new(11).unwrap();
+        let axes = BTreeMap::from([(fdi, DVec3::Z)]);
+        let input = Input {
+            vertices: &v,
+            tris: &t,
+            labels: &labels,
+            axes: &axes,
+        };
+        let tooth = closed_tooth(&input, fdi, DVec3::Z, &Params::default()).expect("a solid");
+        let mesh = TriMesh::new(
+            tooth.vertices.iter().map(|p| p.as_vec3()).collect(),
+            tooth.tris.clone(),
+        );
+        let s = dc_mesh::solid_topology(&mesh);
+        assert!(s.is_closed(), "{s:?}");
+        assert_eq!((s.pieces, s.genus), (1, Some(0)), "{s:?}");
+        let thin = geom::thin_faces(&tooth.vertices, &tooth.tris, THIN_SCAN_MM);
+        let at: Vec<DVec3> = tooth
+            .tris
+            .iter()
+            .zip(&thin)
+            .filter(|(_, t)| **t)
+            .map(|(f, _)| tooth.vertices[f[0] as usize])
+            .take(4)
+            .collect();
+        assert!(
+            at.is_empty(),
+            "{} faces of no thickness, at {at:?}",
+            thin.iter().filter(|t| **t).count()
+        );
     }
 
     /// Three teeth asked on a scan that has none of them: every tooth fails

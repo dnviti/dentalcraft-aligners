@@ -25,6 +25,9 @@ const GUM_MARGIN_H: f64 = 3.5;
 const GUM_DEPTH_EXTRA: f64 = 1.5;
 /// Radius (mm) around every seed never constrained to the gingiva.
 const PROTECT_RADIUS: f64 = 3.0;
+/// mm beyond the distal surface of the last tooth of a side (the end of the
+/// arch line) where the gingiva starts, whatever its height.
+const GUM_DISTAL_MM: f64 = 2.0;
 /// Fraction of the crown length below the click: the crown whose centre
 /// becomes the seed.
 const RECENTRE_BAND: f64 = 0.5;
@@ -83,8 +86,10 @@ fn build_seed_labels(
         }
     }
     // gingival constraints: far from the arch polyline in the occlusal plane,
-    // or well below the crown; the line reaches the distal surface of the
-    // last tooth of each side
+    // well below the crown, or past the distal surface of the last tooth of
+    // a side; the line reaches that surface. What lies behind the last
+    // tooth is the tuberosity, the retromolar pad or the base of a model,
+    // never a crown, even when it stands as high as one
     let mut p: Vec<DVec3> = seq.iter().map(|&f| pt(f)).collect();
     let mut half_bl: Vec<f64> = seq
         .iter()
@@ -113,13 +118,24 @@ fn build_seed_labels(
     let p2: Vec<DVec2> = p.iter().map(|q| q.truncate()).collect();
     let mut gum = vec![false; m];
     if !p.is_empty() {
+        let last = p2.len() - 1;
         for j in 0..m {
-            let (dist_h, seg, t) = polyline_projection(&p2, c[j].truncate());
+            let q = c[j].truncate();
+            let (dist_h, seg, t) = polyline_projection(&p2, q);
             let j2 = (seg + 1).min(p.len() - 1);
             let z_seed = p[seg].z * (1.0 - t) + p[j2].z * t;
             let r_h = (half_bl[seg] * (1.0 - t) + half_bl[j2] * t) + GUM_MARGIN_H;
             let h_d = (crown[seg] * (1.0 - t) + crown[j2] * t) + GUM_DEPTH_EXTRA;
-            gum[j] = dist_h > r_h || c[j].z < z_seed - h_d;
+            // how far past an end of the line, along its last segment
+            let past = match (seg, t) {
+                _ if seq.len() < 2 => 0.0,
+                (0, t) if t <= 0.0 => (q - p2[0]).dot((p2[0] - p2[1]).normalize_or_zero()),
+                (s, t) if s + 1 == last && t >= 1.0 => {
+                    (q - p2[last]).dot((p2[last] - p2[last - 1]).normalize_or_zero())
+                }
+                _ => 0.0,
+            };
+            gum[j] = dist_h > r_h || c[j].z < z_seed - h_d || past > GUM_DISTAL_MM;
         }
     }
     if let Some(b) = border {

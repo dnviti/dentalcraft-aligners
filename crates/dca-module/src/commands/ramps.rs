@@ -15,6 +15,11 @@
 //! The case is modified only in its bite settings and ramps
 //! (`AlignersState::aligner_bite`); the shell adds the ramps with
 //! [`dca_algo::ramps::apply_to_grid`].
+//!
+//! A case with one arch has no bite ([`dca_model::bite_use`]): both commands
+//! answer that they do not apply and leave the case as it is
+//! ([`super::occlusion::one_arch`]), and its aligners get neither ramps nor
+//! an occlusal shaping ([`StageBite`]), whatever the case stores of them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,15 +33,15 @@ use dca_algo::occlusion::{self, ArchModel};
 use dca_algo::ramps::{self, ProposeInput, ProposeTooth, RampSolid};
 use dca_algo::{frame, staging, teeth};
 use dca_model::{
-    AlignerEnd, AlignersState, BiteClosing, MODULE_ID, OcclusalMode, OcclusalSettings, Ramp,
-    RampKind,
+    AlignerEnd, AlignersState, BiteClosing, BiteUse, MODULE_ID, OcclusalMode, OcclusalSettings,
+    Ramp, RampKind,
 };
 use glam::{DMat4, DVec3};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::occlusion::{aligners_data, arch_model};
+use super::occlusion::{aligners_data, arch_model, one_arch};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -442,6 +447,9 @@ fn run_bite(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    if let Some(out) = one_arch(state) {
+        return Ok(out);
+    }
     let p = pair(state)?;
     let occlusal_settings = params.settings(&p.data.aligner_bite.occlusal)?;
     let n = n_stages(&p.data);
@@ -505,22 +513,34 @@ fn check_size(name: &str, v: Option<f64>, lo: f64, hi: f64) -> Result<(), Comman
 
 /// The ramps and the bite with the aligners worn, prepared once for the
 /// print files of every stage (the export): the arches of the case with
-/// their crowns, in the arch coordinates of the bite (`ArchModel`).
+/// their crowns, in the arch coordinates of the bite (`ArchModel`). A case
+/// with one arch has none of them ([`dca_model::bite_use`]): no ramps, no
+/// bite, no occlusal shaping, and nothing reported missing.
 pub(crate) struct StageBite {
     lower: Option<ArchCase>,
     upper: Option<ArchCase>,
     rel: Option<DMat4>,
     data: AlignersState,
     design: Design,
+    /// Both arches: the bite applies ([`BiteUse::applies`]).
+    applies: bool,
 }
 
 impl StageBite {
     /// The arches of the case that are segmented (an arch that is not has
-    /// no ramps and no bite).
+    /// no ramps and no bite); none with one arch.
     pub(crate) fn new(state: &CaseState) -> Result<Self, CommandError> {
         let data = aligners_data(state)?;
-        let lower = arch_case(state, &data, Arch::Lower).ok();
-        let upper = arch_case(state, &data, Arch::Upper).ok();
+        let applies = BiteUse::of(state).applies();
+        let arch = |a: Arch| {
+            if applies {
+                arch_case(state, &data, a).ok()
+            } else {
+                None
+            }
+        };
+        let lower = arch(Arch::Lower);
+        let upper = arch(Arch::Upper);
         let rel = match (&lower, &upper) {
             (Some(l), Some(u)) => Some(occlusion::relation(&l.model, &u.model)),
             _ => None,
@@ -532,6 +552,7 @@ impl StageBite {
             rel,
             data,
             design,
+            applies,
         })
     }
 
@@ -553,9 +574,10 @@ impl StageBite {
         &self.design
     }
 
-    /// The occlusal limit changes the shells (`case_occlusal.active`).
+    /// The occlusal limit changes the shells (`case_occlusal.active`); never
+    /// with one arch, which has no bite to shape them with.
     pub(crate) fn shapes_shells(&self) -> bool {
-        self.data.aligner_bite.occlusal.active()
+        self.applies && self.data.aligner_bite.occlusal.active()
     }
 
     /// Why there is no bite to shape the shells with; `None`: there is one.
@@ -624,7 +646,7 @@ impl StageBite {
 
 /// The ramps of the case as solids in the arch coordinates of `arch` at
 /// stage `k` (for the shell: [`dca_algo::ramps::apply_to_grid`]); empty when
-/// the ramps are off.
+/// the ramps are off, and with one arch.
 #[allow(dead_code)]
 pub(crate) fn ramp_solids(
     state: &CaseState,
@@ -632,7 +654,7 @@ pub(crate) fn ramp_solids(
     k: u32,
 ) -> Result<Vec<RampSolid>, CommandError> {
     let data = aligners_data(state)?;
-    if !data.aligner_bite.ramps.enabled {
+    if !data.aligner_bite.ramps.enabled || !BiteUse::of(state).applies() {
         return Ok(vec![]);
     }
     let c = arch_case(state, &data, arch)?;
@@ -659,6 +681,9 @@ fn run_ramps(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    if let Some(out) = one_arch(state) {
+        return Ok(out);
+    }
     check_size("width_mm", params.width_mm, 0.5, 8.0)?;
     check_size("depth_mm", params.depth_mm, 0.5, 6.0)?;
     check_size("height_mm", params.height_mm, 0.2, 4.0)?;

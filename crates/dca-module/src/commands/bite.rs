@@ -14,7 +14,9 @@
 //! The lower arch stays in place: the bite scans move onto it and the upper
 //! scan (with its labels, seeds and tooth frames) moves onto the bite scans.
 //! Nothing is moved when the registration is rejected (the command fails
-//! with the reason). Both arches must be segmented with their seeds. The
+//! with the reason). Both arches must be segmented with their seeds; a case
+//! with one arch has no bite, and every command answers that it does not
+//! apply, leaving the case as it is ([`super::occlusion::one_arch`]). The
 //! report of a registration is kept in the case
 //! ([`AlignersState::bite_report`]), as the plugin keeps it on both cases.
 
@@ -32,7 +34,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::messages;
-use super::occlusion::{aligners_data, arch_model, move_arch, move_json};
+use super::occlusion::{aligners_data, arch_model, move_arch, move_json, one_arch};
 
 /// The registered commands of this stage, built with `stage_command!`.
 pub(crate) fn specs() -> Vec<CommandSpec> {
@@ -155,6 +157,9 @@ fn run_registration(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    if let Some(out) = one_arch(state) {
+        return Ok(out);
+    }
     let mut data = aligners_data(state)?;
     let scans: Vec<_> = state
         .case
@@ -271,6 +276,9 @@ fn run_correct(
     ctx: &JobCtx,
 ) -> Result<CommandOutput, CommandError> {
     ctx.check_cancelled()?;
+    if let Some(out) = one_arch(state) {
+        return Ok(out);
+    }
     let mut data: AlignersState = aligners_data(state)?;
     let lower = arch_model(state, &data, Arch::Lower)?;
     let upper = arch_model(state, &data, Arch::Upper)?;
@@ -704,20 +712,46 @@ mod tests {
     }
 
     #[test]
-    fn the_correction_needs_both_arches() {
-        let lower = exec("aligners.demo", &CaseState::default(), Value::Null).0;
-        let err = try_exec("aligners.occlusion.bite-correct", &lower, Value::Null).unwrap_err();
-        assert!(
-            matches!(&err, CommandError::Invalid(m) if m.contains("upper")),
-            "{err}"
-        );
-        assert!(matches!(
-            try_exec(
-                "aligners.occlusion.bite-correct",
-                &lower,
-                json!({ "nope": 1 })
-            ),
-            Err(CommandError::Invalid(_))
-        ));
+    fn one_arch_has_no_bite_to_register_or_correct() {
+        use crate::commands::occlusion::tests::assert_not_applicable;
+        for arch in ["lower", "upper"] {
+            let mut one = exec(
+                "aligners.demo",
+                &CaseState::default(),
+                json!({ "arch": arch }),
+            )
+            .0;
+            // a bite scan and a bite stored by an old project change nothing
+            let mut bite = one.case.scans[0].clone();
+            bite.role = ScanRole::Bite;
+            one.case.scans.push(bite);
+            let mut d = one.module_data::<AlignersState>(MODULE_ID).unwrap().clone();
+            d.bite_registered = true;
+            d.bite_report = Some(BiteReport::virtual_bite());
+            one.set_module(MODULE_ID, dc_case::ModuleState::new(d));
+            let points = json!({
+                "lower_points": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+                "bite_points": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            });
+            assert_not_applicable(
+                "aligners.occlusion.bite-registration.icp",
+                &one,
+                Value::Null,
+            );
+            assert_not_applicable(
+                "aligners.occlusion.bite-registration.three-points",
+                &one,
+                points,
+            );
+            assert_not_applicable("aligners.occlusion.bite-correct", &one, Value::Null);
+            assert!(matches!(
+                try_exec(
+                    "aligners.occlusion.bite-correct",
+                    &one,
+                    json!({ "nope": 1 })
+                ),
+                Err(CommandError::Invalid(_))
+            ));
+        }
     }
 }

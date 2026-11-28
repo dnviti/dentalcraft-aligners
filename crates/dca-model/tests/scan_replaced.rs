@@ -11,9 +11,9 @@ use dc_case::{
 use dc_mesh::{BadFaceReport, MeshFormat, TriMesh, Units};
 use dca_model::{
     AlignerBase, AlignersState, ArchDetails, ArchSpace, BiteMethod, BiteRegistration, BiteReport,
-    BiteScanFit, CLEARED_IDS, ClosedBy, Decision, IprStep, MODULE_ID, Ramp, RampKind, ReviewKind,
-    ReviewRecord, ReviewStatus, ScanBase, Seed, Stage, StagingSummary, ToothFrame, ToothMeasures,
-    ToothScale, Visit,
+    BiteScanFit, CLEARED_IDS, ClosedBy, CollisionLeft, Decision, IprStep, MODULE_ID, Ramp,
+    RampKind, ReviewKind, ReviewRecord, ReviewStatus, ScanBase, Seed, Stage, StagingSummary,
+    ToothFrame, ToothMeasures, ToothScale, Visit,
 };
 use glam::{DQuat, DVec3, Vec3};
 use serde_json::Value;
@@ -162,6 +162,16 @@ fn fill_arch(case: &mut CaseState, st: &mut AlignersState, role: ScanRole, tag: 
             ..StagingSummary::default()
         },
     );
+    st.staging_collisions.insert(
+        role,
+        vec![CollisionLeft {
+            stage: 2,
+            a,
+            b,
+            penetration_mm: 0.5,
+            allowed_mm: 0.2,
+        }],
+    );
     st.tooth_speed.insert(a, 0.5);
     st.review.push(ReviewRecord {
         arch: role,
@@ -244,6 +254,7 @@ fn every_group_of_the_arch_is_cleared_and_reported_in_order() {
         assert!(!st.setup.lines.contains_key(&role));
         assert!(st.stages.iter().all(|s| !s.poses.keys().any(arch)));
         assert!(!st.staging_results.contains_key(&role));
+        assert!(!st.staging_collisions.contains_key(&role));
         assert!(!st.tooth_speed.keys().any(arch));
         assert!(
             st.stages
@@ -292,6 +303,7 @@ fn only_group(id: &str, role: ScanRole) -> AlignersState {
         "stages" => {
             st.stages = full.stages;
             st.staging_results = full.staging_results;
+            st.staging_collisions = full.staging_collisions;
             st.tooth_speed = full.tooth_speed;
         }
         "review" => st.review = full.review,

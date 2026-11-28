@@ -13,14 +13,16 @@
 //! * **aligner** `k`: the closed field of the same parts (the blockout of the
 //!   trim mode: 0.8 mm for the smooth border, `SMOOTH_BLOCKOUT_MM`; its band
 //!   reaching `clearance + wall`, [`shell::closed_grid_for`]), the shell
-//!   field between its levels at `clearance` and `clearance + wall`, the
+//!   field between its levels at `clearance` and `clearance + wall`, over
+//!   the gingiva `gum_clearance` farther out ([`shell::gum_relieved`]), the
 //!   ramps united with it on the field and the cavity of their tooth cut
 //!   again ([`dca_algo::ramps::apply_to_grid`]), the trim (cutter, reach of
 //!   the crowns, rounded rim: [`dca_algo::trim::run`]), and in it, after the
 //!   rim is rounded, the occlusal thickness and the grinding of the bite with
 //!   the aligners worn cut from the field, its crease blended
-//!   ([`occlusal::shape_cutter`], when the case asks for it and both arches
-//!   are there), the reduction within the mesh tolerance
+//!   ([`occlusal::shape_cutter`] on the closed field with the gum relief, the
+//!   one the shell is the offset of, when the case asks for it and both
+//!   arches are there), the reduction within the mesh tolerance
 //!   ([`shell::reduce_to`]), then the stamp engraved inside the wall.
 //!
 //! The reduction and the stamp are checked as the print check would, in
@@ -48,7 +50,7 @@ use dc_mesh::TriMesh;
 use dca_algo::aligner_bite::occlusal;
 use dca_algo::anatomy::Arch;
 use dca_algo::export::printcheck;
-use dca_algo::export::provider::{MeshProvider, Note};
+use dca_algo::export::provider::{MeshProvider, Note, NoteArg};
 use dca_algo::export::{self, ExportError};
 use dca_algo::schedule::{self, Date};
 use dca_algo::shell::{self, Design, Outputs};
@@ -101,6 +103,11 @@ pub(crate) struct ShellProvider<'a> {
     design: Design,
     trim: trim::Params,
     shell_blockout: f64,
+    /// SMOOTH border: the labial and lingual faces of the interproximal
+    /// block-out under the shell (the contact bridges and embrasure fills)
+    /// this far inside the tangents to the crowns (`TrimParams::recess_mm`);
+    /// `None` (other borders): the shell is laid without them.
+    recess: Option<f64>,
     options: Options,
     bites: Vec<OnceLock<Option<Arc<occlusal::Bite>>>>,
     n_lower: u32,
@@ -108,6 +115,28 @@ pub(crate) struct ShellProvider<'a> {
     notes: Mutex<Vec<Note>>,
     /// The reach of every aligner made (EQUATOR border), for its print check.
     reaches: Mutex<BTreeMap<(Arch, u32), printcheck::Reach>>,
+    /// The shell of the last stage of an arch without its stamp, for the
+    /// passive aligners (stamped on it one by one).
+    passive_base: Mutex<BTreeMap<(Arch, u32), PassiveBase>>,
+}
+
+/// The last shell of an arch, before its stamp (arch coordinates).
+struct PassiveBase {
+    mesh: TriMesh,
+    /// The defects of its file, when known.
+    base: Option<Defects>,
+    /// The teeth where the stamp can go.
+    sites: Vec<ToothSite>,
+}
+
+/// The word of the report for the border of a trim mode.
+fn trim_mode_word(mode: trim::Mode) -> &'static str {
+    match mode {
+        trim::Mode::Equator => "rpt-trim-equator",
+        trim::Mode::Straight => "rpt-trim-straight",
+        trim::Mode::Scalloped => "rpt-trim-scalloped",
+        trim::Mode::Smooth => "rpt-trim-smooth",
+    }
 }
 
 fn rigid(m: &DMat4, mesh: &TriMesh) -> TriMesh {
@@ -168,16 +197,17 @@ impl<'a> ShellProvider<'a> {
                 arch: None,
                 stage: None,
                 aligner: true,
+                passive: false,
                 key: "rpt-note-bite",
-                detail: why.to_owned(),
+                args: NoteArg::text(why),
             });
         }
         let t = &data.trim;
         let trim = super::super::trim::case_trim_params(t);
-        let shell_blockout = if t.mode == TrimMode::Smooth {
-            shell::SMOOTH_BLOCKOUT_MM
+        let (shell_blockout, recess) = if t.mode == TrimMode::Smooth {
+            (shell::SMOOTH_BLOCKOUT_MM, Some(t.recess_mm))
         } else {
-            shell::BLOCKOUT_MM
+            (shell::BLOCKOUT_MM, None)
         };
         let params = shell::Params {
             model_voxel_mm: options.voxel_mm,
@@ -196,6 +226,7 @@ impl<'a> ShellProvider<'a> {
             design,
             trim,
             shell_blockout,
+            recess,
             options,
             bites: (0..=n_lower.max(n_upper))
                 .map(|_| OnceLock::new())
@@ -204,10 +235,23 @@ impl<'a> ShellProvider<'a> {
             n_upper,
             notes: Mutex::new(notes),
             reaches: Mutex::new(BTreeMap::new()),
+            passive_base: Mutex::new(BTreeMap::new()),
         }))
     }
 
-    fn note(&self, arch: Arch, k: u32, aligner: bool, key: &'static str, detail: String) {
+    /// The last active stage of an arch.
+    fn last(&self, arch: Arch) -> u32 {
+        if arch.is_upper() {
+            self.n_upper
+        } else {
+            self.n_lower
+        }
+    }
+
+    /// A note about the file of model or aligner `k`; an aligner after the
+    /// last active stage of its arch is a passive one (its own file).
+    fn note(&self, arch: Arch, k: u32, aligner: bool, key: &'static str, args: Vec<NoteArg>) {
+        let passive = aligner && k > self.last(arch);
         self.notes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -215,8 +259,9 @@ impl<'a> ShellProvider<'a> {
                 arch: Some(arch),
                 stage: Some(k),
                 aligner,
+                passive,
                 key,
-                detail,
+                args,
             });
     }
 
@@ -339,22 +384,23 @@ impl<'a> ShellProvider<'a> {
                 return Ok((r, Some(Defects::of(&c))));
             }
         }
-        self.note(arch, k, aligner, "rpt-note-reduce", format!("{tol} mm"));
+        self.note(arch, k, aligner, "rpt-note-reduce", vec![NoteArg::mm(tol)]);
         Ok((full, Some(Defects::of(&base))))
     }
 
     /// The stamp on `mesh` (arch coordinates), on one of the `covered`
-    /// teeth of `sites`: the mesh stamped and the file it makes (`land`: the
-    /// mesh in case coordinates), or `None` with a note (no room). A text
-    /// that would fold the surface (more self-intersections or triangles of
-    /// no area in the file than `base`, those of the file of `mesh` when
-    /// known) is not kept: the next tooth is tried.
+    /// teeth of `sites`, for aligner `k` (`passive`: a passive aligner, its
+    /// own number with the `P`): the mesh stamped and the file it makes
+    /// (`land`: the mesh in case coordinates), or `None` with a note (no
+    /// room). A text that would fold the surface (more self-intersections or
+    /// triangles of no area in the file than `base`, those of the file of
+    /// `mesh` when known) is not kept: the next tooth is tried.
     fn stamped(
         &self,
         mesh: &TriMesh,
         base_known: Option<Defects>,
         land: &dyn Fn(&TriMesh) -> TriMesh,
-        (arch, k): (Arch, u32),
+        (arch, k, passive): (Arch, u32, bool),
         kind: stamp::Kind,
         (sites, covered): (Vec<ToothSite>, &std::collections::BTreeSet<Fdi>),
     ) -> Option<(TriMesh, TriMesh)> {
@@ -366,27 +412,22 @@ impl<'a> ShellProvider<'a> {
         ) {
             Ok(p) => p,
             Err(e) => {
-                self.note(arch, k, aligner, "rpt-note-stamp", e.to_string());
+                self.note(
+                    arch,
+                    k,
+                    aligner,
+                    "rpt-note-stamp",
+                    NoteArg::text(e.to_string()),
+                );
                 return None;
             }
         };
-        let date = self
-            .options
-            .stamp_dates
-            .get(&(arch, k))
-            .unwrap_or(&self.options.date);
-        let params = stamp::Params {
-            number: k,
-            code: stamp::clean_code(&self.options.stamp_code),
-            date: Some(date.to_iso()),
-            clearance: if aligner {
-                self.design.clearance_mm
-            } else {
-                0.0
-            },
-            kind,
-            ..case
+        let clearance = if aligner {
+            self.design.clearance_mm
+        } else {
+            0.0
         };
+        let params = stamp_params(case, &self.options, (arch, k, passive), kind, clearance);
         let input = stamp::Input {
             mesh,
             arch,
@@ -419,7 +460,7 @@ impl<'a> ShellProvider<'a> {
             Ok(Outcome::Skipped { reason }) => reason,
             Err(e) => e.to_string(),
         };
-        self.note(arch, k, aligner, "rpt-note-stamp", why);
+        self.note(arch, k, aligner, "rpt-note-stamp", NoteArg::text(why));
         None
     }
 }
@@ -459,6 +500,29 @@ fn check(mesh: &TriMesh, min_wall: Option<f64>) -> printcheck::PrintCheck {
             ..printcheck::CheckOptions::default()
         },
     )
+}
+
+/// The stamp of aligner `k` from the stamp of the case settings `case`: its
+/// own number, the passive mark (`P`) of a passive aligner, its own date (the
+/// first day of the aligner when the case asks for it, else the day of the
+/// export), the case code (the plugin's `case_stamp.stamp_mesh`).
+fn stamp_params(
+    case: stamp::Params,
+    options: &Options,
+    (arch, k, passive): (Arch, u32, bool),
+    kind: stamp::Kind,
+    clearance: f64,
+) -> stamp::Params {
+    let date = options.stamp_dates.get(&(arch, k)).unwrap_or(&options.date);
+    stamp::Params {
+        number: k,
+        passive,
+        code: stamp::clean_code(&options.stamp_code),
+        date: Some(date.to_iso()),
+        clearance,
+        kind,
+        ..case
+    }
 }
 
 /// The plan boxes of the ramps (their coordinates), grown by `reach`: the
@@ -544,7 +608,7 @@ impl MeshProvider for ShellProvider<'_> {
             &local,
             Some(base),
             &land,
-            (arch, k),
+            (arch, k, false),
             stamp::Kind::Model,
             (sites, &print.covered),
         );
@@ -590,16 +654,30 @@ impl MeshProvider for ShellProvider<'_> {
         }
         // the closed field of the model with the solids `extra` added (the
         // boxes of the bars over a space) and the untrimmed shell field read
-        // from it by arithmetic, without the embrasure fills of the model (the
-        // trim of a shell over them left holes through its wall at the
-        // margin), the ramps united with it
+        // from it by arithmetic, the ramps united with it. Under the SMOOTH
+        // border the model has the interproximal block-out of the teeth at
+        // the stage, its faces `recess` inside the tangents to the crowns
+        // (the plugin's `stage_parts(smooth=True)`): the wall bridges the
+        // embrasure under every contact instead of following it down onto
+        // the papilla. Under another border it is laid without the fills of
+        // the printed model (their faces on the tangents: the trim over them
+        // left holes through the wall at the margin).
         let fields = |extra: &[TriMesh]| -> Result<(_, _), ExportError> {
+            let full = print.input(&g);
             let input = shell::Input {
-                fdis: &[],
-                ..print.input(&g)
+                fdis: if self.recess.is_some() {
+                    full.fdis
+                } else {
+                    &[]
+                },
+                ..full
             };
-            let mut parts = shell::model_parts(&input, self.params.base_height_mm)
-                .map_err(|e| err("model", &e))?;
+            let mut parts = shell::model_parts_inset(
+                &input,
+                self.params.base_height_mm,
+                self.recess.unwrap_or(0.0),
+            )
+            .map_err(|e| err("model", &e))?;
             for e in extra {
                 let off = parts.positions.len() as u32;
                 parts.positions.extend_from_slice(&e.positions);
@@ -614,13 +692,16 @@ impl MeshProvider for ShellProvider<'_> {
             .map_err(|e| err("shell", &e))?;
             drop(parts);
             self.stop()?;
-            let mut field =
-                shell::shell_grid(&closed, &self.design).map_err(|e| err("shell", &e))?;
+            // over the gingiva the shell stands the space asked for farther
+            // out; the occlusal shaping measures from the field with it
+            let (closed, mut field) =
+                shell::relieved_shell(closed, &shell::gum_surface(&input), &self.design)
+                    .map_err(|e| err("shell", &e))?;
             if let Some((moved, by_fdi)) = &ramps {
                 let notes = dca_algo::ramps::apply_to_grid(&mut field, moved, by_fdi)
                     .map_err(|e| err("ramps", &e))?;
                 for n in notes {
-                    self.note(arch, k, true, "rpt-note-ramps", n);
+                    self.note(arch, k, true, "rpt-note-ramps", NoteArg::text(n));
                 }
             }
             Ok((closed, field))
@@ -672,6 +753,7 @@ impl MeshProvider for ShellProvider<'_> {
             thickness_mm: self.design.thickness_mm,
             cut: cut.as_ref(),
             rebuild: Some(trim::Rebuild(&rebuild)),
+            blocked_out: self.recess.is_some(),
         };
         let done = trim::run(&input, &self.trim).map_err(|e| {
             if self.options.cancel.is_cancelled() {
@@ -689,17 +771,43 @@ impl MeshProvider for ShellProvider<'_> {
                 arch,
                 k,
                 true,
-                "rpt-note-trim",
-                format!("{:?} border used instead", done.mode).to_lowercase(),
+                "rpt-note-trim-mode",
+                vec![NoteArg::Word(trim_mode_word(done.mode))],
             );
+        }
+        if done.mode == trim::Mode::Smooth && done.papilla_relief_mm < self.trim.papilla_relief_mm {
+            // the relief was halved, or dropped: a hole through the wall
+            // stayed otherwise
+            if done.papilla_relief_mm > 0.0 {
+                self.note(
+                    arch,
+                    k,
+                    true,
+                    "rpt-note-trim-relief",
+                    vec![
+                        NoteArg::mm(done.papilla_relief_mm),
+                        NoteArg::mm(self.trim.papilla_relief_mm),
+                    ],
+                );
+            } else {
+                self.note(
+                    arch,
+                    k,
+                    true,
+                    "rpt-note-trim-no-relief",
+                    vec![NoteArg::mm(self.trim.papilla_relief_mm)],
+                );
+            }
         }
         if done.genus > 0 {
             self.note(
                 arch,
                 k,
                 true,
-                "rpt-note-trim",
-                format!("{} holes through the wall left", done.genus),
+                "rpt-note-trim-holes",
+                vec![NoteArg::Count(
+                    u32::try_from(done.genus).unwrap_or(u32::MAX),
+                )],
             );
         }
         if !done.bars.is_empty() {
@@ -708,7 +816,13 @@ impl MeshProvider for ShellProvider<'_> {
                 .iter()
                 .map(|b| format!("{}-{}", b.teeth.0, b.teeth.1))
                 .collect();
-            self.note(arch, k, true, "rpt-note-bars", pairs.join(", "));
+            self.note(
+                arch,
+                k,
+                true,
+                "rpt-note-bars",
+                NoteArg::text(pairs.join(", ")),
+            );
         }
         if !done.weak.is_empty() {
             let pairs: Vec<String> = done
@@ -716,7 +830,13 @@ impl MeshProvider for ShellProvider<'_> {
                 .iter()
                 .map(|w| format!("{}-{} ({} mm²)", w.a, w.b, w.mm2))
                 .collect();
-            self.note(arch, k, true, "rpt-note-weak", pairs.join(", "));
+            self.note(
+                arch,
+                k,
+                true,
+                "rpt-note-weak",
+                NoteArg::text(pairs.join(", ")),
+            );
         }
         let (mut mesh, base) =
             self.reduce_checked(done.mesh, &from_arch, (arch, k), true, Some(MIN_WALL_MM))?;
@@ -734,11 +854,26 @@ impl MeshProvider for ShellProvider<'_> {
                     .map(|all| self.stamp_sites(&all, &g, &to_arch))
                     .unwrap_or_default()
             };
+            // the last stage without its stamp: the passive aligners are
+            // stamped on it, each with its own number and date
+            if k == self.last(arch) {
+                self.passive_base
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        (arch, k),
+                        PassiveBase {
+                            mesh: mesh.clone(),
+                            base,
+                            sites: sites.clone(),
+                        },
+                    );
+            }
             if let Some((done, landed)) = self.stamped(
                 &mesh,
                 base,
                 &land,
-                (arch, k),
+                (arch, k, false),
                 stamp::Kind::Shell,
                 (sites, &print.covered),
             ) {
@@ -763,6 +898,45 @@ impl MeshProvider for ShellProvider<'_> {
         Ok(Some(file.unwrap_or_else(|| land(&mesh))))
     }
 
+    fn passive(&self, arch: Arch, last: u32, number: u32) -> Result<Option<TriMesh>, ExportError> {
+        // no stamp: the file of the last stage, copied (the plugin)
+        if !self.options.stamp {
+            return Ok(None);
+        }
+        let Some(print) = self.prints.get(&arch) else {
+            return Ok(None);
+        };
+        self.stop()?;
+        let cached = |s: &Self| {
+            s.passive_base
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(arch, last))
+        };
+        // the last shell was not built by this provider: built once now
+        if !cached(self) {
+            self.aligner(arch, last)?;
+            if !cached(self) {
+                return Ok(None);
+            }
+        }
+        let bases = self.passive_base.lock().unwrap_or_else(|e| e.into_inner());
+        let b = &bases[&(arch, last)];
+        let from_arch = dca_algo::frame::rigid_inverse(&print.to_arch());
+        let land = |s: &TriMesh| rigid(&from_arch, s);
+        let file = self
+            .stamped(
+                &b.mesh,
+                b.base,
+                &land,
+                (arch, number, true),
+                stamp::Kind::Shell,
+                (b.sites.clone(), &print.covered),
+            )
+            .map_or_else(|| land(&b.mesh), |(_, file)| file);
+        Ok(Some(file))
+    }
+
     fn reach(&self, arch: Arch, k: u32) -> Option<printcheck::Reach> {
         self.reaches
             .lock()
@@ -783,5 +957,352 @@ impl MeshProvider for ShellProvider<'_> {
         // (a narrow band around the surfaces): about 3 GB at 0.1 mm
         let v = self.params.shell_voxel_mm;
         Some(((v / 0.1).powi(2) * 4.0).floor().clamp(2.0, 64.0) as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_passive_aligner_is_stamped_with_its_own_number_mark_and_date() {
+        let day = |s: &str| Date::parse(s).unwrap();
+        let options = Options {
+            voxel_mm: 0.2,
+            tolerance_mm: 0.02,
+            stamp: true,
+            stamp_code: "ab-12".to_owned(),
+            date: day("2026-03-01"),
+            stamp_dates: [
+                ((Arch::Upper, 5), day("2026-03-29")),
+                ((Arch::Upper, 6), day("2026-04-05")),
+                ((Arch::Upper, 7), day("2026-04-12")),
+            ]
+            .into_iter()
+            .collect(),
+            cancel: dc_command::CancelToken::new(),
+            checked: true,
+        };
+        let case = stamp::Params::default();
+        let at = |k, passive| {
+            stamp_params(
+                case.clone(),
+                &options,
+                (Arch::Upper, k, passive),
+                stamp::Kind::Shell,
+                0.1,
+            )
+        };
+        let last = at(5, false);
+        let p6 = at(6, true);
+        let p7 = at(7, true);
+        assert_eq!((last.number, last.passive), (5, false));
+        assert_eq!((p6.number, p6.passive), (6, true));
+        assert_eq!((p7.number, p7.passive), (7, true));
+        assert_eq!(last.date.as_deref(), Some("2026-03-29"));
+        assert_eq!(p6.date.as_deref(), Some("2026-04-05"));
+        assert_eq!(p7.date.as_deref(), Some("2026-04-12"));
+        assert_eq!(p6.code, "AB-12");
+        // the first line of the text: the plugin's `label_lines` ('SUP 21 P')
+        let first = |p: &stamp::Params| {
+            stamp::label_lines(&p.text, Arch::Upper, p.number, p.passive, "", &p.code).unwrap()[0]
+                .clone()
+        };
+        assert_eq!(first(&last), "SUP 05");
+        assert_eq!(first(&p6), "SUP 06 P");
+        assert_eq!(first(&p7), "SUP 07 P");
+        // no date of its own: the day of the export
+        assert_eq!(at(9, true).date.as_deref(), Some("2026-03-01"));
+    }
+
+    use glam::DVec2;
+
+    /// Points where the edges of `tris` cross the height `z` (plan).
+    fn section(p: &[DVec3], tris: &[[u32; 3]], z: f64) -> Vec<DVec2> {
+        let mut out = Vec::new();
+        for t in tris {
+            for k in 0..3 {
+                let (a, b) = (p[t[k] as usize], p[t[(k + 1) % 3] as usize]);
+                if (a.z - z) * (b.z - z) < 0.0 {
+                    out.push((a + (b - a) * ((z - a.z) / (b.z - a.z))).truncate());
+                }
+            }
+        }
+        out
+    }
+
+    /// Convex hull, counter-clockwise (monotone chain).
+    fn hull(pts: &[DVec2]) -> Vec<DVec2> {
+        let mut p = pts.to_vec();
+        p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        p.dedup();
+        if p.len() < 3 {
+            return p;
+        }
+        let cross = |o: DVec2, a: DVec2, b: DVec2| (a - o).perp_dot(b - o);
+        let mut h: Vec<DVec2> = Vec::new();
+        for pass in 0..2 {
+            let start = h.len();
+            let seq: Vec<DVec2> = if pass == 0 {
+                p.clone()
+            } else {
+                p.iter().rev().copied().collect()
+            };
+            for q in seq {
+                while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                    h.pop();
+                }
+                h.push(q);
+            }
+            h.pop();
+        }
+        h
+    }
+
+    /// The range of `s` with `c + s w` inside the convex counter-clockwise
+    /// polygon `poly`.
+    fn line_range(poly: &[DVec2], c: DVec2, w: DVec2) -> Option<(f64, f64)> {
+        let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            let n = DVec2::new(b.y - a.y, a.x - b.x);
+            let (k, r) = (n.dot(w), n.dot(a - c));
+            if k.abs() < 1e-12 {
+                if r < 0.0 {
+                    return None;
+                }
+            } else if k > 0.0 {
+                hi = hi.min(r / k);
+            } else {
+                lo = lo.max(r / k);
+            }
+        }
+        (lo < hi).then_some((lo, hi))
+    }
+
+    /// Where the ray `o + t d` (`t > 0`) crosses the triangles, sorted.
+    fn crossings(p: &[DVec3], tris: &[[u32; 3]], o: DVec3, d: DVec3) -> Vec<f64> {
+        let mut out: Vec<f64> = tris
+            .iter()
+            .filter_map(|t| {
+                let [a, b, c] = t.map(|i| p[i as usize]);
+                let (e1, e2) = (b - a, c - a);
+                let h = d.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() < 1e-12 {
+                    return None;
+                }
+                let s = o - a;
+                let u = s.dot(h) / det;
+                let q = s.cross(e1);
+                let v = d.dot(q) / det;
+                let t = e2.dot(q) / det;
+                (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 1e-9).then_some(t)
+            })
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        out
+    }
+
+    /// The aligner as the export writes it (`aligners.view.aligner-exact`
+    /// builds the print file of a stage with the provider of `export-all`)
+    /// on a golden arch at its initial stage, SMOOTH border: under the
+    /// contact of every two touching neighbours its inner wall stays within
+    /// the recess (+ [`EMBRASURE_TOL_MM`]) of the lines tangent to the two
+    /// crowns, from the contact down to 1 mm over the border (labial and
+    /// lingual, the median of three rays 0.05 mm apart), so it never goes
+    /// down into the embrasure onto the papilla; and the border over the
+    /// papilla stands at most [`NOTCH_MM`] over the line between its
+    /// heights at the middles of the two teeth (no notch). Here at most
+    /// 0.73 mm into an embrasure and 0.07 mm over a papilla; the export
+    /// before the block-out (a2dfeba) went up to 2.86 mm into one, its
+    /// border 0.55 mm over a papilla.
+    #[test]
+    #[ignore = "reconstruction, gingiva, plan and the print file of a stage: about 30 s in release, run with --release --ignored --nocapture"]
+    fn the_exported_aligner_bridges_every_embrasure() {
+        /// Penetration allowed past the recess (mm): the draft voxel of the
+        /// print file (0.25 mm) and its tolerance (0.05 mm).
+        const EMBRASURE_TOL_MM: f64 = 0.3;
+        /// Rise of the border over the papilla allowed (mm).
+        const NOTCH_MM: f64 = 1.0;
+        let run = |id: &str, s: &CaseState, p: serde_json::Value| {
+            crate::commands::find(id)
+                .unwrap()
+                .execute(s, &p, &dc_command::JobCtx::detached())
+                .unwrap()
+        };
+        let mut s = crate::commands::reconstruct::golden_state("demo_lower_mild");
+        for id in [
+            "aligners.teeth.frames",
+            "aligners.preparation.reconstruction.automatic",
+            "aligners.preparation.gingiva",
+            "aligners.planning.setup.automatic",
+            "aligners.planning.staging.automatic",
+        ] {
+            s = run(id, &s, serde_json::Value::Null).0;
+        }
+        let s = run(
+            "aligners.view.aligner-exact",
+            &s,
+            serde_json::json!({ "stage": 0, "quality": "draft" }),
+        )
+        .0;
+        let data = s
+            .module_data::<AlignersState>(dca_model::MODULE_ID)
+            .unwrap();
+        assert_eq!(data.trim.mode, TrimMode::Smooth);
+        let recess = data.trim.recess_mm;
+        let role = dc_case::ScanRole::Lower;
+        let base = data
+            .aligner_view
+            .bases
+            .iter()
+            .find(|b| b.exact && b.arch == role && b.stage == 0)
+            .unwrap();
+        let aligner = s.blobs.require(&base.mesh).unwrap();
+        // arch coordinates: +Z the mean occlusal axis of the teeth
+        let covered = data.aligner_teeth(role);
+        let zsum: DVec3 = data
+            .tooth_frames
+            .iter()
+            .filter(|(f, _)| covered.contains(f))
+            .map(|(_, fr)| fr.pose.q * DVec3::Z)
+            .sum();
+        let q = glam::DQuat::from_rotation_arc(zsum.normalize(), DVec3::Z);
+        let al: Vec<DVec3> = aligner.positions.iter().map(|p| q * p.as_dvec3()).collect();
+        let tris = &aligner.tris;
+        let teeth: BTreeMap<Fdi, (Vec<DVec3>, Vec<[u32; 3]>)> = data
+            .crowns
+            .iter()
+            .filter(|(f, _)| covered.contains(f))
+            .map(|(f, r)| {
+                let m = s.blobs.require(r).unwrap();
+                let p = m.positions.iter().map(|p| q * p.as_dvec3()).collect();
+                (*f, (p, m.tris.clone()))
+            })
+            .collect();
+        let order: Vec<Fdi> = dca_algo::anatomy::arch_order(Arch::Lower)
+            .iter()
+            .copied()
+            .filter(|f| teeth.contains_key(f))
+            .collect();
+        let cen = |f: &Fdi| {
+            let p = &teeth[f].0;
+            p.iter().map(|v| v.truncate()).sum::<DVec2>() / p.len() as f64
+        };
+        let mid: DVec2 = order.iter().map(cen).sum::<DVec2>() / order.len() as f64;
+        // the lowest point of the aligner in the vertical plane through `o`
+        // square to `u`, on the side `w` of `o`, within 8 mm of it
+        let border = |o: DVec2, u: DVec2, w: DVec2| {
+            let mut best = f64::INFINITY;
+            for t in tris {
+                let p = t.map(|i| al[i as usize]);
+                let d = p.map(|x| (x.truncate() - o).dot(u));
+                for k in 0..3 {
+                    let (a, b) = (k, (k + 1) % 3);
+                    if (d[a] <= 0.0) == (d[b] <= 0.0) {
+                        continue;
+                    }
+                    let x = p[a] + (p[b] - p[a]) * (d[a] / (d[a] - d[b]));
+                    let r = x.truncate() - o;
+                    if r.dot(w) > 0.0 && r.length() < 8.0 {
+                        best = best.min(x.z);
+                    }
+                }
+            }
+            best
+        };
+        let (mut pairs, mut worst, mut notch) = (0, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for w2 in order.windows(2) {
+            let ((pa, ta), (pb, tb)) = (&teeth[&w2[0]], &teeth[&w2[1]]);
+            // the contact: the highest middle of the closest two vertices
+            let close: Vec<(f64, DVec3)> = pb
+                .iter()
+                .map(|p| {
+                    let a = pa
+                        .iter()
+                        .min_by(|x, y| x.distance_squared(*p).total_cmp(&y.distance_squared(*p)))
+                        .unwrap();
+                    (a.distance(*p), (*a + *p) * 0.5)
+                })
+                .collect();
+            let dmin = close.iter().map(|x| x.0).fold(f64::INFINITY, f64::min);
+            if dmin > shell::embrasure::TOUCH_MM {
+                continue;
+            }
+            pairs += 1;
+            let c = close
+                .iter()
+                .filter(|x| x.0 <= dmin + 0.1)
+                .map(|x| x.1)
+                .max_by(|a, b| a.z.total_cmp(&b.z))
+                .unwrap();
+            let (ca, cb, c2) = (cen(&w2[0]), cen(&w2[1]), c.truncate());
+            let u = (cb - ca).normalize();
+            let mut w = DVec2::new(-u.y, u.x);
+            if (c2 - mid).dot(w) < 0.0 {
+                w = -w;
+            }
+            let mut pen = [f64::NEG_INFINITY; 2];
+            let mut rise = [0.0; 2];
+            for (i, side) in [w, -w].into_iter().enumerate() {
+                let at = |o: DVec2| border(o, u, side);
+                let zb = at(c2);
+                let t = (c2 - ca).dot(u) / (cb - ca).dot(u);
+                rise[i] = zb - (at(ca) + t * (at(cb) - at(ca)));
+                let mut z = c.z - 0.3;
+                while z > zb + 1.0 && z > c.z - 7.0 {
+                    let mut sec = section(pa, ta, z);
+                    let sb = section(pb, tb, z);
+                    if sec.len() >= 3 && sb.len() >= 3 {
+                        sec.extend(sb);
+                        if let Some((lo, hi)) = line_range(&hull(&sec), c2, side) {
+                            let mut v: Vec<f64> = [-0.05, 0.0, 0.05]
+                                .into_iter()
+                                .filter_map(|off| {
+                                    let o = (c2 + u * off + side * 25.0).extend(z);
+                                    let h = crossings(&al, tris, o, -side.extend(0.0));
+                                    let inner: Vec<f64> = h
+                                        .into_iter()
+                                        .map(|t| 25.0 - t)
+                                        .filter(|x| *x > 0.5 * (lo + hi))
+                                        .collect();
+                                    (inner.len() >= 2).then(|| hi - inner[1])
+                                })
+                                .collect();
+                            v.sort_by(f64::total_cmp);
+                            if v.len() >= 2 {
+                                pen[i] = pen[i].max(if v.len() == 3 { v[1] } else { v[0] });
+                            }
+                        }
+                    }
+                    z -= 0.2;
+                }
+            }
+            eprintln!(
+                "{}-{}: gap {dmin:.2}, into the embrasure {:+.2} / {:+.2} mm, border over the papilla {:+.2} / {:+.2} mm",
+                w2[0].get(),
+                w2[1].get(),
+                pen[0],
+                pen[1],
+                rise[0],
+                rise[1]
+            );
+            worst = worst.max(pen[0]).max(pen[1]);
+            notch = notch.max(rise[0]).max(rise[1]);
+        }
+        eprintln!(
+            "{pairs} pairs: into the embrasure at most {worst:.2} mm (recess {recess}), border over the papilla at most {notch:.2} mm"
+        );
+        assert!(pairs >= 8, "{pairs} touching pairs");
+        assert!(
+            worst <= recess + EMBRASURE_TOL_MM,
+            "the aligner goes {worst:.2} mm into an embrasure (recess {recess} mm)"
+        );
+        assert!(
+            notch <= NOTCH_MM,
+            "the border rises {notch:.2} mm over a papilla"
+        );
     }
 }
