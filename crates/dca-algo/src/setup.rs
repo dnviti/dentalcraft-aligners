@@ -1087,6 +1087,11 @@ struct Solver<'a> {
     gap_cal: Vec<f64>,
     rest_pair: Vec<bool>,
     n_base: Vec<f64>,
+    /// How much of its derotation every tooth gets (`1`: all of it) in every
+    /// solution that is not given its own ([`Solver::solve`] `k`): the
+    /// derotation of the premolars and molars is given up, as far as needed,
+    /// before any therapy makes room for it ([`setup`]).
+    k_base: Vec<f64>,
     /// The contact between the two sides of the arch (`j`: between `j` and
     /// `j + 1`) where the midline is held, both teeth free along the arch:
     /// each side makes its own room against it ([`Solver::chain`]).
@@ -1267,6 +1272,7 @@ impl Solver<'_> {
 
     fn solve(&self, l: &[DVec3], ipr: &[f64], extra: &[f64], k: Option<&[f64]>) -> Solved {
         let (n, cfg) = (self.n, self.cfg);
+        let k = k.or(Some(&self.k_base));
         let m = self.measure(l, k, false);
         let gap: Vec<f64> = (0..n - 1)
             .map(|i| (m.s0[i + 1] - m.wm[i + 1]) - (m.s0[i] + m.wp[i]) + self.gap_cal[i])
@@ -1793,6 +1799,7 @@ pub fn conservative_setup(
         gap_cal: vec![0.0; n - 1],
         rest_pair: vec![false; n - 1],
         n_base: Vec::new(),
+        k_base: vec![1.0; n],
         mid,
     };
 
@@ -1856,6 +1863,34 @@ pub fn conservative_setup(
             xe = 0.0;
             xp = 0.0;
             let mut ipr = vec![0.0; n - 1];
+            // no therapy for the derotation of a premolar or a molar: a molar turned 10
+            // degrees against a last molar that never goes distally needs about a millimetre,
+            // and it was taken with IPR from the contacts of the incisors (a real case: 1.2 mm
+            // of enamel for the derotation of 26). Their derotation is given up as far as the
+            // arch needs before anything else (the plugin's order with `plugin_spaces`)
+            sv.k_base = vec![1.0; n];
+            if !cfg.plugin_spaces && !sv.free(&sv.line_of(0.0, 0.0), &ipr, &extra) {
+                let post: Vec<usize> = (0..n)
+                    .filter(|&i| aligned[i] && need_rot[i] && !fx[i] && anatomy::index(seq[i]) >= 4)
+                    .collect();
+                if !post.is_empty() {
+                    let l0 = sv.line_of(0.0, 0.0);
+                    let v = bisect(
+                        |v| {
+                            for &i in &post {
+                                sv.k_base[i] = 1.0 - v;
+                            }
+                            sv.free(&l0, &ipr, &extra)
+                        },
+                        0.0,
+                        1.0,
+                        16,
+                    );
+                    for &i in &post {
+                        sv.k_base[i] = 1.0 - v;
+                    }
+                }
+            }
             for &m in &cfg.priority {
                 if sv.free(&sv.line_of(xe, xp), &ipr, &extra) {
                     break;
@@ -1905,7 +1940,7 @@ pub fn conservative_setup(
             if r.deficit > 1e-6 {
                 // space not enough even with the therapy: in every crowded stretch the teeth are
                 // derotated only as far as the space allows
-                let mut k = vec![1.0; n];
+                let mut k = sv.k_base.clone();
                 for sg in r.segs.clone() {
                     let lo = (sg.left + 1).max(0) as usize;
                     let hi = sg.right.min(n as i64) as usize;

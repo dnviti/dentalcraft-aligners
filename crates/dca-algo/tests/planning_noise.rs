@@ -125,7 +125,7 @@ const SEEDS: u64 = 32;
 /// Noisy plans of the six demo arches that still jump (of 384), with every
 /// tooth aligned: the measured count the user accepted on 2026-11-24 as a
 /// known debt (see the module documentation); the goal is about 5 % (21).
-const FAMILY_JUMPS_NOW: usize = 160;
+const FAMILY_JUMPS_NOW: usize = 121;
 /// Seeds of each family of noise at each last molar of the six demo arches.
 const FAMILY_SEEDS: u64 = 16;
 

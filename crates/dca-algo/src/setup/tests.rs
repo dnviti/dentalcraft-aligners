@@ -935,6 +935,30 @@ fn the_last_tooth_goes_distally_at_most_the_setting() {
 }
 
 #[test]
+fn no_enamel_is_removed_to_derotate_a_molar() {
+    // a first molar turned 20 degrees in an arch without spaces: turned back it is longer
+    // along the arch, and the last molar behind it never goes distally. Its derotation is
+    // given up as far as the arch needs; no IPR and no tooth pushed to make room for it
+    let mut a = make_arch(&Mal {
+        rot: vec![(46, 20.0)],
+        ..Mal::default()
+    });
+    // ... and 0.5 mm longer than the room it has
+    let c = mean(&a.cusps[&fdi(46)]);
+    let t = a.teeth.get_mut(&fdi(46)).unwrap();
+    t.width_md += 0.5;
+    t.contact_m = c + t.e_md * t.width_md / 2.0;
+    t.contact_d = c - t.e_md * t.width_md / 2.0;
+    let res = setup(&a, &Params::default().config(Arch::Lower));
+    assert!(res.ipr.is_empty(), "{:?}", res.ipr);
+    let along = mesial_moves(&a, &res);
+    for f in [41, 42, 43, 44, 45] {
+        assert!(along[&f].abs() < 0.1, "{f}: {:.2} mm", along[&f]);
+    }
+    assert!(res.midline_shift.abs() < 0.1, "{}", res.midline_shift);
+}
+
+#[test]
 fn the_midline_stays_where_it_is_when_a_space_closes() {
     // 1.2 mm between 44 and 43 only: the posterior teeth of that side close it, the central
     // incisors stay (the midline kept), the other side does not move
