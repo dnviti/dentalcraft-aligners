@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0-alpha.14](https://github.com/dnviti/dentalcraft-aligners/compare/v0.2.0-alpha.13...v0.2.0-alpha.14) (2026-11-28)
+
+
+### Features
+
+* list each collision the staging leaves, in the case and the report ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **model:** schema 3, the recess between the teeth takes effect (0 by default) ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **setup:** the largest distal movement of the last teeth, an advanced setting (0 by default) ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+
+
+### Bug Fixes
+
+* **bite:** one arch has no bite, nothing is estimated ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **deps:** move to core v0.3.0-alpha.10 ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **setup:** every tooth is aligned, the posterior teeth close the spaces, the midline stays and the last teeth never go distally ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **setup:** no IPR on an open contact and no therapy to derotate a premolar or a molar ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **shell:** the aligner goes straight from one crown to the next, never between the teeth or onto the papilla ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **staging:** limits on every path, collisions checked on every crown point and listed one by one ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **study:** study models and imported scans as clean solids, with a warning when they are not ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **teeth:** tunnels cut out of the 3D teeth, doubts of find-teeth shown, no tooth behind the last molars ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+* **trim:** the border straight at the equator of the teeth, clear of the gingiva and of the papillae ([c2cd4eb](https://github.com/dnviti/dentalcraft-aligners/commit/c2cd4eb2e6664485f1f7c2cdd85d0eb4b2fd962a))
+
 ## [0.2.0-alpha.13](https://github.com/dnviti/dentalcraft-aligners/compare/v0.2.0-alpha.12...v0.2.0-alpha.13) (2026-11-22)
 
 
