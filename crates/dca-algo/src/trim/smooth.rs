@@ -31,13 +31,10 @@ use crate::reconstruct::TAPER_RIM_MM;
 /// (along a vertical path the labial equator of a proclined incisor lies in
 /// the incisal third: the face would be left bare).
 pub const EQUATOR_CROWN_SHARE: f64 = 0.5;
-/// ... and over a papilla it rises this much (mm) above the straight line
-/// from one tooth to the next, in a bump of [`EQUATOR_PAPILLA_SIGMA_MM`]
-/// along the arch: the border follows the papilla a little, no more.
-pub const EQUATOR_PAPILLA_MM: f64 = 0.3;
-/// See [`EQUATOR_PAPILLA_MM`].
-pub const EQUATOR_PAPILLA_SIGMA_MM: f64 = 1.0;
-
+/// ... and never nearer than this (mm) to the gingival zenith of the tooth,
+/// whatever the margin gap (the user, 2026-11-28: the border was too near
+/// the gingiva; it stays clear of it, not wrapping it, not touching it).
+pub const EQUATOR_GUM_MM: f64 = 2.0;
 /// The control points along the arch every this many mm ...
 pub const SMOOTH_STEP_MM: f64 = 0.5;
 /// ... the line under the scallops: the margin smoothed along the arch
@@ -695,26 +692,34 @@ pub fn smooth_border_at(
                     let eq = median(&mut zs) - offset;
                     let high =
                         (zen + EQUATOR_CROWN_SHARE * (lp.top - zen)).min(lp.top - EQUATOR_TOP_MM);
-                    pts.push((sc, eq.min(high).max(zen + gap)));
+                    pts.push((sc, eq.min(high).max(zen + gap.max(EQUATOR_GUM_MM))));
                 }
                 pts.sort_by(|a, b| a.0.total_cmp(&b.0));
                 if pts.len() < 2 {
                     zb
                 } else {
+                    let (xs, hs): (Vec<f64>, Vec<f64>) = pts.iter().copied().unzip();
+                    // over every papilla the line passes at least `relief` above its
+                    // tip (the highest margin point of this side within
+                    // [`PAPILLA_TOP_MM`] of the contact): a knot
+                    // there, so the border rises to it from the middle of the two
+                    // teeth and never lies on the gingiva (the user, 2026-11-28: "not
+                    // wrapping it, not touching it")
+                    for &(sc, _) in &touch {
+                        let tip = (0..m.len())
+                            .filter(|&k| dm[k] * sign > 0.0 && (sm[k] - sc).abs() <= PAPILLA_TOP_MM)
+                            .map(|k| m[k].z)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        if tip.is_finite() {
+                            pts.push((sc, interp(sc, &xs, &hs).max(tip + relief)));
+                        }
+                    }
+                    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
                     let (xs, hs): (Vec<f64>, Vec<f64>) = pts.into_iter().unzip();
-                    let line: Vec<f64> = g
-                        .iter()
-                        .map(|&s| {
-                            let bump = touch.iter().fold(0.0f64, |b, &(sc, _)| {
-                                let t = (s - sc) / EQUATOR_PAPILLA_SIGMA_MM;
-                                b.max(EQUATOR_PAPILLA_MM * (-0.5 * t * t).exp())
-                            });
-                            let cap = touch.iter().fold(f64::INFINITY, |c, &(sc, zc)| {
-                                c.min(zc - PAPILLA_NECK_MM + soft_abs(s - sc, PAPILLA_CAP_ROUND_MM))
-                            });
-                            (interp(s, &xs, &hs) + bump).min(cap)
-                        })
-                        .collect();
+                    // no cap under the contacts here: the wall stands on the block-out of
+                    // the whole embrasure, and a cap drew the border down in a V towards
+                    // the papilla wherever two crowded incisors touch low
+                    let line: Vec<f64> = g.iter().map(|&s| interp(s, &xs, &hs)).collect();
                     let line = gauss_rows(&line, SMOOTH_WAVE_SIGMA_MM / step);
                     zb.iter()
                         .zip(&line)
